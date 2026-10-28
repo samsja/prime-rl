@@ -37,8 +37,7 @@ impl SavedEpisode for prl_wire::Episode {
     }
 
     fn task_hash(&self) -> String {
-        // Saved records always carry the task hash the orchestrator stamped at dispatch.
-        self.task.hash.clone().unwrap_or_default()
+        self.task.hash.clone().unwrap_or_else(|| self.task.content_hash())
     }
 
     fn set_group(&mut self, group_id: &str) {

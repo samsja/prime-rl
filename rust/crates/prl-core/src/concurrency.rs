@@ -40,19 +40,11 @@ pub const ESCALATION_GRACE_POLLS: i64 = 6;
 /// The growth gate expires this long after the poll that set it.
 pub const GROWTH_GATE_TTL: Duration = Duration::from_secs(15);
 
-/// Per-engine load facts for one `/metrics` poll.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EngineLoadSample {
-    pub engine_id: String,
-    pub role: Option<String>,
-    pub kv_capacity_tokens: Option<u64>,
-    pub max_model_len: Option<u64>,
-    pub kv_usage: f64,
-    pub running: u64,
-    pub waiting: u64,
-    /// Requests queued for KV capacity; None falls back to `waiting`.
-    pub waiting_capacity: Option<u64>,
-    pub preemptions_delta: u64,
+pub use prl_io::inference_metrics::EngineLoadSample;
+use prl_config::InferenceRole;
+
+fn is_prefill(sample: &EngineLoadSample) -> bool {
+    sample.role == Some(InferenceRole::Prefill)
 }
 
 /// Engine pressure, in increasing severity.
@@ -190,7 +182,7 @@ impl ConcurrencyController {
         }
         for sample in samples {
             if let Some(capacity) = sample.kv_capacity_tokens.filter(|c| *c > 0) {
-                if sample.role.as_deref() != Some("prefill") {
+                if !is_prefill(sample) {
                     self.capacity_by_engine.insert(sample.engine_id.clone(), capacity);
                 }
             }
@@ -200,7 +192,7 @@ impl ConcurrencyController {
         }
         // Overload signals read decode engines only.
         let samples: Vec<&EngineLoadSample> =
-            samples.iter().filter(|s| s.role.as_deref() != Some("prefill")).collect();
+            samples.iter().filter(|s| !is_prefill(s)).collect();
         if samples.is_empty() {
             return actions;
         }

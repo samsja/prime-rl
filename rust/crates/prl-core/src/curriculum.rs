@@ -277,7 +277,7 @@ impl Curriculum {
         let sampler = match &self.sampler {
             Sampler::Standard(s) => SamplerState::Standard { cursor: s.cursor },
             Sampler::DifficultyPool(s) => {
-                SamplerState::DifficultyPool { rng: s.rng.state(), task_rewards: s.task_rewards.clone() }
+                SamplerState::DifficultyPool { rng: Box::new(s.rng.state()), task_rewards: s.task_rewards.clone() }
             }
         };
         let gates = self.gates.keys().map(|k| (k.clone(), PyValue::dict::<String>([]))).collect();

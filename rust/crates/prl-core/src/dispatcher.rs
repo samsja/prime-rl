@@ -59,7 +59,7 @@ pub struct RunRequest {
     pub client: serde_json::Value,
     pub model: String,
     /// vf `SamplingConfig`, as dumped (with `cache_salt` when salted).
-    pub sampling: serde_json::Map<String, serde_json::Value>,
+    pub sampling: prl_wire::Map,
 }
 
 /// An env request that produced no episode (the Python exception).
@@ -98,7 +98,8 @@ pub struct DispatchEnv {
     pub name: String,
     pub group_size: usize,
     pub runner: Arc<dyn EnvRunner>,
-    pub sampling: serde_json::Map<String, serde_json::Value>,
+    /// vf `SamplingConfig` dump (`prl_wire::sampling`).
+    pub sampling: prl_wire::Map,
     pub client: serde_json::Value,
     /// Fixed model of a frozen generation source; None samples the live policy.
     pub frozen_model: Option<String>,
@@ -650,10 +651,10 @@ impl Dispatcher {
             (group.kind, group.env_name.clone(), group.task.clone(), group.step, group.policy_version_at_start);
         let env = self.env(kind, &env_name);
         let model = env.frozen_model.clone().unwrap_or_else(|| policy.model_name.clone());
-        let mut sampling = env.sampling.clone();
-        if env.live_sourced() && self.cfg.policy_weights_change {
-            sampling.insert("cache_salt".into(), format!("{}-{version}", self.cache_salt_prefix).into());
-        }
+        // Only endpoints receiving policy weight updates need a cache salt.
+        let salt = (env.live_sourced() && self.cfg.policy_weights_change)
+            .then(|| format!("{}-{version}", self.cache_salt_prefix));
+        let sampling = prl_wire::sampling::with_cache_salt(&env.sampling, salt.as_deref());
         let request = RunRequest { task_data: task.data.clone(), client: env.client.clone(), model, sampling };
         let runner = env.runner.clone();
         let sessions = env.sessions.clone();
@@ -1277,7 +1278,7 @@ mod tests {
             name: name.into(),
             group_size,
             runner: Arc::new(FakeRunner(calls.clone())),
-            sampling: serde_json::Map::new(),
+            sampling: prl_wire::Map::new(),
             client: serde_json::json!({"base_url": "http://x"}),
             frozen_model: frozen.map(String::from),
             sessions: Arc::new(NoSessions),
