@@ -66,7 +66,8 @@ pub struct EvalPipeline {
     progress: watch::Sender<EvalProgress>,
 }
 
-fn eval_step(episode: &Episode) -> Result<u64> {
+/// The step an eval episode was dispatched for (its run provenance).
+pub fn eval_step(episode: &Episode) -> Result<u64> {
     let Some(run) = &episode.run else { bail!("Dispatched episode is missing run identity") };
     let RunInfo::Train(run) = run else { bail!("Orchestrated episode is missing training-run provenance") };
     Ok(run.work.step() as u64)
