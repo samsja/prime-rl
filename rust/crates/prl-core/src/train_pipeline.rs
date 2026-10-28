@@ -217,9 +217,13 @@ impl TrainPipeline {
         // Anchor the step-time clock so the first step measures startup -> first batch.
         self.last_batch_at = Instant::now();
         let submitted = self.controller.as_ref().map(Controller::submitted);
+        // The view walks the pending batch: refresh it on a tick, not per result.
+        let mut view_tick = tokio::time::interval(Duration::from_secs(1));
+        view_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
+                _ = view_tick.tick() => self.publish_view(),
                 Some(cmd) = cmd_rx.recv() => match cmd {
                     Command::FinalState { reply } => {
                         let _ = reply.send(self.final_state().await);
@@ -249,7 +253,6 @@ impl TrainPipeline {
                         return Ok(());
                     };
                     self.handle(result, &cancel).await?;
-                    self.publish_view();
                 }
             }
         }
