@@ -1020,6 +1020,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "prl-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "prl-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "prl-io"
 version = "0.1.0"
 dependencies = [
