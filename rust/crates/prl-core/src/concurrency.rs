@@ -6,7 +6,11 @@
 
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
 use prl_types::Metrics;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 /// Cap growth per pipeline turnover at zero GPU-KV utilization.
@@ -375,6 +379,126 @@ pub fn format_num(num: f64, precision: usize, is_float: bool) -> String {
     format!("{sign}{value:.precision$}{suffix}")
 }
 
+// ── actor ──────────────────────────────────────────────────────────────────
+
+/// Point-in-time view for the eval control API (`GET/PUT /v1/concurrency`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ConcurrencyState {
+    pub target: Option<usize>,
+    pub cap: usize,
+    pub inflight: usize,
+}
+
+enum Command {
+    Episode { tokens: u64, inflight: usize },
+    SetTarget { target: Option<usize>, reply: oneshot::Sender<ConcurrencyState> },
+    Get { reply: oneshot::Sender<ConcurrencyState> },
+    Gauges { reply: oneshot::Sender<Metrics> },
+}
+
+/// Handle onto the concurrency actor. Cloned by the dispatcher (completions), the pipeline
+/// view (gauges) and the eval control API.
+#[derive(Clone)]
+pub struct ConcurrencyHandle {
+    tx: mpsc::UnboundedSender<Command>,
+}
+
+impl ConcurrencyHandle {
+    /// One completed unit; `inflight` is the dispatcher's count after releasing its permit.
+    pub fn record_episode(&self, tokens: u64, inflight: usize) {
+        let _ = self.tx.send(Command::Episode { tokens, inflight });
+    }
+
+    pub async fn set_target(&self, target: Option<usize>) -> Result<ConcurrencyState> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::SetTarget { target, reply }).map_err(|_| anyhow::anyhow!("concurrency actor stopped"))?;
+        Ok(rx.await?)
+    }
+
+    pub async fn get(&self) -> Result<ConcurrencyState> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::Get { reply }).map_err(|_| anyhow::anyhow!("concurrency actor stopped"))?;
+        Ok(rx.await?)
+    }
+
+    pub async fn gauges(&self) -> Result<Metrics> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::Gauges { reply }).map_err(|_| anyhow::anyhow!("concurrency actor stopped"))?;
+        Ok(rx.await?)
+    }
+}
+
+/// Wiring of the concurrency actor.
+pub struct ConcurrencyIo {
+    /// Engine load polls from the inference metrics collector.
+    pub samples: mpsc::Receiver<Vec<EngineLoadSample>>,
+    /// The dispatcher's in-flight count.
+    pub inflight: watch::Receiver<usize>,
+    /// The dispatcher's in-flight cap (single writer: this actor).
+    pub limit: watch::Sender<usize>,
+    /// Overload excess to cancel; None never cancels (eval: a cut only blocks admission).
+    pub overload: Option<mpsc::UnboundedSender<usize>>,
+}
+
+impl ConcurrencyController {
+    /// Run the controller as an actor until `cancel` fires or every input closes.
+    pub fn spawn(mut self, io: ConcurrencyIo, cancel: CancellationToken) -> (ConcurrencyHandle, JoinHandle<Result<()>>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let ConcurrencyIo { mut samples, inflight, limit, overload } = io;
+        limit.send_replace(self.max_inflight);
+        let task = tokio::spawn(async move {
+            let apply = |actions: Vec<Action>| {
+                for action in actions {
+                    match action {
+                        Action::SetLimit(n) => {
+                            limit.send_replace(n);
+                        }
+                        Action::Overload(n) => {
+                            if let Some(overload) = &overload {
+                                let _ = overload.send(n);
+                            }
+                        }
+                    }
+                }
+            };
+            let mut samples_open = true;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    batch = samples.recv(), if samples_open => match batch {
+                        Some(batch) => {
+                            let n = *inflight.borrow();
+                            apply(self.observe(&batch, n));
+                        }
+                        None => samples_open = false,
+                    },
+                    cmd = rx.recv() => {
+                        let Some(cmd) = cmd else { return Ok(()) };
+                        match cmd {
+                            Command::Episode { tokens, inflight } => apply(self.record_episode(tokens, inflight)),
+                            Command::SetTarget { target, reply } => {
+                                apply(self.set_target(target));
+                                let _ = reply.send(self.state(*inflight.borrow()));
+                            }
+                            Command::Get { reply } => {
+                                let _ = reply.send(self.state(*inflight.borrow()));
+                            }
+                            Command::Gauges { reply } => {
+                                let _ = reply.send(self.gauges());
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        (ConcurrencyHandle { tx }, task)
+    }
+
+    fn state(&self, inflight: usize) -> ConcurrencyState {
+        ConcurrencyState { target: self.target, cap: self.max_inflight, inflight }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +617,28 @@ mod tests {
         let hard = EngineLoadSample { kv_usage: 0.95, preemptions_delta: 0, ..preempted() };
         let a = c.observe(&[hard], 1000);
         assert_eq!(a, vec![Action::SetLimit(736), Action::Overload(264)]);
+    }
+
+    #[tokio::test]
+    async fn actor_applies_limits_and_overload() {
+        let (samples_tx, samples) = mpsc::channel(4);
+        let (_inflight_tx, inflight) = watch::channel(INFLIGHT);
+        let (limit, mut limit_rx) = watch::channel(0);
+        let (overload_tx, mut overload_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let (handle, task) = controller().spawn(
+            ConcurrencyIo { samples, inflight, limit, overload: Some(overload_tx) },
+            cancel.clone(),
+        );
+        assert_eq!(*limit_rx.borrow_and_update(), 2000);
+        samples_tx.send(vec![preempted()]).await.unwrap();
+        assert_eq!(overload_rx.recv().await, Some(360));
+        assert_eq!(*limit_rx.borrow(), 1440);
+        let state = handle.set_target(Some(100)).await.unwrap();
+        assert_eq!(state, ConcurrencyState { target: Some(100), cap: 100, inflight: INFLIGHT });
+        assert_eq!(handle.gauges().await.unwrap()["concurrency/max_inflight"], 100.0.into());
+        cancel.cancel();
+        task.await.unwrap().unwrap();
     }
 
     #[test]
