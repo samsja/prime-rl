@@ -352,6 +352,7 @@ def main() -> None:
                 "batch_size": args.batch_size,
                 "group_size": args.group_size,
                 "env": args.env,
+                "file_monitor": not args.no_file_monitor,
                 "env_latency_ms": args.env_latency_ms if args.env == "fake" else None,
                 "env_replicas": args.env_replicas,
                 "env_workers": args.env_workers,

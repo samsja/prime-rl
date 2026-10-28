@@ -9,7 +9,9 @@ from pathlib import Path
 
 
 def envcol(r: dict) -> str:
-    return f"fake {r['env_latency_ms']} ms" if r.get("env") == "fake" else "real"
+    env = f"fake {r['env_latency_ms']} ms" if r.get("env") == "fake" else "real"
+    no_monitor = r.get("file_monitor") is False or r["name"].endswith("-nomon")
+    return f"{env}, no file monitor" if no_monitor else env
 
 
 def main() -> None:
