@@ -764,15 +764,35 @@ impl Orchestrator {
         tokio::select! {
             r = idle.wait_for(|idle| *idle) => {
                 r.map_err(|_| anyhow!("dispatcher stopped"))?;
-                info!("Pipeline drained, exiting main loop");
-                Ok(())
             }
             failure = next_failure(tasks) => {
                 log_failure(&failure);
-                Err(failure.1.unwrap_err_or_exit(failure.0))
+                return Err(failure.1.unwrap_err_or_exit(failure.0));
             }
             _ = shutdown.cancelled() => bail!("interrupted"),
         }
+        // Nothing is in flight and no eval work remains: stop the dispatcher so the sinks see
+        // their result channels close, and let the eval pipeline consume what it was handed.
+        self.dispatcher.stop().await?;
+        let mut pending: Vec<&str> = vec!["dispatcher"];
+        if self.view.eval.is_some() {
+            pending.push("eval_pipeline");
+        }
+        while !pending.is_empty() {
+            let exited = tokio::select! {
+                exited = next_failure(tasks) => exited,
+                _ = shutdown.cancelled() => bail!("interrupted"),
+            };
+            match exited {
+                (name, Ok(())) if pending.contains(&name) => pending.retain(|n| *n != name),
+                failure => {
+                    log_failure(&failure);
+                    return Err(failure.1.unwrap_err_or_exit(failure.0));
+                }
+            }
+        }
+        info!("Pipeline drained, exiting main loop");
+        Ok(())
     }
 
     /// Bounded teardown of every component (`stop`).
