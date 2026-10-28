@@ -337,7 +337,6 @@ pub struct Dispatcher {
     idle_tx: watch::Sender<bool>,
 
     max_inflight: usize,
-    current_inflight: usize,
     rate_limiter: Option<RateLimiter>,
     admission_window_start: Instant,
     admissions_in_window: usize,
@@ -412,7 +411,6 @@ impl Dispatcher {
             live_sink: io.live,
             idle_tx: io.idle,
             max_inflight,
-            current_inflight: 0,
             admission_window_start: Instant::now(),
             admissions_in_window: 0,
             min_burst,
@@ -516,13 +514,6 @@ impl Dispatcher {
         burst_cap as i64 - self.admissions_in_window as i64
     }
 
-    fn release_permit(&mut self, refund_admission: bool) {
-        self.current_inflight -= 1;
-        if refund_admission {
-            self.admissions_in_window = self.admissions_in_window.saturating_sub(1);
-        }
-    }
-
     fn arm_wake(&mut self, at: Instant) {
         self.wake_at = Some(self.wake_at.map_or(at, |w| w.min(at)));
     }
@@ -546,7 +537,7 @@ impl Dispatcher {
                 return Ok(());
             }
             let now = Instant::now();
-            if self.max_inflight <= self.current_inflight {
+            if self.max_inflight <= self.inflight.len() {
                 return Ok(());
             }
             if self.admission_budget(now) <= 0 {
@@ -639,7 +630,6 @@ impl Dispatcher {
         let sessions = env.sessions.clone();
 
         self.groups[gid].episodes_to_schedule -= 1;
-        self.current_inflight += 1;
         self.admissions_in_window += 1;
 
         let slot = self.next_slot;
@@ -685,7 +675,7 @@ impl Dispatcher {
                 sessions,
             },
         );
-        self.inflight_tx.send_replace(self.current_inflight);
+        self.inflight_tx.send_replace(self.inflight.len());
         Ok(Scheduled::Yes)
     }
 
@@ -791,8 +781,9 @@ impl Dispatcher {
             return Ok(());
         };
         self.retire(&meta, result.as_ref().ok());
-        self.release_permit(true);
-        self.inflight_tx.send_replace(self.current_inflight);
+        // A natural completion refunds one admission (cancellations do not).
+        self.admissions_in_window = self.admissions_in_window.saturating_sub(1);
+        self.inflight_tx.send_replace(self.inflight.len());
         let (gid, env) = (meta.group_id.as_str(), meta.env_name.as_str());
         let mut episode = match result {
             Err(error) => {
@@ -849,7 +840,7 @@ impl Dispatcher {
             warn!("Episode failed in group {gid} ({env}){detail}");
         }
         if let Some(concurrency) = &self.concurrency {
-            concurrency.record_episode(episode.num_total_tokens().max(0) as u64, self.current_inflight);
+            concurrency.record_episode(episode.num_total_tokens().max(0) as u64, self.inflight.len());
         }
         self.emit_episode(&meta, episode)
     }
@@ -900,12 +891,11 @@ impl Dispatcher {
         let mut claimed = Vec::with_capacity(slots.len());
         for slot in slots {
             let meta = self.inflight.shift_remove(&slot).expect("claimed slot");
-            self.release_permit(false);
             self.retire(&meta, None);
             self.claim(&meta);
             claimed.push(meta);
         }
-        self.inflight_tx.send_replace(self.current_inflight);
+        self.inflight_tx.send_replace(self.inflight.len());
         let inflight_cancelled = claimed.len();
         let unscheduled = group.as_ref().map_or(0, |g| g.episodes_to_schedule);
         let cancelled = inflight_cancelled + unscheduled;
@@ -986,7 +976,6 @@ impl Dispatcher {
             self.inflight.iter().filter(|(_, m)| m.kind == Kind::Train).map(|(s, _)| *s).collect();
         for slot in slots {
             let meta = self.inflight.shift_remove(&slot).expect("train slot");
-            self.release_permit(false);
             self.retire(&meta, None);
             self.claim(&meta);
             self.counters.record_cancellation(Kind::Train, &meta.env_name, 1);
@@ -1002,7 +991,7 @@ impl Dispatcher {
                 })
                 .count += 1;
         }
-        self.inflight_tx.send_replace(self.current_inflight);
+        self.inflight_tx.send_replace(self.inflight.len());
         by_group.into_values().filter(|c| c.count > 0).collect()
     }
 
@@ -1038,12 +1027,11 @@ impl Dispatcher {
         for slot in slots {
             let meta = self.inflight.shift_remove(&slot).expect("slot");
             self.counters.record_cancellation(meta.kind, &meta.env_name, 1);
-            self.release_permit(false);
             self.retire(&meta, None);
             self.claim(&meta);
         }
         self.groups.clear();
-        self.inflight_tx.send_replace(self.current_inflight);
+        self.inflight_tx.send_replace(self.inflight.len());
     }
 
     fn view(&mut self) -> DispatcherView {
