@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::algorithm::AlgoConfig;
 use crate::monitors::TrainMonitorsConfig;
-use crate::py::{model_dump, str_enum, tag, to_json, unknown_tag};
+use crate::py::{model_dump, model_dump_exclude_none, str_enum, tag, to_json, unknown_tag};
 use crate::shared::{
     CheckpointConfig, ControlConfig, GCConfig, HeartbeatConfig, LogConfig, ModelConfig,
     ResumeConfig, TokenizerConfig, TransportConfig, WeightBroadcastConfig,
@@ -223,6 +223,9 @@ pub struct OrchestratorConfig {
     pub any_policy_sourced: bool,
     /// The whole config as `model_dump(mode="json")`: the run config monitors upload.
     pub dump: Value,
+    /// The whole config as `model_dump(exclude_none=True, mode="json")`: the run config the
+    /// prime monitor registers.
+    pub prime_run_config: Value,
 }
 
 impl OrchestratorConfig {
@@ -267,6 +270,7 @@ impl<'py> FromPyObject<'py> for OrchestratorConfig {
             env_addresses: attr("env_addresses")?.extract()?,
             any_policy_sourced: attr("any_policy_sourced")?.extract()?,
             dump: model_dump(obj)?,
+            prime_run_config: model_dump_exclude_none(obj)?,
         })
     }
 }

@@ -172,7 +172,13 @@ fn extracts_every_config() {
         assert_eq!(eval.source[0].sampling["top_k"], 20);
         assert_eq!(eval.source[1].sampling["top_k"], -1);
 
+        assert_eq!(
+            a.dump["heartbeat"]["url"],
+            a.prime_run_config["heartbeat"]["url"]
+        );
         let b = by_name(&configs, "tools/extra/orchestrator_b.toml");
+        assert!(b.dump["heartbeat"].is_null());
+        assert!(b.prime_run_config.get("heartbeat").is_none());
         assert_eq!(b.weight_broadcast.tag(), "nixl");
         assert_eq!(b.concurrency.max_inflight, None);
         assert_eq!(b.monitors.file, None);

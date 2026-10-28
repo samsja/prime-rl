@@ -12,6 +12,15 @@ pub(crate) fn model_dump(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     to_json(&obj.call_method("model_dump", (), Some(&kwargs))?)
 }
 
+/// `obj.model_dump(exclude_none=True, mode="json")`: drops None-valued model fields (not
+/// None dict entries), as the prime monitor registers the run.
+pub(crate) fn model_dump_exclude_none(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let kwargs = PyDict::new(obj.py());
+    kwargs.set_item("mode", "json")?;
+    kwargs.set_item("exclude_none", true)?;
+    to_json(&obj.call_method("model_dump", (), Some(&kwargs))?)
+}
+
 /// A plain JSON-able Python value (dict, list, str, number, bool, None) as a JSON value.
 pub(crate) fn to_json(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     pythonize::depythonize(obj).map_err(|e| PyValueError::new_err(e.to_string()))

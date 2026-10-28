@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::monitors::{FileMonitorConfig, WandbMonitorConfig};
 use crate::orchestrator::{ConcurrencyConfig, OnlineEvalSourceConfig, Split};
-use crate::py::model_dump;
+use crate::py::{model_dump, model_dump_exclude_none};
 use crate::shared::{
     ClientConfig, ControlConfig, HeartbeatConfig, LogConfig, WeightBroadcastConfig,
 };
@@ -104,6 +104,8 @@ pub struct EvalConfig {
     pub monitors: EvalMonitorsConfig,
     /// The whole config as `model_dump(mode="json")`: the run config monitors upload.
     pub dump: Value,
+    /// `model_dump(exclude_none=True, mode="json")`: the run config the prime monitor registers.
+    pub prime_run_config: Value,
 }
 
 impl EvalConfig {
@@ -126,6 +128,7 @@ impl<'py> FromPyObject<'py> for EvalConfig {
             log: attr("log")?.extract()?,
             monitors: attr("monitors")?.extract()?,
             dump: model_dump(obj)?,
+            prime_run_config: model_dump_exclude_none(obj)?,
         })
     }
 }
@@ -155,6 +158,8 @@ pub struct SFTOnlineEvalConfig {
     pub monitors: EvalMonitorsConfig,
     /// The whole config as `model_dump(mode="json")`.
     pub dump: Value,
+    /// `model_dump(exclude_none=True, mode="json")`: the run config the prime monitor registers.
+    pub prime_run_config: Value,
 }
 
 impl SFTOnlineEvalConfig {
@@ -182,6 +187,7 @@ impl<'py> FromPyObject<'py> for SFTOnlineEvalConfig {
             log: attr("log")?.extract()?,
             monitors: attr("monitors")?.extract()?,
             dump: model_dump(obj)?,
+            prime_run_config: model_dump_exclude_none(obj)?,
         })
     }
 }

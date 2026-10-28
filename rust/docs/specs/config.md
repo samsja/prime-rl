@@ -61,7 +61,8 @@ single line, so core keeps it.
 | `OnlineEvalSourceConfig.sampling` | `verifiers.v1.SamplingConfig` (`extra="allow"`). Sent to the env server unchanged (`EvalEnv.sampling = config.sampling`). |
 | `TrainSamplingConfig.extra_body` | `dict[str, Any]`. |
 | `EchoFilterConfig.kwargs` | `dict[str, Any]` passed to a Python callable. |
-| `OrchestratorConfig.dump` | The whole config, as the monitors' `run_config` (wandb config, platform). |
+| `OrchestratorConfig.dump` | The whole config, as the monitors' `run_config` (wandb config). |
+| `OrchestratorConfig.prime_run_config` (also on `EvalConfig`, `SFTOnlineEvalConfig`) | `model_dump(exclude_none=True, mode="json")`, the run config the prime monitor registers. `exclude_none` drops None model fields but not None dict entries, so it can't be derived from `dump`. |
 
 Not extracted:
 
