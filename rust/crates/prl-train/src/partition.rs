@@ -169,32 +169,23 @@ fn refine_by_swapping(weights: &[i128], mut partitions: Vec<Vec<usize>>) -> Vec<
                 let other_max = others.clone().max().unwrap_or(i128::MIN);
                 let other_min = others.min().unwrap_or(i128::MAX);
                 let (rel_l, rel_r) = (relative[left], relative[right]);
-                let new_max = |wl: i128, wr: i128| (rel_l - wl + wr).max(rel_r - wr + wl).max(other_max);
-                let mut lowest_max = i128::MAX;
-                for &li in &partitions[left] {
-                    for &ri in &partitions[right] {
-                        lowest_max = lowest_max.min(new_max(weights[li], weights[ri]));
-                    }
-                }
-                if lowest_max > best_score.0 {
-                    continue;
-                }
-                let mut best_here: Option<(i128, usize, usize)> = None;
+                // Lowest new max load, then lowest spread among those; ties keep the first position.
+                let mut best_here = (i128::MAX, i128::MAX, 0, 0);
                 for (lp, &li) in partitions[left].iter().enumerate() {
                     for (rp, &ri) in partitions[right].iter().enumerate() {
                         let (wl, wr) = (weights[li], weights[ri]);
                         let (a, b) = (rel_l - wl + wr, rel_r - wr + wl);
                         let max = a.max(b).max(other_max);
-                        if max != lowest_max {
-                            continue;
-                        }
                         let spread = max - a.min(b).min(other_min);
-                        if best_here.is_none_or(|(s, _, _)| spread < s) {
-                            best_here = Some((spread, lp, rp));
+                        if (max, spread) < (best_here.0, best_here.1) {
+                            best_here = (max, spread, lp, rp);
                         }
                     }
                 }
-                let (spread, lp, rp) = best_here.unwrap();
+                let (lowest_max, spread, lp, rp) = best_here;
+                if lowest_max > best_score.0 {
+                    continue;
+                }
                 let score = (lowest_max, spread);
                 if score < best_score {
                     best_score = score;
