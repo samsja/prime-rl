@@ -210,14 +210,18 @@ fn trace_snapshot(records: &[TraceRecord<'_>], prefix: &str, subset: Subset) -> 
         out.rate(format!("{prefix}/{name}"), [("mean", values(records, |t| f(value(t))).iter().sum())], n);
     }
 
-    let phases = ["setup", "agent", "finalize", "scoring"];
-    let phase = |t: &Trace, p: &str| t.timing.phase(p).map_or(0.0, |s| s.duration());
-    for p in phases {
-        out.distribution(format!("{prefix}/timing/{p}"), &values(records, |t| phase(t, p)));
+    let phases: [(&str, fn(&Trace) -> f64); 4] = [
+        ("setup", |t| t.timing.setup.duration()),
+        ("agent", |t| t.timing.agent.duration()),
+        ("finalize", |t| t.timing.finalize.duration()),
+        ("scoring", |t| t.timing.scoring.duration()),
+    ];
+    for (name, phase) in phases {
+        out.distribution(format!("{prefix}/timing/{name}"), &values(records, phase));
     }
     out.distribution(format!("{prefix}/timing/agent/model"), &values(records, |t| t.timing.agent.model.duration));
     out.distribution(format!("{prefix}/timing/agent/harness"), &values(records, |t| t.timing.agent.harness.duration));
-    out.distribution(format!("{prefix}/timing/total"), &values(records, |t| phases.iter().map(|p| phase(t, p)).sum()));
+    out.distribution(format!("{prefix}/timing/total"), &values(records, |t| phases.iter().map(|(_, phase)| phase(t)).sum()));
 
     // Named metrics / rewards: a trace without the name is skipped, an unscored one reads 0.0.
     let mut names: Vec<&str> = records.iter().flat_map(|r| r.trace.metrics.keys().map(String::as_str)).collect();

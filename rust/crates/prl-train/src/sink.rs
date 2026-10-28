@@ -31,16 +31,6 @@ pub trait Admission: Send {
     async fn admit(&mut self, group: &[Episode]) -> Result<bool>;
 }
 
-/// Admits every group (no curriculum).
-pub struct AdmitAll;
-
-#[async_trait]
-impl Admission for AdmitAll {
-    async fn admit(&mut self, _group: &[Episode]) -> Result<bool> {
-        Ok(true)
-    }
-}
-
 /// Frees env-server arrays of samples and traces that will never ship.
 #[derive(Clone)]
 pub struct PayloadReleaser(Arc<dyn Fn(Vec<String>) + Send + Sync>);
@@ -54,13 +44,6 @@ impl PayloadReleaser {
         if !urls.is_empty() {
             (self.0)(urls);
         }
-    }
-}
-
-impl Default for PayloadReleaser {
-    /// Fire-and-forget HTTP DELETEs (`delete_payloads`).
-    fn default() -> Self {
-        Self::new(prl_wire::payload::delete_payloads)
     }
 }
 
@@ -89,31 +72,33 @@ pub struct TrainBatch {
 /// Remove zero-advantage tokens from the RL component; false when the sample has no loss left.
 pub fn prune_zero_advantages(sample: &mut TrainingSample) -> Result<bool> {
     let Some(advantages) = &sample.advantages else { return Ok(true) };
-    let rl_weights: Vec<f32> = match &sample.rl_weights {
-        Some(w) => w.clone(),
-        None => sample.mask.iter().map(|&m| if m { 1.0 } else { 0.0 }).collect(),
-    };
+    let mut rl_weights = sample.rl_weights.clone().unwrap_or_else(|| sample.mask.iter().map(|&m| f32::from(u8::from(m))).collect());
     if !(sample.mask.len() == advantages.len() && advantages.len() == rl_weights.len()) {
-        bail!(
-            "mask, advantages and rl_weights must align: {}, {}, {}",
-            sample.mask.len(),
-            advantages.len(),
-            rl_weights.len()
-        );
+        bail!("mask, advantages and rl_weights must align: {}, {}, {}", sample.mask.len(), advantages.len(), rl_weights.len());
     }
-    let pruned: Vec<bool> =
-        (0..rl_weights.len()).map(|i| sample.mask[i] && advantages[i] == 0.0 && rl_weights[i] != 0.0).collect();
-    if !pruned.iter().any(|&p| p) {
-        return Ok(true);
-    }
-    let mut rl_weights = rl_weights;
-    for (w, p) in rl_weights.iter_mut().zip(pruned) {
-        if p {
+    let mut pruned = false;
+    for ((w, &m), &a) in rl_weights.iter_mut().zip(&sample.mask).zip(advantages) {
+        if m && a == 0.0 && *w != 0.0 {
             *w = 0.0;
+            pruned = true;
         }
+    }
+    if !pruned {
+        return Ok(true);
     }
     sample.rl_weights = Some(rl_weights);
     Ok(has_loss(sample))
+}
+
+/// The samples that keep a loss after zero-advantage pruning.
+fn prune(samples: Vec<TrainingSample>) -> Result<Vec<TrainingSample>> {
+    let mut kept = Vec::new();
+    for mut sample in samples {
+        if prune_zero_advantages(&mut sample)? {
+            kept.push(sample);
+        }
+    }
+    Ok(kept)
 }
 
 pub fn has_loss(sample: &TrainingSample) -> bool {
@@ -161,14 +146,6 @@ impl TrainSink {
         }
     }
 
-    /// Connect every env's algorithm resources.
-    pub async fn setup(&mut self) -> Result<()> {
-        for env in self.envs.values_mut() {
-            env.algorithm.setup().await?;
-        }
-        Ok(())
-    }
-
     /// Delete the env-server arrays of samples that will never ship.
     pub fn release_samples(&self, samples: &[TrainingSample]) {
         self.payloads.release(sample_payload_urls(samples));
@@ -207,22 +184,14 @@ impl TrainSink {
         let env = self.envs.get_mut(&env_name).ok_or_else(|| anyhow!("unknown train env {env_name:?}"))?;
         env.algorithm.finalize_episode(&mut episode).await?;
         self.pending_groups.entry(group_id.clone()).or_default().push(episode);
-        if !self.group_complete(&group_id, &env_name)? {
-            return Ok(None);
-        }
-        self.process_group(&group_id, step, admission).await?;
-        self.take_batch(step).await
+        self.finish_if_complete(&group_id, &env_name, step, admission).await
     }
 
     /// A dropped group's terminal marker; a `shutdown` drop voids the group's arrived episodes.
     pub async fn cancel(&mut self, cancellation: GroupCancellation, step: u64, admission: &mut dyn Admission) -> Result<Option<TrainBatch>> {
         let (group_id, env_name) = (cancellation.group_id.clone(), cancellation.env_name.clone());
         self.pending_group_cancellations.insert(group_id.clone(), cancellation);
-        if !self.group_complete(&group_id, &env_name)? {
-            return Ok(None);
-        }
-        self.process_group(&group_id, step, admission).await?;
-        self.take_batch(step).await
+        self.finish_if_complete(&group_id, &env_name, step, admission).await
     }
 
     /// Count a request failure toward its group without presenting it as an episode.
@@ -232,18 +201,20 @@ impl TrainSink {
         }
         let (group_id, env_name) = (failure.group_id.clone(), failure.env_name.clone());
         self.pending_group_failures.entry(group_id.clone()).or_default().push(failure);
-        if !self.group_complete(&group_id, &env_name)? {
-            return Ok(None);
-        }
-        self.process_group(&group_id, step, admission).await?;
-        self.take_batch(step).await
+        self.finish_if_complete(&group_id, &env_name, step, admission).await
     }
 
-    fn group_complete(&self, group_id: &str, env_name: &str) -> Result<bool> {
+    /// Once arrivals + failures + cancelled cover the env's group size, finalize the group and
+    /// try to cut a batch.
+    async fn finish_if_complete(&mut self, group_id: &str, env_name: &str, step: u64, admission: &mut dyn Admission) -> Result<Option<TrainBatch>> {
         let cancelled = self.pending_group_cancellations.get(group_id).map_or(0, |c| c.count);
         let failed = self.pending_group_failures.get(group_id).map_or(0, Vec::len);
         let arrived = self.pending_groups.get(group_id).map_or(0, Vec::len);
-        Ok(arrived + failed + cancelled >= self.env(env_name)?.group_size)
+        if arrived + failed + cancelled < self.env(env_name)?.group_size {
+            return Ok(None);
+        }
+        self.process_group(group_id, step, admission).await?;
+        self.take_batch(step).await
     }
 
     /// Sweep stale queued traces, then cut a batch if the survivors still meet the threshold.
@@ -413,13 +384,7 @@ it requires vLLM's native sampling-mask capture (>= 0.28). {KEEP_ARRAYS_HINT}"
                     stamp_loss_routing(sample, action_loss_type);
                 }
                 if constant {
-                    let mut kept = Vec::new();
-                    for mut sample in samples {
-                        if prune_zero_advantages(&mut sample)? {
-                            kept.push(sample);
-                        }
-                    }
-                    samples = kept;
+                    samples = prune(samples)?;
                 }
                 if !samples.is_empty() {
                     out.push((trace.id.clone(), samples));
@@ -539,17 +504,7 @@ it requires vLLM's native sampling-mask capture (>= 0.28). {KEEP_ARRAYS_HINT}"
         let (shipped, kept, masked) = tokio::task::spawn_blocking(move || -> Result<_> {
             let mut shipped: Vec<(String, EpisodeRef, Vec<TrainingSample>)> = Vec::new();
             for (id, episode, samples) in jobs {
-                let samples = if constant {
-                    samples
-                } else {
-                    let mut kept = Vec::new();
-                    for mut sample in samples {
-                        if prune_zero_advantages(&mut sample)? {
-                            kept.push(sample);
-                        }
-                    }
-                    kept
-                };
+                let samples = if constant { samples } else { prune(samples)? };
                 if !samples.is_empty() {
                     shipped.push((id, episode, samples));
                 }
