@@ -111,6 +111,33 @@ def streams() -> None:
     (OUT / "resume_expected.json").write_text(json.dumps(expected, indent=2))
 
 
+def validation_cases() -> None:
+    """test_resume_validates_saved_episodes: a record without traces, then the record itself."""
+    config = EvalConfig(source=[{"env": {"id": "single_agent"}}])
+    cases = []
+    for ok in [True, False]:
+        for traces in [[], None, [{}]]:
+            record = {**record_("math", "m0", ok=ok), "id": "saved", "traces": traces}
+            lines = [orjson.dumps({k: v for k, v in record.items() if k != "traces"}), orjson.dumps(record)]
+            tmp = Path(tempfile.mkdtemp())
+            resume.stamp_config(tmp, config.model_dump(mode="json"))
+            stream = ChunkedJsonl(get_trace_stream(tmp), max_bytes=1 << 20, compress=False)
+            for line in lines:
+                stream.append(line + b"\n")
+            stream.close()
+            try:
+                landed = [episode.id for episode in resume.take_landed(tmp, config)]
+            except Exception as e:
+                landed = None
+            cases.append({"lines": [line.decode() for line in lines], "landed": landed})
+            shutil.rmtree(tmp)
+    (OUT / "resume_validation_cases.json").write_text(json.dumps({"config": config.model_dump(mode="json"), "cases": cases}, indent=1))
+
+
+record_ = record
+
+
 if __name__ == "__main__":
+    validation_cases()
     (OUT / "resume_config_cases.json").write_text(json.dumps(config_cases(), indent=1))
     streams()

@@ -218,3 +218,13 @@ pub fn take_landed<E>(
     }
     Ok(landed)
 }
+
+/// [`take_landed`] over wire episodes (`vf.WireEpisode.model_validate(record)`).
+pub fn take_landed_episodes(run_dir: &Path, config: &Value, skip_checks: bool) -> Result<Vec<prl_wire::Episode>> {
+    take_landed(run_dir, config, skip_checks, |line| {
+        let episode = prl_wire::Episode::from_record_json(line)
+            .map_err(|e| anyhow::anyhow!("invalid saved episode at {}: {}", e.path, e.message))?;
+        let ok = episode.ok;
+        Ok((episode, ok))
+    })
+}

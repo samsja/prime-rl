@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use prl_eval::resume::{archives, read_records, stamp_config, take_landed, to_orjson_indent2};
+use prl_eval::resume::{archives, read_records, stamp_config, take_landed, take_landed_episodes, to_orjson_indent2};
 use serde_json::Value;
 
 fn fixtures() -> PathBuf {
@@ -115,6 +115,31 @@ fn missing_saved_config_needs_skip_checks() {
         } else {
             assert!(result.unwrap_err().to_string().contains("no saved config"));
             assert!(archives(dir.path()).unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn saved_episodes_are_validated_like_python() {
+    let fixture = load("resume_validation_cases.json");
+    for case in fixture["cases"].as_array().unwrap() {
+        let dir = tempfile::tempdir().unwrap();
+        stamp_config(dir.path(), &fixture["config"]).unwrap();
+        let stream = dir.path().join("monitors/file/traces/stream");
+        fs::create_dir_all(&stream).unwrap();
+        let lines: String = case["lines"].as_array().unwrap().iter().map(|l| format!("{}\n", l.as_str().unwrap())).collect();
+        fs::write(stream.join("00000.jsonl"), lines).unwrap();
+        let result = take_landed_episodes(dir.path(), &fixture["config"], false);
+        match &case["landed"] {
+            Value::Null => {
+                assert!(result.is_err(), "{case}");
+                assert!(dir.path().join("monitors/file").is_dir());
+            }
+            Value::Array(ids) => {
+                let got: Vec<String> = result.unwrap().into_iter().map(|e| e.id).collect();
+                assert_eq!(got, ids.iter().map(|v| v.as_str().unwrap().to_owned()).collect::<Vec<_>>(), "{case}");
+            }
+            _ => unreachable!(),
         }
     }
 }
