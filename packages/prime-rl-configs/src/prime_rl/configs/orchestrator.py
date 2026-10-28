@@ -474,6 +474,10 @@ class OrchestratorControlConfig(ControlConfig):
 
 
 class OrchestratorConfig(BaseConfig):
+    backend: Literal["python", "rust"] = "python"
+    """Orchestrator implementation: the Python one (``prime_rl.orchestrator``) or the Rust port
+    (``prime_rl_orch_rs``, proof of concept). Both consume this same config."""
+
     model: ModelConfig = ModelConfig()
     """The model being trained: its model fields plus the client of the live
     vLLM deployment (``[orchestrator.model] name = ...`` with

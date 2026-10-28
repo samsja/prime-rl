@@ -14,7 +14,9 @@ validates the config; Rust consumes `config.model_dump(mode="json")`.
 - Inference: same vLLM HTTP endpoints (OpenAI API, admin endpoints, weight updates, /metrics).
 - Outputs: same metric keys, same monitor outputs (wandb, prime platform, file traces), same checkpoint
   format (a Python run can resume a Rust checkpoint and vice versa), same console log lines where practical.
-- Launcher: `uv run rl ...` keeps working. The `orchestrator @ config.json` entrypoint picks the backend.
+- Launcher: `uv run rl ...` keeps working. The `orchestrator @ config.json` entrypoint always runs the Rust
+  orchestrator (no backend switch). The Python orchestrator stays in-tree only as the behavior reference until
+  Rust reaches parity, then it is deleted. The parity baseline for e2e runs is an untouched main checkout.
 
 ## Layout
 
@@ -44,8 +46,7 @@ Dependency direction: `prl-config, prl-wire -> prl-types -> prl-train, prl-io, p
 
 ## Python boundary
 
-- `orchestrator @ cfg.toml` (Python) parses `OrchestratorConfig` exactly as today. If the Rust backend is
-  selected it calls `prime_rl_orch_rs.run(config_json: str, bridge: PyBridge)` which releases the GIL and runs a
+- `orchestrator @ cfg.toml` (Python) parses `OrchestratorConfig` exactly as today, then calls `prime_rl_orch_rs.run(config_json: str, bridge: PyBridge)` which releases the GIL and runs a
   tokio runtime until the orchestrator exits.
 - Things with no sane Rust equivalent stay in Python and are reached through the bridge, called from
   `spawn_blocking` with the GIL: taskset loading (`vf.load_taskset(...).select(...)` -> task data dicts, lazily for

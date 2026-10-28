@@ -19,6 +19,11 @@ from prime_rl.utils.process import set_proc_title
 def main():
     set_proc_title("Orchestrator")
     config = cli(OrchestratorConfig)
+    if config.backend == "rust":
+        from prime_rl.orchestrator.rust import run_rust_orchestrator
+
+        run_rust_orchestrator(config)
+        return
     from prime_rl.orchestrator.orchestrator import run_orchestrator
 
     asyncio.run(run_orchestrator(config))
