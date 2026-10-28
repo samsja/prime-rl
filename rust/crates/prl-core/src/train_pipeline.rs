@@ -1,10 +1,14 @@
 //! Train side of the step loop (`main_loop` train branch, `handle_train_result`,
 //! `finalize_train_batch`, `start_draining` of `orchestrator.py`).
 //!
-//! Ingestion is serial with shipping, as in Python: while a batch is packed, sent (blocking
-//! until every trainer rank requested it) and checkpointed, no new results are consumed and
-//! the dispatcher backpressures. Control submissions are still applied while a send blocks.
+//! Packing and sending a batch (which blocks until every trainer rank requested it) runs in its
+//! own task while results keep flowing into the sink. Results that arrive during a send belong
+//! to the next batch window (`progress.step + 1`), as in Python, which consumed them only after
+//! the send. The post-send work (step advance, checkpoint, metrics, drain) runs in order once
+//! the send completes; batches completed meanwhile wait in a queue. Control submissions are
+//! applied at any time.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,6 +28,7 @@ use prl_train::{BatchPacker, BatchSender, TrainEpisodes};
 use prl_types::{DispatchResult, Kind, Metrics, Progress, Subset};
 use prl_wire::{Episode, RunInfo};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -137,7 +142,8 @@ pub struct TrainPipeline {
     pub applied: watch::Receiver<u64>,
     pub dispatcher: DispatcherHandle,
     pub packer: Arc<BatchPacker>,
-    pub sender: BatchSender,
+    /// None while a batch is being shipped (the ship task owns it).
+    sender: Option<BatchSender>,
     pub ckpt: CheckpointManager,
     pub controller: Option<Controller>,
     pub monitors: Monitors,
@@ -146,6 +152,26 @@ pub struct TrainPipeline {
     shipped_state: Option<(u64, OrchestratorState)>,
     last_batch_at: Instant,
     draining: bool,
+    shipping: Option<Shipping>,
+    /// Batches completed while the previous one was still shipping.
+    queued: VecDeque<TrainBatch>,
+}
+
+/// Pack and send of one batch, the result of the ship task.
+struct Shipped {
+    sender: BatchSender,
+    pack_time: f64,
+    send_batch_time: f64,
+    wait_for_policy_time: f64,
+}
+
+/// A batch whose pack/send runs in its own task while results keep flowing into the sink.
+struct Shipping {
+    step: u64,
+    step_time: f64,
+    effective: TrainEpisodes,
+    rollout_metrics: Metrics,
+    task: JoinHandle<Result<Shipped>>,
 }
 
 impl TrainPipeline {
@@ -178,7 +204,7 @@ impl TrainPipeline {
             applied,
             dispatcher,
             packer,
-            sender,
+            sender: Some(sender),
             ckpt,
             controller,
             monitors,
@@ -187,6 +213,8 @@ impl TrainPipeline {
             shipped_state: None,
             last_batch_at: Instant::now(),
             draining: false,
+            shipping: None,
+            queued: VecDeque::new(),
         };
         this.publish_view();
         (this, TrainPipelineHandle { tx }, TrainPipelineInbox { cmd_rx }, view_rx)
@@ -221,6 +249,7 @@ impl TrainPipeline {
         // The view walks the pending batch: refresh it on a tick, not per result.
         let mut view_tick = tokio::time::interval(Duration::from_secs(1));
         view_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut results_open = true;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
@@ -230,7 +259,7 @@ impl TrainPipeline {
                         let _ = reply.send(self.final_state().await);
                     }
                     Command::Stop { ack } => {
-                        self.sender.close().await;
+                        self.stop().await;
                         let _ = ack.send(());
                         return Ok(());
                     }
@@ -241,26 +270,32 @@ impl TrainPipeline {
                 _ = async { submitted.as_ref().expect("controller").notified().await }, if submitted.is_some() => {
                     self.apply_control()?;
                 }
-                result = results.recv() => {
-                    let Some(result) = result else {
-                        // The dispatcher stopped; wait for the supervisor's stop.
-                        while let Some(cmd) = cmd_rx.recv().await {
-                            match cmd {
-                                Command::FinalState { reply } => { let _ = reply.send(self.final_state().await); }
-                                Command::Stop { ack } => { self.sender.close().await; let _ = ack.send(()); return Ok(()); }
-                                Command::Sync { ack } => { let _ = ack.send(()); }
-                            }
-                        }
-                        return Ok(());
-                    };
-                    self.handle(result, &cancel).await?;
+                shipped = async { (&mut self.shipping.as_mut().expect("shipping").task).await }, if self.shipping.is_some() => {
+                    let shipping = self.shipping.take().expect("shipping");
+                    self.finish_ship(shipping, shipped??, &cancel).await?;
+                    self.ship_next(None, &cancel).await?;
                 }
+                result = results.recv(), if results_open => match result {
+                    Some(result) => self.handle(result, &cancel).await?,
+                    // The dispatcher stopped; keep serving commands until the supervisor stops us.
+                    None => results_open = false,
+                },
             }
         }
     }
 
+    async fn stop(&mut self) {
+        if let Some(shipping) = self.shipping.take() {
+            shipping.task.abort();
+        }
+        if let Some(sender) = self.sender.take() {
+            sender.close().await;
+        }
+    }
+
     async fn handle(&mut self, result: DispatchResult<Episode>, cancel: &CancellationToken) -> Result<()> {
-        let step = self.progress.step;
+        // During a send the batch window collecting is the next one.
+        let step = self.progress.step + u64::from(self.shipping.is_some());
         let batch = match result {
             DispatchResult::Episode(mut episode) => {
                 let Some(run) = &episode.run else { bail!("Dispatched episode is missing run identity") };
@@ -279,24 +314,36 @@ impl TrainPipeline {
         self.handle_train_result(batch, cancel).await
     }
 
-    async fn handle_train_result(&mut self, mut batch: Option<TrainBatch>, cancel: &CancellationToken) -> Result<()> {
+    async fn handle_train_result(&mut self, batch: Option<TrainBatch>, cancel: &CancellationToken) -> Result<()> {
         self.beat();
-        while !self.draining {
-            let Some(next) = batch.take() else { break };
-            self.finalize_train_batch(next, cancel).await?;
+        self.ship_next(batch, cancel).await
+    }
+
+    /// Ship `batch` (or the next ready one) unless a send is in flight; batches that cannot
+    /// ship after training stops are released.
+    async fn ship_next(&mut self, mut batch: Option<TrainBatch>, cancel: &CancellationToken) -> Result<()> {
+        loop {
             if self.draining {
+                for batch in batch.take().into_iter().chain(self.queued.drain(..)) {
+                    self.sink.count_queued_cancelled(batch.cohort.num_traces() as f64);
+                    self.sink.release_samples(&batch.samples);
+                }
+                self.sink.discard_queued();
                 return Ok(());
             }
-            batch = self.sink.take_batch(self.progress.step).await?;
-        }
-        if self.draining {
-            if let Some(batch) = batch {
-                self.sink.count_queued_cancelled(batch.cohort.num_traces() as f64);
-                self.sink.release_samples(&batch.samples);
+            if self.shipping.is_some() {
+                self.queued.extend(batch);
+                return Ok(());
             }
-            self.sink.discard_queued();
+            let next = match batch.take().or_else(|| self.queued.pop_front()) {
+                Some(next) => next,
+                None => match self.sink.take_batch(self.progress.step).await? {
+                    Some(next) => next,
+                    None => return Ok(()),
+                },
+            };
+            self.start_ship(next, cancel).await?;
         }
-        Ok(())
     }
 
     /// Stop scheduling train work and let the pipeline empty; triggered evals still complete.
@@ -387,12 +434,14 @@ impl TrainPipeline {
         wait_for_version(&mut self.applied, version, reason, self.config.weight_broadcast_timeout, cancel).await
     }
 
-    async fn finalize_train_batch(&mut self, batch: TrainBatch, cancel: &CancellationToken) -> Result<()> {
+    /// Pre-send half of `finalize_train_batch`: budget/empty checks, cohort logs, then pack and
+    /// send in the ship task.
+    async fn start_ship(&mut self, batch: TrainBatch, cancel: &CancellationToken) -> Result<()> {
         let step = self.progress.step;
         if let Some(max_steps) = self.config.max_steps.filter(|max| step > *max) {
             self.sink.count_queued_cancelled(batch.cohort.num_traces() as f64);
             self.sink.release_samples(&batch.samples);
-            return self.start_draining(&format!("Step {step} exceeds max_steps={max_steps}"), cancel).await;
+            return Box::pin(self.start_draining(&format!("Step {step} exceeds max_steps={max_steps}"), cancel)).await;
         }
         if batch.samples.is_empty() {
             warn!("Step {step}: skipping empty train batch after zero-advantage pruning");
@@ -404,6 +453,7 @@ impl TrainPipeline {
 
         let TrainBatch { cohort, samples } = batch;
         let effective = cohort.effective();
+        drop(cohort);
         let n_effective = effective.num_traces();
         let n_trainable = effective.records().iter().filter(|r| is_trainable(r.trace)).count();
         if n_effective > 0 && n_trainable as f64 / n_effective as f64 <= 0.1 {
@@ -419,34 +469,28 @@ impl TrainPipeline {
         self.monitors.log_episodes(effective_episodes.clone(), step, Kind::Train, Subset::Effective).await;
         self.monitors.log_annotations(stamp_batch(effective_episodes.iter().map(|e| e.as_ref()), step)).await;
 
-        let pack_start = Instant::now();
         let packer = self.packer.clone();
-        let grid = tokio::task::spawn_blocking(move || packer.pack(samples)).await??;
-        let pack_time = pack_start.elapsed().as_secs_f64();
+        let mut sender = self.sender.take().expect("no send in flight");
+        let task = tokio::spawn(async move {
+            let pack_start = Instant::now();
+            let grid = tokio::task::spawn_blocking(move || packer.pack(samples)).await??;
+            let pack_time = pack_start.elapsed().as_secs_f64();
+            let send_start = Instant::now();
+            let send_batch_time = sender.send(grid).await?;
+            // The send waits until every trainer rank requested the batch: the time the
+            // orchestrator spent waiting on the trainer for the next policy.
+            let wait_for_policy_time = (send_start.elapsed().as_secs_f64() - send_batch_time).max(0.0);
+            Ok(Shipped { sender, pack_time, send_batch_time, wait_for_policy_time })
+        });
+        self.shipping = Some(Shipping { step, step_time, effective, rollout_metrics, task });
+        Ok(())
+    }
 
-        // Sending blocks until every trainer rank requested the batch; control submissions are
-        // applied meanwhile (a pause at the previous step must not wait for this send).
-        let send_start = Instant::now();
-        let send_batch_time = {
-            let submitted = self.controller.as_ref().map(Controller::submitted);
-            let send = self.sender.send(grid);
-            tokio::pin!(send);
-            loop {
-                tokio::select! {
-                    result = &mut send => break result?,
-                    _ = cancel.cancelled() => bail!("cancelled while sending step {step}"),
-                    _ = async { submitted.as_ref().expect("controller").notified().await }, if submitted.is_some() => {
-                        let (Some(controller), Some((shipped, state))) = (&self.controller, &self.shipped_state) else { continue };
-                        if controller.update(*shipped) {
-                            self.ckpt.save(state, *shipped)?;
-                            controller.mark_saved(*shipped);
-                            info!("Paused at step {shipped}, saved its state");
-                        }
-                    }
-                }
-            }
-        };
-        let wait_for_policy_time = (send_start.elapsed().as_secs_f64() - send_batch_time).max(0.0);
+    /// Post-send half of `finalize_train_batch`: advance the step, checkpoint, log, drain.
+    async fn finish_ship(&mut self, shipping: Shipping, shipped: Shipped, cancel: &CancellationToken) -> Result<()> {
+        let Shipping { step, step_time, effective, rollout_metrics, .. } = shipping;
+        let Shipped { sender, pack_time, send_batch_time, wait_for_policy_time } = shipped;
+        self.sender = Some(sender);
         self.progress.step += 1;
         self.step_tx.send_replace(self.progress.step);
         if self.controller.is_some() {
@@ -480,7 +524,6 @@ impl TrainPipeline {
             // Drain right after shipping the final batch: a further batch can never train.
             self.start_draining("Shipped the final batch", cancel).await?;
         }
-        drop(cohort);
         Ok(())
     }
 

@@ -75,9 +75,10 @@ Actors (`prl-core` unless noted):
   dispatcher keeps serving commands while a sink is busy. Run tasks relay env-server deltas on a channel; the
   live view is flushed to `Monitors` every 0.5 s.
 - `TrainSource`: train tasks across envs + curricula; `on_result` admission, metrics, checkpoint state.
-- `TrainPipeline`: `prl_train::TrainSink` + the ship flow (pack on `spawn_blocking` -> send -> ckpt ->
-  metrics), checkpoint saves and control pauses. Single writer of `progress_step`. Ingestion is serial with
-  shipping, as in Python.
+- `TrainPipeline`: `prl_train::TrainSink` + the ship flow, checkpoint saves and control pauses. Single
+  writer of `progress_step`. Pack + send run in a ship task while results keep flowing into the sink
+  (stamped with the next step, the window Python consumed them in); the post-send work (step advance, ckpt,
+  metrics, drain) runs in order when the send completes, and batches completed meanwhile queue behind it.
 - `EvalPipeline`: eval results -> `EvalSink` epochs -> finalize; `trigger_eval` after each applied policy.
 - `WeightWatcher`: polls the weight receiver (prl-io), single writer of `policy`. Per update: dispatcher
   `version_pending` -> receive -> `policy` -> hooks in order: `EvalPipeline` (eval trigger, may switch the
