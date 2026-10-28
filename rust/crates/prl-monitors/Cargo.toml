@@ -30,4 +30,7 @@ httpdate = "1"
 [dev-dependencies]
 tempfile = "3"
 zstd = "0.13"
-axum = { workspace = true }
+axum = { workspace = true, features = ["multipart"] }
+flate2 = "1"
+sha2 = "0.10"
+hex = "0.4"
