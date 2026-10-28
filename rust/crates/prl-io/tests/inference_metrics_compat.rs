@@ -12,8 +12,17 @@ fn close(a: f64, b: f64) -> bool {
 }
 
 #[test]
-fn collector_matches_python() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inference_metrics.json");
+fn collector_matches_python_on_pd_deployment() {
+    check_fixture("inference_metrics.json");
+}
+
+#[test]
+fn collector_matches_python_on_real_vllm_scrapes() {
+    check_fixture("inference_metrics_vllm.json");
+}
+
+fn check_fixture(name: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
     let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let clients: Vec<AdminClient> = fixture["base_urls"]
         .as_array()
@@ -21,9 +30,12 @@ fn collector_matches_python() {
         .iter()
         .map(|u| AdminClient::new(u.as_str().unwrap(), Default::default()).unwrap())
         .collect();
-    let roles = [InferenceRole::Prefill, InferenceRole::Decode];
-    let mut collector = InferenceMetricsCollector::new(&clients, Some(&roles), true, None, None).unwrap();
-    collector.set_max_model_len("http://decode-a:8000", 32768);
+    let roles: Option<Vec<InferenceRole>> = fixture["roles"].as_array().map(|roles| {
+        roles.iter().map(|r| if r == "prefill" { InferenceRole::Prefill } else { InferenceRole::Decode }).collect()
+    });
+    let mut collector = InferenceMetricsCollector::new(&clients, roles.as_deref(), true, None, None).unwrap();
+    let last = clients.last().unwrap().key().to_owned();
+    collector.set_max_model_len(&last, fixture["max_model_len"].as_u64().unwrap());
 
     for poll in fixture["polls"].as_array().unwrap() {
         let timestamp = poll["timestamp"].as_f64().unwrap();

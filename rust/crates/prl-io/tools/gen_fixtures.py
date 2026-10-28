@@ -93,13 +93,46 @@ def pyrandom() -> None:
     (FIXTURES / "pyrandom.json").write_text(json.dumps(cases))
 
 
+def run_collector(base_urls, roles, max_model_len, polls) -> dict:
+    """Feed `(timestamp, [text per endpoint])` polls through the Python collector; the last
+    endpoint's max_model_len is preset."""
+    import httpx
+
+    from prime_rl.orchestrator.inference_metrics import (
+        EngineSample,
+        InferenceMetricsCollector,
+        TimedSnapshot,
+        parse_prometheus_text,
+    )
+
+    collector = InferenceMetricsCollector([httpx.AsyncClient(base_url=url) for url in base_urls], roles=roles)
+    collector.max_model_len_by_endpoint[collector.endpoints[-1].key] = max_model_len
+    out = []
+    for timestamp, texts in polls:
+        samples = [
+            EngineSample(endpoint=endpoint, engine_label=label, timestamp=timestamp, snapshot=snapshot)
+            for endpoint, text in zip(collector.endpoints, texts)
+            for label, snapshot in sorted(parse_prometheus_text(text).items())
+        ]
+        metrics = collector.build_metrics(samples)
+        load = [vars(collector.build_load_sample(s)) for s in samples]
+        for s in samples:
+            collector.previous[s.key] = TimedSnapshot(timestamp=s.timestamp, snapshot=s.snapshot)
+        out.append({"timestamp": timestamp, "texts": texts, "metrics": list(metrics.items()), "load": load})
+    return {"base_urls": base_urls, "roles": roles, "max_model_len": max_model_len, "polls": out}
+
+
+def real_vllm_metrics() -> None:
+    """Two scrapes of a real Qwen3-0.6B prime-rl inference server (vllm_metrics_{1,2}.txt)."""
+    texts = [(FIXTURES / f"vllm_metrics_{i}.txt").read_text() for i in (1, 2)]
+    fixture = run_collector(["http://localhost:8731"], None, 4096, [(10.0, [texts[0]]), (15.0, [texts[1]])])
+    (FIXTURES / "inference_metrics_vllm.json").write_text(json.dumps(fixture, indent=1))
+
+
 def inference_metrics() -> None:
     """Two polls of two engines' expositions (one prefill server with 2 engines, one decode
     server) and the metrics/load samples the Python collector derives from them."""
-    import httpx
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
-
-    from prime_rl.orchestrator.inference_metrics import EngineSample, InferenceMetricsCollector, parse_prometheus_text
 
     def exposition(engines: list[str], scale: float) -> str:
         registry = CollectorRegistry()
@@ -132,28 +165,8 @@ def inference_metrics() -> None:
                     ttft.labels(engine).observe(v)
         return generate_latest(registry).decode() + 'vllm:untyped_thing{engine="0"} 5\nvllm:weird{engine="0"} NaN\n'
 
-    base_urls = ["http://prefill-a:8000", "http://decode-a:8000"]
-    roles = ["prefill", "decode"]
-    engines = [["0", "1"], ["0"]]
-    clients = [httpx.AsyncClient(base_url=url) for url in base_urls]
-    collector = InferenceMetricsCollector(clients, roles=roles)
-    collector.max_model_len_by_endpoint[collector.endpoints[1].key] = 32768
-    polls = []
-    for poll, (timestamp, scale) in enumerate([(100.0, 1.0), (105.5, 3.0)]):
-        texts = [exposition(e, scale) for e in engines]
-        samples = [
-            EngineSample(endpoint=endpoint, engine_label=label, timestamp=timestamp, snapshot=snapshot)
-            for endpoint, text in zip(collector.endpoints, texts)
-            for label, snapshot in sorted(parse_prometheus_text(text).items())
-        ]
-        metrics = collector.build_metrics(samples)
-        load = [vars(collector.build_load_sample(s)) for s in samples]
-        from prime_rl.orchestrator.inference_metrics import TimedSnapshot
-
-        for s in samples:
-            collector.previous[s.key] = TimedSnapshot(timestamp=s.timestamp, snapshot=s.snapshot)
-        polls.append({"timestamp": timestamp, "texts": texts, "metrics": list(metrics.items()), "load": load})
-    fixture = {"base_urls": base_urls, "roles": roles, "max_model_len": {"1": 32768}, "polls": polls}
+    polls = [(ts, [exposition(e, scale) for e in [["0", "1"], ["0"]]]) for ts, scale in [(100.0, 1.0), (105.5, 3.0)]]
+    fixture = run_collector(["http://prefill-a:8000", "http://decode-a:8000"], ["prefill", "decode"], 32768, polls)
     (FIXTURES / "inference_metrics.json").write_text(json.dumps(fixture, indent=1))
 
 
@@ -189,4 +202,5 @@ if __name__ == "__main__":
     checkpoints()
     pyrandom()
     inference_metrics()
+    real_vllm_metrics()
     client_configs()
