@@ -33,7 +33,7 @@ in-tree only as the behavior reference and is deleted once Rust reaches parity.
 3. `prime_rl_orch_rs.run(config: OrchestratorConfig, bridge: PyBridge) -> None` extracts the config with the GIL
    held (prl-config's pyo3 `FromPyObject`, reading the live validated pydantic object; owner: config), then
    releases the GIL (`py.allow_threads`) and runs a multi-thread tokio runtime (`block_on`) on
-   `prl_core::run(config: prl_config::OrchestratorConfig, bridge: Arc<dyn prl_types::Bridge>)` until the
+   `prl_core::run(config, bridge: Arc<dyn prl_types::Bridge>, wandb, nixl, shutdown: CancellationToken)` until the
    orchestrator exits. An `Err` is raised in Python as `RuntimeError(f"{err:#}")`; the process exits non-zero.
    Rust logging: `prl_io::logging::setup_logger(log.level, log.json_logging)` (loguru-format lines, like the Python side).
 
