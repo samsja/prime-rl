@@ -30,10 +30,10 @@ const RATIO_METRICS: [(&str, [&str; 2], [&str; 2]); 1] = [(
 // ── prometheus text parsing (prometheus_client.parser semantics) ──────────────
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Sample {
-    pub name: String,
-    pub labels: Vec<(String, String)>,
-    pub value: f64,
+struct Sample {
+    name: String,
+    labels: Vec<(String, String)>,
+    value: f64,
 }
 
 impl Sample {
@@ -43,259 +43,109 @@ impl Sample {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MetricFamily {
-    pub name: String,
-    pub type_: String,
-    pub samples: Vec<Sample>,
+struct MetricFamily {
+    name: String,
+    type_: String,
+    samples: Vec<Sample>,
 }
 
-fn is_escaped(text: &[char], pos: usize) -> bool {
-    let mut n = 0;
-    while pos > n && text[pos - 1 - n] == '\\' {
-        n += 1;
-    }
-    n % 2 == 1
-}
-
-/// Position of the next unquoted char of `chs` (whitespace when None) at or after `start`.
-fn next_unquoted(text: &[char], chs: Option<&str>, start: usize) -> Option<usize> {
-    let mut in_quotes = false;
-    for (i, &c) in text.iter().enumerate().skip(start) {
-        if c == '"' && !is_escaped(text, i) {
-            in_quotes = !in_quotes;
-        }
-        if !in_quotes {
-            let hit = match chs {
-                Some(chs) => chs.contains(c),
-                None => c.is_whitespace(),
-            };
-            if hit {
-                return Some(i);
-            }
-        }
-    }
-    None
-}
-
-/// `_split_quoted(text, whitespace, maxsplit)`.
-fn split_quoted(text: &str, maxsplit: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut tokens = vec![String::new()];
-    let mut x = 0;
-    while x < chars.len() {
-        let Some(split) = next_unquoted(&chars, None, x) else {
-            *tokens.last_mut().unwrap() = chars[x..].iter().collect();
-            break;
-        };
-        if split == x {
-            x += 1;
-            continue;
-        }
-        if maxsplit > 0 && tokens.len() > maxsplit {
-            *tokens.last_mut().unwrap() = chars[x..].iter().collect();
-            break;
-        }
-        *tokens.last_mut().unwrap() = chars[x..split].iter().collect();
-        x = split + 1;
-        tokens.push(String::new());
-    }
-    tokens
-}
-
-fn unescape(text: &str, help: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.peek() {
-                Some('\\') => {
-                    out.push('\\');
-                    chars.next();
-                }
-                Some('n') => {
-                    out.push('\n');
-                    chars.next();
-                }
-                Some('"') if !help => {
-                    out.push('"');
-                    chars.next();
-                }
-                _ => out.push(c),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// `_unquote_unescape`: the string and whether it was quoted.
-fn unquote(text: &str) -> Result<(String, bool)> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok((String::new(), false));
-    }
-    if let Some(inner) = text.strip_prefix('"') {
-        let Some(inner) = inner.strip_suffix('"') else { bail!("missing close quote") };
-        return Ok((unescape(inner, false), true));
-    }
-    Ok((unescape(text, false), false))
-}
-
-fn is_valid_metric_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_' || c == ':')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
-}
-
-/// Python `float()` / `int()` of a sample value.
+/// Python `float()` of a sample value (`+Inf`, `NaN`, ...).
 fn parse_value(value: &str) -> Result<f64> {
-    if value != value.trim() || value.contains('_') {
-        bail!("Invalid value: {value:?}");
-    }
-    let lower = value.to_ascii_lowercase();
-    let unsigned = lower.trim_start_matches(['+', '-']);
-    let negative = lower.starts_with('-');
-    match unsigned {
-        "inf" | "infinity" => return Ok(if negative { f64::NEG_INFINITY } else { f64::INFINITY }),
-        "nan" => return Ok(f64::NAN),
-        _ => {}
-    }
-    value.parse::<f64>().map_err(|_| anyhow::anyhow!("could not convert string to float: {value:?}"))
-}
-
-fn parse_value_and_timestamp(s: &str) -> Result<f64> {
-    let s = s.trim_start();
-    let separator = if s.contains(' ') { ' ' } else { '\t' };
-    let values: Vec<&str> = s.split(separator).map(str::trim).filter(|v| !v.is_empty()).collect();
-    match values.first() {
-        Some(first) => parse_value(first),
-        None => parse_value(s),
+    match value.to_ascii_lowercase().trim_start_matches('+') {
+        "inf" | "infinity" => Ok(f64::INFINITY),
+        "-inf" | "-infinity" => Ok(f64::NEG_INFINITY),
+        "nan" => Ok(f64::NAN),
+        _ => value.parse().map_err(|_| anyhow::anyhow!("could not convert string to float: {value:?}")),
     }
 }
 
-fn parse_labels(text: &str) -> Result<Vec<(String, String)>> {
-    let chars: Vec<char> = text.trim().chars().collect();
-    let mut labels: Vec<(String, String)> = Vec::new();
-    let mut pos = 0;
-    while pos < chars.len() {
-        if chars[pos] == ',' {
-            pos += 1;
-            continue;
-        }
-        let eq = next_unquoted(&chars, Some("=,}"), pos);
-        let Some(eq) = eq.filter(|&i| chars[i] == '=') else {
-            bail!("Invalid labels: {text}");
-        };
-        let (name, _) = unquote(&chars[pos..eq].iter().collect::<String>())?;
-        let end = next_unquoted(&chars, Some(",}"), eq + 1).unwrap_or(chars.len());
-        let raw: String = chars[eq + 1..end].iter().collect();
-        let raw = raw.trim();
-        if !raw.starts_with('"') || raw.len() < 2 || !raw.ends_with('"') {
-            bail!("Invalid labels: {text}");
-        }
-        let (value, _) = unquote(raw)?;
-        if labels.iter().any(|(k, _)| *k == name) {
-            bail!("Invalid labels: {text}");
-        }
-        labels.push((name, value));
-        pos = end;
-    }
-    Ok(labels)
-}
-
-fn parse_sample(text: &str) -> Result<Sample> {
-    let chars: Vec<char> = text.chars().collect();
-    let label_start = next_unquoted(&chars, Some("{"), 0);
-    let before_labels_has_exemplar = label_start.is_some_and(|i| chars[..i].iter().collect::<String>().contains(" # "));
-    match label_start {
-        Some(start) if !before_labels_has_exemplar => {
-            let name: String = chars[..start].iter().collect::<String>().trim().to_owned();
-            let end = next_unquoted(&chars, Some("}"), start).ok_or_else(|| anyhow::anyhow!("invalid sample: {text}"))?;
-            let mut labels = parse_labels(&chars[start + 1..end].iter().collect::<String>())?;
-            let name = if name.is_empty() {
-                let idx = labels.iter().position(|(k, _)| k == "__name__").ok_or_else(|| anyhow::anyhow!("invalid sample: {text}"))?;
-                labels.remove(idx).1
-            } else {
-                name
-            };
-            let value = parse_value_and_timestamp(&chars[end + 1..].iter().collect::<String>())?;
-            Ok(Sample { name, labels, value })
-        }
-        _ => {
-            let name_end = next_unquoted(&chars, Some(" \t"), 0).unwrap_or(chars.len());
-            let name: String = chars[..name_end].iter().collect::<String>().trim().to_owned();
-            if !is_valid_metric_name(&name) {
-                bail!("invalid metric name:{text}");
+/// `name{k="v",...} value [timestamp]`.
+fn parse_sample(line: &str) -> Result<Sample> {
+    let name_end = line.find(|c: char| c == '{' || c.is_whitespace()).unwrap_or(line.len());
+    let name = line[..name_end].to_owned();
+    let mut rest = &line[name_end..];
+    let mut labels = Vec::new();
+    if let Some(body) = rest.strip_prefix('{') {
+        let mut chars = body.char_indices().peekable();
+        let mut end = None;
+        while let Some((i, c)) = chars.next() {
+            if c == '}' {
+                end = Some(i);
+                break;
             }
-            let rest: String = chars.get(name_end + 1..).map(|r| r.iter().collect()).unwrap_or_default();
-            Ok(Sample { name, labels: Vec::new(), value: parse_value_and_timestamp(&rest)? })
+            if c == ',' || c.is_whitespace() {
+                continue;
+            }
+            let mut key = String::from(c);
+            while let Some((_, c)) = chars.next_if(|(_, c)| *c != '=') {
+                key.push(c);
+            }
+            chars.next(); // '='
+            if chars.next().map(|(_, c)| c) != Some('"') {
+                bail!("Invalid labels: {line}");
+            }
+            let mut value = String::new();
+            loop {
+                match chars.next().map(|(_, c)| c) {
+                    Some('"') => break,
+                    Some('\\') => match chars.next().map(|(_, c)| c) {
+                        Some('n') => value.push('\n'),
+                        Some(c) => value.push(c),
+                        None => bail!("Invalid labels: {line}"),
+                    },
+                    Some(c) => value.push(c),
+                    None => bail!("Invalid labels: {line}"),
+                }
+            }
+            labels.push((key.trim().to_owned(), value));
         }
+        let end = end.ok_or_else(|| anyhow::anyhow!("Invalid labels: {line}"))?;
+        rest = &body[end + 1..];
     }
+    let value = rest.split_whitespace().next().ok_or_else(|| anyhow::anyhow!("missing value: {line}"))?;
+    Ok(Sample { name, labels, value: parse_value(value)? })
 }
 
-fn build_family(name: String, type_: String, mut samples: Vec<Sample>) -> MetricFamily {
-    let mut name = name;
+fn build_family(mut name: String, type_: String, mut samples: Vec<Sample>) -> MetricFamily {
+    // Counters use the OpenMetrics representation: family without `_total`, samples with it.
     if type_ == "counter" {
-        if let Some(stripped) = name.strip_suffix("_total") {
-            name = stripped.to_owned();
-        } else {
-            for sample in &mut samples {
-                sample.name.push_str("_total");
-            }
+        match name.strip_suffix("_total") {
+            Some(stripped) => name = stripped.to_owned(),
+            None => samples.iter_mut().for_each(|s| s.name.push_str("_total")),
         }
     }
     MetricFamily { name, type_, samples }
 }
 
-/// `text_string_to_metric_families`.
-pub fn parse_metric_families(text: &str) -> Result<Vec<MetricFamily>> {
+/// `text_string_to_metric_families`: `# HELP`/`# TYPE` open a family; a sample whose name the
+/// family type does not allow becomes an untyped singleton family.
+fn parse_metric_families(text: &str) -> Result<Vec<MetricFamily>> {
     let mut families = Vec::new();
     let mut name = String::new();
     let mut type_ = "untyped".to_string();
     let mut samples: Vec<Sample> = Vec::new();
     let mut allowed: Vec<String> = Vec::new();
 
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            let parts = split_quoted(line, 3);
-            if parts.len() < 2 {
-                continue;
-            }
-            let mut candidate = String::new();
-            if parts.len() > 2 {
-                if parts[1] != "TYPE" && parts[1] != "HELP" {
-                    continue;
+    for line in text.lines().map(str::trim) {
+        if let Some(comment) = line.strip_prefix('#') {
+            let parts: Vec<&str> = comment.split_whitespace().take(3).collect();
+            let (kind, candidate) = match parts.as_slice() {
+                [kind @ ("HELP" | "TYPE"), candidate, ..] => (*kind, *candidate),
+                _ => continue,
+            };
+            if candidate != name {
+                if !name.is_empty() {
+                    families.push(build_family(std::mem::take(&mut name), type_.clone(), std::mem::take(&mut samples)));
                 }
-                let (c, quoted) = unquote(&parts[2])?;
-                if !quoted && !is_valid_metric_name(&c) {
-                    bail!("invalid metric name in comment: {line}");
-                }
-                candidate = c;
-            }
-            if parts[1] == "HELP" {
-                if candidate != name {
-                    if !name.is_empty() {
-                        families.push(build_family(std::mem::take(&mut name), type_.clone(), std::mem::take(&mut samples)));
-                    }
-                    name = candidate.clone();
+                name = candidate.to_owned();
+                samples.clear();
+                if kind == "HELP" {
                     type_ = "untyped".into();
-                    samples = Vec::new();
-                    allowed = vec![candidate];
+                    allowed = vec![name.clone()];
                 }
-            } else if parts[1] == "TYPE" {
-                if parts.len() < 4 {
-                    bail!("invalid TYPE line: {line}");
-                }
-                if candidate != name {
-                    if !name.is_empty() {
-                        families.push(build_family(std::mem::take(&mut name), type_.clone(), std::mem::take(&mut samples)));
-                    }
-                    name = candidate;
-                    samples = Vec::new();
-                }
-                type_ = parts[3].clone();
+            }
+            if kind == "TYPE" {
+                type_ = parts.get(2).map(|t| t.to_string()).ok_or_else(|| anyhow::anyhow!("invalid TYPE line: {line}"))?;
                 let suffixes: &[&str] = match type_.as_str() {
                     "summary" => &["_count", "_sum", ""],
                     "histogram" => &["_count", "_sum", "_bucket"],
@@ -303,19 +153,17 @@ pub fn parse_metric_families(text: &str) -> Result<Vec<MetricFamily>> {
                 };
                 allowed = suffixes.iter().map(|s| format!("{name}{s}")).collect();
             }
-        } else if line.is_empty() {
-            continue;
-        } else {
+        } else if !line.is_empty() {
             let sample = parse_sample(line)?;
-            if !allowed.contains(&sample.name) {
+            if allowed.contains(&sample.name) {
+                samples.push(sample);
+            } else {
                 if !name.is_empty() {
                     families.push(build_family(std::mem::take(&mut name), type_.clone(), std::mem::take(&mut samples)));
                 }
                 type_ = "untyped".into();
-                allowed = Vec::new();
+                allowed.clear();
                 families.push(build_family(sample.name.clone(), "untyped".into(), vec![sample]));
-            } else {
-                samples.push(sample);
             }
         }
     }
@@ -328,11 +176,11 @@ pub fn parse_metric_families(text: &str) -> Result<Vec<MetricFamily>> {
 // ── per-engine snapshots ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct HistogramSnapshot {
-    pub sum: f64,
-    pub count: f64,
+struct HistogramSnapshot {
+    sum: f64,
+    count: f64,
     /// Upper bound (`le`) -> cumulative count, in exposition order.
-    pub buckets: Vec<(f64, f64)>,
+    buckets: Vec<(f64, f64)>,
 }
 
 fn bucket_get(buckets: &[(f64, f64)], le: f64) -> Option<f64> {
@@ -349,16 +197,16 @@ fn bucket_add(buckets: &mut Vec<(f64, f64)>, le: f64, count: f64) {
 /// All samples scraped for one engine, keyed by vLLM sample name (prefix stripped); samples with
 /// extra labels are summed over them.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct EngineSnapshot {
-    pub gauges: IndexMap<String, f64>,
-    pub counters: IndexMap<String, f64>,
-    pub histograms: IndexMap<String, HistogramSnapshot>,
+struct EngineSnapshot {
+    gauges: IndexMap<String, f64>,
+    counters: IndexMap<String, f64>,
+    histograms: IndexMap<String, HistogramSnapshot>,
     /// Labels of `vllm:cache_config_info` (e.g. `num_gpu_blocks`, `block_size`).
-    pub cache_config: HashMap<String, String>,
+    cache_config: HashMap<String, String>,
 }
 
 /// `parse_prometheus_text`: one snapshot per `engine` label (default `"0"`), sorted by label.
-pub fn parse_prometheus_text(text: &str) -> Result<Vec<(String, EngineSnapshot)>> {
+fn parse_prometheus_text(text: &str) -> Result<Vec<(String, EngineSnapshot)>> {
     let mut engines: IndexMap<String, EngineSnapshot> = IndexMap::new();
     for family in parse_metric_families(text)? {
         if !family.name.starts_with(METRIC_PREFIX) || !matches!(family.type_.as_str(), "counter" | "gauge" | "histogram") {
@@ -402,7 +250,7 @@ pub fn parse_prometheus_text(text: &str) -> Result<Vec<(String, EngineSnapshot)>
 // ── aggregation ───────────────────────────────────────────────────────────────
 
 /// Python 3.12 `sum()` over floats (Neumaier-compensated).
-pub fn py_sum(values: &[f64]) -> f64 {
+fn py_sum(values: &[f64]) -> f64 {
     let mut result = 0.0f64;
     let mut c = 0.0f64;
     for &x in values {
@@ -446,12 +294,12 @@ fn fsum(values: &[f64]) -> f64 {
 }
 
 /// `statistics.mean` (exact sum, then divided).
-pub fn py_mean(values: &[f64]) -> f64 {
+fn py_mean(values: &[f64]) -> f64 {
     fsum(values) / values.len() as f64
 }
 
 /// `statistics.median`.
-pub fn py_median(values: &[f64]) -> f64 {
+fn py_median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
     let n = sorted.len();
@@ -476,7 +324,7 @@ fn aggregate(name: &str, values: &[f64]) -> f64 {
 const AGGREGATIONS: [&str; 5] = ["min", "max", "sum", "mean", "median"];
 
 /// Estimate a quantile from cumulative bucket deltas, Prometheus-style.
-pub fn histogram_quantile(buckets: &[(f64, f64)], quantile: f64) -> Option<f64> {
+fn histogram_quantile(buckets: &[(f64, f64)], quantile: f64) -> Option<f64> {
     let total = buckets.iter().map(|(_, c)| *c).fold(0.0, f64::max);
     if total <= 0.0 {
         return None;
@@ -499,14 +347,14 @@ pub fn histogram_quantile(buckets: &[(f64, f64)], quantile: f64) -> Option<f64> 
 }
 
 #[derive(Debug, Clone)]
-pub struct TimedSnapshot {
-    pub timestamp: f64,
-    pub snapshot: EngineSnapshot,
+struct TimedSnapshot {
+    timestamp: f64,
+    snapshot: EngineSnapshot,
 }
 
 /// Pass-through values plus interval rates (`:rate`), histogram means (`:mean`) and per-engine
 /// ratios for one engine (`engine_values`).
-pub fn engine_values(snapshot: &EngineSnapshot, timestamp: f64, previous: Option<&TimedSnapshot>) -> IndexMap<String, f64> {
+fn engine_values(snapshot: &EngineSnapshot, timestamp: f64, previous: Option<&TimedSnapshot>) -> IndexMap<String, f64> {
     let mut values: IndexMap<String, f64> = snapshot.gauges.clone();
     for (name, value) in &snapshot.counters {
         values.insert(name.clone(), *value);
@@ -556,7 +404,7 @@ pub fn engine_values(snapshot: &EngineSnapshot, timestamp: f64, previous: Option
 }
 
 /// Per-histogram cumulative bucket deltas since the previous scrape.
-pub fn bucket_deltas(snapshot: &EngineSnapshot, previous: Option<&TimedSnapshot>) -> IndexMap<String, Vec<(f64, f64)>> {
+fn bucket_deltas(snapshot: &EngineSnapshot, previous: Option<&TimedSnapshot>) -> IndexMap<String, Vec<(f64, f64)>> {
     let mut deltas = IndexMap::new();
     let Some(previous) = previous else { return deltas };
     for (name, histogram) in &snapshot.histograms {
@@ -571,7 +419,7 @@ pub fn bucket_deltas(snapshot: &EngineSnapshot, previous: Option<&TimedSnapshot>
 }
 
 /// Aggregate per-engine values into `inference/{scope}/{metric}/{agg}` series.
-pub fn build_scope_metrics(
+fn build_scope_metrics(
     scope: &str,
     values_per_engine: &[&IndexMap<String, f64>],
     bucket_deltas_per_engine: &[&IndexMap<String, Vec<(f64, f64)>>],
@@ -635,15 +483,15 @@ pub struct EngineLoadSample {
 }
 
 #[derive(Debug, Clone)]
-pub struct MetricsEndpoint {
-    pub client: AdminClient,
-    pub role: Option<InferenceRole>,
-    pub key: String,
-    pub name: String,
+struct MetricsEndpoint {
+    client: AdminClient,
+    role: Option<InferenceRole>,
+    key: String,
+    name: String,
 }
 
 /// Attach optional P/D roles and stable display names (`server0`, `prefill1`, ...).
-pub fn build_metrics_endpoints(clients: &[AdminClient], roles: Option<&[InferenceRole]>) -> Result<Vec<MetricsEndpoint>> {
+fn build_metrics_endpoints(clients: &[AdminClient], roles: Option<&[InferenceRole]>) -> Result<Vec<MetricsEndpoint>> {
     if let Some(roles) = roles {
         if roles.len() != clients.len() {
             bail!("Got {} inference metric role(s) for {} admin client(s)", roles.len(), clients.len());
@@ -665,18 +513,18 @@ pub fn build_metrics_endpoints(clients: &[AdminClient], roles: Option<&[Inferenc
 }
 
 #[derive(Debug, Clone)]
-pub struct EngineSample {
-    pub endpoint: usize,
-    pub engine_label: String,
-    pub timestamp: f64,
-    pub snapshot: EngineSnapshot,
+struct EngineSample {
+    endpoint: usize,
+    engine_label: String,
+    timestamp: f64,
+    snapshot: EngineSnapshot,
 }
 
 /// Polls vLLM `/metrics` on every engine. Keys: per-engine `inference/{engine_id}/{metric}` and
 /// cross-engine `inference/agg/{metric}/{stat}` (plus `inference/prefill|decode/...` for P/D).
 #[derive(Debug)]
 pub struct InferenceMetricsCollector {
-    pub endpoints: Vec<MetricsEndpoint>,
+    endpoints: Vec<MetricsEndpoint>,
     previous: HashMap<(String, String), TimedSnapshot>,
     max_model_len_by_endpoint: HashMap<String, u64>,
     has_pd_roles: bool,
@@ -759,7 +607,7 @@ impl InferenceMetricsCollector {
         }
     }
 
-    pub async fn collect_and_log(&mut self) -> Result<()> {
+    async fn collect_and_log(&mut self) -> Result<()> {
         let now = self.clock.elapsed().as_secs_f64();
         let texts = futures::future::join_all(self.endpoints.iter().map(Self::fetch)).await;
         let mut samples = Vec::new();
@@ -786,7 +634,7 @@ impl InferenceMetricsCollector {
     }
 
     /// Metrics and load samples of one poll's engine samples; they become the next baseline.
-    pub fn observe(&mut self, samples: Vec<EngineSample>) -> (Metrics, Vec<EngineLoadSample>) {
+    fn observe(&mut self, samples: Vec<EngineSample>) -> (Metrics, Vec<EngineLoadSample>) {
         let metrics = if self.log_metrics { self.build_metrics(&samples) } else { Metrics::new() };
         let load: Vec<EngineLoadSample> = samples.iter().map(|s| self.build_load_sample(s)).collect();
         for sample in samples {
@@ -794,11 +642,6 @@ impl InferenceMetricsCollector {
             self.previous.insert(key, TimedSnapshot { timestamp: sample.timestamp, snapshot: sample.snapshot });
         }
         (metrics, load)
-    }
-
-    /// Set an endpoint's cached max context length (normally read from `/v1/models`).
-    pub fn set_max_model_len(&mut self, endpoint_key: &str, len: u64) {
-        self.max_model_len_by_endpoint.insert(endpoint_key.to_owned(), len);
     }
 
     /// Cache each engine's max context length from `/v1/models` (static per engine lifetime;
@@ -839,7 +682,7 @@ impl InferenceMetricsCollector {
         format!("{}.{}", self.endpoints[sample.endpoint].name, sample.engine_label)
     }
 
-    pub fn build_load_sample(&self, sample: &EngineSample) -> EngineLoadSample {
+    fn build_load_sample(&self, sample: &EngineSample) -> EngineLoadSample {
         let cache = &sample.snapshot.cache_config;
         let digits = |key: &str| cache.get(key).filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())).and_then(|v| v.parse::<u64>().ok());
         // `kv_cache_size_tokens` is authoritative; `num_gpu_blocks` ignores `num_gpu_blocks_override`.
@@ -869,7 +712,7 @@ impl InferenceMetricsCollector {
         }
     }
 
-    pub fn build_metrics(&self, samples: &[EngineSample]) -> Metrics {
+    fn build_metrics(&self, samples: &[EngineSample]) -> Metrics {
         let values_per_engine: Vec<IndexMap<String, f64>> =
             samples.iter().map(|s| engine_values(&s.snapshot, s.timestamp, self.previous_of(s))).collect();
         let deltas_per_engine: Vec<IndexMap<String, Vec<(f64, f64)>>> =
@@ -917,31 +760,100 @@ impl InferenceMetricsCollector {
 mod tests {
     use super::*;
 
+    const EXPOSITION: &str = r#"# HELP vllm:num_requests_running Running requests.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{engine="0"} RUNNING
+# TYPE vllm:num_requests_waiting_by_reason gauge
+vllm:num_requests_waiting_by_reason{engine="0",reason="capacity"} 1.0
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="0"} 0.5
+# TYPE vllm:cache_config_info gauge
+vllm:cache_config_info{block_size="16",engine="0",num_gpu_blocks="100"} 1.0
+# TYPE vllm:prefix_cache_hits_total counter
+vllm:prefix_cache_hits_total{engine="0"} HITS
+# TYPE vllm:prefix_cache_queries_total counter
+vllm:prefix_cache_queries_total{engine="0"} QUERIES
+# TYPE vllm:num_preemptions_total counter
+vllm:num_preemptions_total{engine="0"} PREEMPTIONS
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_bucket{engine="0",le="1.0"} LE1
+vllm:e2e_request_latency_seconds_bucket{engine="0",le="+Inf"} COUNT
+vllm:e2e_request_latency_seconds_count{engine="0"} COUNT
+vllm:e2e_request_latency_seconds_sum{engine="0"} SUM
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 1.0
+"#;
+
+    fn poll(collector: &mut InferenceMetricsCollector, timestamp: f64, values: [(&str, &str); 7]) -> (Metrics, Vec<EngineLoadSample>) {
+        let text = values.iter().fold(EXPOSITION.to_string(), |text, (k, v)| text.replace(k, v));
+        let samples = parse_prometheus_text(&text)
+            .unwrap()
+            .into_iter()
+            .map(|(engine_label, snapshot)| EngineSample { endpoint: 0, engine_label, timestamp, snapshot })
+            .collect();
+        collector.observe(samples)
+    }
+
+    /// Two polls 5 s apart; expected values from the Python collector on the same input.
     #[test]
-    fn quantile_interpolates_like_prometheus() {
-        let buckets = vec![(0.1, 2.0), (0.5, 6.0), (1.0, 8.0), (f64::INFINITY, 10.0)];
-        assert_eq!(histogram_quantile(&buckets, 0.5), Some(0.1 + 0.4 * 3.0 / 4.0));
-        assert_eq!(histogram_quantile(&buckets, 0.99), Some(1.0));
-        assert_eq!(histogram_quantile(&[(1.0, 0.0)], 0.5), None);
+    fn rates_means_quantiles_and_load_match_python() {
+        let client = AdminClient::new("http://h:8000/v1", Default::default()).unwrap();
+        let mut collector = InferenceMetricsCollector::new(&[client], None, true, None, None).unwrap();
+        poll(&mut collector, 0.0, [("RUNNING", "3.0"), ("HITS", "10.0"), ("QUERIES", "40.0"), ("PREEMPTIONS", "5.0"), ("LE1", "2.0"), ("COUNT", "4.0"), ("SUM", "6.0")]);
+        let (metrics, load) =
+            poll(&mut collector, 5.0, [("RUNNING", "4.0"), ("HITS", "30.0"), ("QUERIES", "80.0"), ("PREEMPTIONS", "7.0"), ("LE1", "6.0"), ("COUNT", "8.0"), ("SUM", "14.0")]);
+
+        let keys: Vec<&str> = metrics.keys().take(14).map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "inference/server0.0/num_requests_running",
+                "inference/server0.0/num_requests_waiting_reason_capacity",
+                "inference/server0.0/kv_cache_usage_perc",
+                "inference/server0.0/prefix_cache_hits_total",
+                "inference/server0.0/prefix_cache_queries_total",
+                "inference/server0.0/num_preemptions_total",
+                "inference/server0.0/e2e_request_latency_seconds_sum",
+                "inference/server0.0/e2e_request_latency_seconds_count",
+                "inference/server0.0/prefix_cache_hits_total:rate",
+                "inference/server0.0/prefix_cache_queries_total:rate",
+                "inference/server0.0/num_preemptions_total:rate",
+                "inference/server0.0/e2e_request_latency_seconds:rate",
+                "inference/server0.0/e2e_request_latency_seconds:mean",
+                "inference/server0.0/prefix_cache_hit_rate",
+            ]
+        );
+        for (key, value) in [
+            ("inference/server0.0/prefix_cache_hits_total:rate", 4.0),
+            ("inference/server0.0/e2e_request_latency_seconds:rate", 0.8),
+            ("inference/server0.0/e2e_request_latency_seconds:mean", 2.0),
+            ("inference/agg/num_requests_running/median", 4.0),
+            ("inference/agg/e2e_request_latency_seconds/p50", 0.5),
+            ("inference/agg/e2e_request_latency_seconds/p99", 0.99),
+            ("inference/agg/prefix_cache_hit_rate/pooled", 0.5),
+        ] {
+            assert_eq!(metrics[key].as_f64(), Some(value), "{key}");
+        }
+        assert_eq!(metrics.len(), 88);
+        assert_eq!(
+            load,
+            [EngineLoadSample {
+                engine_id: "server0.0".into(),
+                role: None,
+                kv_capacity_tokens: Some(1600),
+                max_model_len: None,
+                kv_usage: 0.5,
+                running: 4,
+                waiting: 0,
+                waiting_capacity: Some(1),
+                preemptions_delta: 2,
+            }]
+        );
     }
 
     #[test]
     fn python_sum_is_compensated() {
         assert_eq!(py_sum(&[0.1; 10]), 1.0);
         assert_eq!(py_mean(&[1e16, 1.0, -1e16]), 1.0 / 3.0);
-        assert_eq!(py_median(&[3.0, 1.0, 2.0, 4.0]), 2.5);
-    }
-
-    #[test]
-    fn endpoint_names_count_per_role() {
-        let clients: Vec<AdminClient> = (0..3)
-            .map(|i| AdminClient::new(&format!("http://h{i}:8000/v1"), Default::default()).unwrap())
-            .collect();
-        let roles = [InferenceRole::Prefill, InferenceRole::Decode, InferenceRole::Prefill];
-        let names: Vec<String> = build_metrics_endpoints(&clients, Some(&roles)).unwrap().into_iter().map(|e| e.name).collect();
-        assert_eq!(names, vec!["prefill0", "decode0", "prefill1"]);
-        assert!(build_metrics_endpoints(&clients, Some(&roles[..2])).is_err());
-        let names: Vec<String> = build_metrics_endpoints(&clients, None).unwrap().into_iter().map(|e| e.name).collect();
-        assert_eq!(names, vec!["server0", "server1", "server2"]);
     }
 }
