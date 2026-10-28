@@ -23,7 +23,7 @@ The test suite is split into three tiers.
 ### Layout
 
 - **`tests/unit/`** — fast-running, hermetic tests for isolated logic: config parsing and validation, loss / scheduler math, individual dataset paths, model-conversion roundtrips, etc. Tests that need a GPU are tagged with the `gpu` marker.
-- **`rust/crates/*`** — the orchestrator and `uv run eval` (Rust): unit and integration tests for advantages, packing, dispatching, checkpoints, monitors and the wire formats, several checked against Python-generated fixtures.
+- **`rust/crates/*`** — the orchestrator and `uv run eval` (Rust): tests for advantages, packing, dispatching, checkpoints, monitors and the wire formats.
 - **`tests/integration/`** — full-stack RL/SFT runs on a tiny model end-to-end through inference + orchestrator + trainer.
 - **`tests/regression/`** — nightly regression suites: `test_parallel_invariance.py`, which checks that DP/CP/EP layouts train the same first step as a single GPU, and evals from `configs/eval/` compared against `baselines/eval/`.
 
