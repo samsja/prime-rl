@@ -6,7 +6,6 @@
 //! orchestrator, replacing `on_submit`.
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
@@ -51,11 +50,11 @@ pub struct Action {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ActionRequest {
+struct ActionRequest {
     #[serde(rename = "type")]
-    pub type_: ActionType,
+    type_: ActionType,
     #[serde(default)]
-    pub step: Option<u64>,
+    step: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -214,23 +213,14 @@ async fn submit_action(State(controller): State<Controller>, body: axum::body::B
     }
 }
 
-pub fn router(controller: Controller) -> Router {
-    Router::new()
-        .route("/v1/actions/{action_id}", get(get_action))
-        .route("/v1/actions", post(submit_action))
-        .with_state(controller)
-}
-
 /// Serve the control API on `host:port` until `cancel` fires.
 pub async fn serve(controller: Controller, host: &str, port: u16, cancel: CancellationToken) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    serve_on(controller, listener, cancel).await
-}
-
-pub async fn serve_on(controller: Controller, listener: tokio::net::TcpListener, cancel: CancellationToken) -> anyhow::Result<()> {
-    axum::serve(listener, router(controller).into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(cancel.cancelled_owned())
-        .await?;
+    let app = Router::new()
+        .route("/v1/actions/{action_id}", get(get_action))
+        .route("/v1/actions", post(submit_action))
+        .with_state(controller);
+    axum::serve(listener, app).with_graceful_shutdown(cancel.cancelled_owned()).await?;
     Ok(())
 }
 

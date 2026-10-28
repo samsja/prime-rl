@@ -15,10 +15,9 @@ use tokio_util::sync::CancellationToken;
 use crate::clients::{init_nixl_broadcast, load_lora_adapter, AdminPlane, Transport, UpdateTimes};
 use crate::pathing::{all_ckpt_steps, step_path, wait_for_path};
 
-pub const SENDER_READY_MARKER: &str = ".sender_ready";
-pub const RECEIVER_READY_MARKER: &str = ".receiver_ready";
-pub const STARTED_MARKER: &str = ".started";
-pub const FINISHED_MARKER: &str = ".finished";
+const SENDER_READY_MARKER: &str = ".sender_ready";
+const RECEIVER_READY_MARKER: &str = ".receiver_ready";
+const FINISHED_MARKER: &str = ".finished";
 
 /// The NIXL agent (UCX) and ModelExpress (gRPC) calls of the NIXL receiver, which have no
 /// Rust bindings; implemented over the Python bridge.
@@ -31,11 +30,6 @@ pub trait NixlBridge: Send + Sync {
     async fn wait_ready(&mut self, step: u64, timeout_s: u64) -> Result<()>;
     /// Send `policy:{step:016x}:complete` to the trainer peer.
     async fn send_complete(&mut self, step: u64) -> Result<()>;
-}
-
-/// `policy_notification(step, event)`.
-pub fn policy_notification(step: u64, event: &str) -> String {
-    format!("policy:{step:016x}:{event}")
 }
 
 pub struct WeightReceiver {
@@ -60,10 +54,6 @@ impl WeightReceiver {
             bail!("the NIXL weight receiver needs a NIXL bridge");
         }
         Ok(Self { broadcast_dir, config, admin, model_name: model_name.into(), nixl, update_times: UpdateTimes::default() })
-    }
-
-    pub fn admin(&self) -> &AdminPlane {
-        &self.admin
     }
 
     /// Per-engine times of the last full weight update (empty before the first one; LoRA
@@ -156,15 +146,5 @@ impl WeightReceiver {
             .await
             .map_err(|_| anyhow!("timed out after {}s waiting for the trainer's startup broadcast of policy v{step}", timeout.as_secs()))??;
         self.receive(step).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn notification_format() {
-        assert_eq!(policy_notification(10, "ready"), "policy:000000000000000a:ready");
     }
 }

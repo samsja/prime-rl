@@ -11,7 +11,7 @@ pub fn broadcast_dir(output_dir: &Path) -> PathBuf {
     output_dir.join("broadcasts")
 }
 
-pub fn step_path(path: &Path, step: u64) -> PathBuf {
+pub(crate) fn step_path(path: &Path, step: u64) -> PathBuf {
     path.join(format!("step_{step}"))
 }
 
