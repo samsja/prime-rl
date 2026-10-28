@@ -37,6 +37,13 @@ in-tree only as the behavior reference and is deleted once Rust reaches parity.
    orchestrator exits. An `Err` is raised in Python as `RuntimeError(f"{err:#}")`; the process exits non-zero.
    Rust logging: `prl_io::logging::setup_logger(log.level, log.json_logging)` (loguru-format lines, like the Python side).
 
+Evals use the same pattern (owner: eval, `rust/crates/prl-py/src/eval.rs`):
+- `uv run eval` (`prime_rl.entrypoints.eval:main`, launcher stays Python: shorthands, env servers, dashboard, links banner)
+  calls `prime_rl_orch_rs.run_eval(config: EvalConfig, PyBridge(config), log_file, console_level)` ->
+  `prl_eval::run_eval`; Rust logs append to the launcher's `eval.log`, the console stays at `console_level`.
+- The `sft` launcher spawns `python -m prime_rl.entrypoints.online_eval @ eval.json`, which calls
+  `prime_rl_orch_rs.run_online_eval(config: SFTOnlineEvalConfig, PyBridge(config))` -> `prl_eval::run_online_eval`.
+
 ## Threading and GIL rules
 
 - The main thread is inside `block_on` with the GIL released for the whole run.

@@ -199,3 +199,31 @@ pub mod online;   // OnlineEval watch loop (pure step-walk planner + driver)
 - online: step-walk planner (published / abandoned / vanished-due / still-writing / max_steps exit).
 - runner: finalize metrics + log lines on a fake episode set; epoch with cancellations (Partially evaluated line).
 - e2e: `uv run eval` on a small env against local vLLM, compared with the main checkout's outputs.
+
+## 4. Implementation status
+
+Public API (`prl_eval`):
+- `run_eval(EvalConfig, Arc<dyn Bridge>, Option<Box<dyn WandbBridge>>, monitors_repr: &str, shutdown: CancellationToken)`
+- `run_online_eval(SFTOnlineEvalConfig, Arc<dyn Bridge>, Option<Box<dyn WandbBridge>>, Option<Box<dyn NixlBridge>>, monitors_repr, shutdown)`
+- `runner::EvalRunner` (`setup`, `start`, `trigger`, `run_epoch`, `drain`, `stop`), `resume::{take_landed, take_landed_episodes, stamp_config, read_records, archives}`,
+  `control::{router, serve}`, `online::{plan_walk, deleted_due_steps, WalkAction}`.
+- Python: `prime_rl_orch_rs.run_eval(config, PyBridge(config), log_file, console_level)` (called by `entrypoints/eval.py`),
+  `prime_rl_orch_rs.run_online_eval(config, PyBridge(config))` (called by `python -m prime_rl.entrypoints.online_eval`, which
+  the `sft` launcher and the multi-node sbatch template spawn). Both run under `run_until_signal`: the launcher's SIGTERM
+  handler (cleanup env servers, `sys.exit(1)`) and Ctrl-C run while Rust works and stop the eval without finalizing monitors.
+
+Verified end to end against vLLM (Qwen3-0.6B, gsm8k null harness, file monitor only) next to the Python implementation:
+`uv run eval` single and multi source (metric keys and order, trace records, index rows, annotations, plan.json,
+monitors/file/eval.json identical in shape), `--resume` after a SIGTERM (16 restored + 80 owed = 96 unique episodes),
+the control API (GET/PUT/422, manual target cut), and online evals over simulated filesystem broadcasts (startup sync,
+abandoned step, superseded epochs cancelled with `Partially evaluated` lines, forced final step; same log sequence and
+metrics rows as Python).
+
+Deviations:
+- `Initializing monitors (...)` uses Python's `str(config.monitors)` (passed in by prl-py) — identical.
+- An epoch already superseded when it starts is cancelled before the mode switch, so `Checkpoint N is ready` logs before
+  `Switching dispatcher mode ...` (Python: after). Episodes of epochs superseded while the weights load may still be admitted
+  for a moment (the dispatcher schedules concurrently with the driver) and are cancelled right away; the burned admissions
+  can delay the next epoch's start by up to the 5 s admission window.
+- `{e!r}`-style errors render Rust `Display`; a fatal error is logged by the Python launcher as `Fatal error in run_eval: ...`.
+- Saved episodes without `task.hash` fall back to core's task content hash (`plan_rollouts`).
