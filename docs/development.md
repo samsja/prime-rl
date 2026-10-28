@@ -22,7 +22,8 @@ The test suite is split into three tiers.
 
 ### Layout
 
-- **`tests/unit/`** — fast-running, hermetic tests for isolated logic: config parsing and validation, advantage / loss / scheduler / packer math, individual dataset paths, model-conversion roundtrips, etc. Tests that need a GPU are tagged with the `gpu` marker.
+- **`tests/unit/`** — fast-running, hermetic tests for isolated logic: config parsing and validation, loss / scheduler math, individual dataset paths, model-conversion roundtrips, etc. Tests that need a GPU are tagged with the `gpu` marker.
+- **`rust/crates/*`** — the orchestrator and `uv run eval` (Rust): unit and integration tests for advantages, packing, dispatching, checkpoints, monitors and the wire formats, several checked against Python-generated fixtures.
 - **`tests/integration/`** — full-stack RL/SFT runs on a tiny model end-to-end through inference + orchestrator + trainer.
 - **`tests/regression/`** — nightly regression suites: `test_parallel_invariance.py`, which checks that DP/CP/EP layouts train the same first step as a single GPU, and evals from `configs/eval/` compared against `baselines/eval/`.
 
@@ -35,7 +36,10 @@ uv run pytest tests/integration -v                         # integration only
 uv run pytest -v -m "not gpu"                              # CPU-only subset (mirrors CPU CI)
 uv run pytest -v -m gpu                                    # GPU-only subset
 uv run pytest tests/integration/test_reverse_text.py -vvs  # one specific scenario
+(cd rust && cargo test --workspace)                        # orchestrator (Rust)
 ```
+
+The orchestrator is the `prime_rl_orch_rs` extension module (`packages/prime-rl-orch-rs`, built from `rust/crates/prl-py` with maturin). `uv sync` builds it, so a Rust toolchain (`cargo`) must be installed, and `uv run` rebuilds it when Rust sources change. See `rust/ARCHITECTURE.md` for its design.
 
 ### CI Workflows
 

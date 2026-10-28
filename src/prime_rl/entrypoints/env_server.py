@@ -10,9 +10,9 @@ from verifiers.v1.runtimes import set_base_sandbox_labels
 from verifiers.v1.serve import env_config_data, serve_env, set_episode_hook
 
 from prime_rl.configs.env_server import EnvServerConfig
-from prime_rl.orchestrator.utils import setup_env_server_logging
 from prime_rl.transports.payload import PayloadHook
 from prime_rl.utils.config import cli
+from prime_rl.utils.logger import setup_env_server_logging
 from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.utils import clean_exit
 

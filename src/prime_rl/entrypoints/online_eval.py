@@ -25,8 +25,8 @@ def main():
 
     import prime_rl_orch_rs
 
-    from prime_rl.orchestrator.rust import PyBridge
-    from prime_rl.orchestrator.utils import intercept_vf_logging
+    from prime_rl.rust_bridge import PyBridge
+    from prime_rl.utils.logger import intercept_vf_logging
 
     intercept_vf_logging(logger="verifiers.v1", level="WARN")
     prime_rl_orch_rs.run_online_eval(config, PyBridge(config))

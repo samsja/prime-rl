@@ -1,6 +1,6 @@
 # Python <-> Rust boundary
 
-Owner: scaffold (Python side: `src/prime_rl/orchestrator/rust.py`, entrypoint, packaging;
+Owner: scaffold (Python side: `src/prime_rl/rust_bridge.py`, entrypoint, packaging;
 Rust side of the call: `rust/crates/prl-py`). Core/monitors request bridge methods; scaffold adds them.
 
 ## Packaging
@@ -21,11 +21,11 @@ Rust side of the call: `rust/crates/prl-py`). Core/monitors request bridge metho
 ## Entry
 
 `orchestrator @ cfg.toml` (`prime_rl.entrypoints.orchestrator:main`, used by the `rl` launcher) always runs the
-Rust orchestrator. There is no backend switch. The Python orchestrator (`prime_rl.orchestrator.orchestrator`) stays
-in-tree only as the behavior reference and is deleted once Rust reaches parity.
+Rust orchestrator. The Python orchestrator it was ported from is gone (git history and the baseline checkout hold
+it); Python keeps only the config models, the launchers and the bridge.
 
-1. `cli(OrchestratorConfig)` parses and validates the config exactly as before.
-2. `prime_rl.orchestrator.rust.run_rust_orchestrator(config)`:
+1. `cli(OrchestratorConfig)` parses and validates the config.
+2. `prime_rl.rust_bridge.run_rust_orchestrator(config)`:
    - `write_resolved_config(config.output_dir, config, "orchestrator")` (same file as the Python orchestrator),
    - `setup_logger(config.log.level, json_logging=config.log.json_logging)` and
      `intercept_vf_logging("verifiers.v1", "WARN")` for Python-side logs (bridge, verifiers),
@@ -59,7 +59,7 @@ Evals use the same pattern (owner: eval, `rust/crates/prl-py/src/eval.rs`):
   which runs on Python's main thread. A handler that raises (`KeyboardInterrupt`, a launcher's SIGTERM handler)
   cancels `shutdown`; once the Rust side has stopped, the exception is re-raised in Python.
 
-## Bridge methods (`prime_rl.orchestrator.rust.PyBridge`)
+## Bridge methods (`prime_rl.rust_bridge.PyBridge`)
 
 `PyBridge(config)` takes an `OrchestratorConfig` (sources: `train.source`, `eval.source`) or an `EvalConfig` /
 `SFTOnlineEvalConfig` (eval-only: `config.source`; `flop_cost_table` is orchestrator-only).

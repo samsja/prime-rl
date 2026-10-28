@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from collections import defaultdict
@@ -20,11 +19,10 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 
 from prime_rl.configs.shared import NIXLWeightBroadcastConfig
-from prime_rl.orchestrator.clients import init_nixl_broadcast
 from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
 from prime_rl.trainer.parallel_dims import ParallelDims
 from prime_rl.trainer.world import wait_for_master
-from prime_rl.transports.weights.base import WeightReceiver, WeightSender
+from prime_rl.transports.weights.base import WeightSender
 from prime_rl.transports.weights.nixl.agent import (
     NixlAgent,
     NixlPeer,
@@ -449,58 +447,3 @@ class NIXLWeightSender(WeightSender):
         dist.barrier()
         self.broadcast_count += 1
         self.logger.info(f"NIXL+ModelExpress policy v{step} synchronized in {time.perf_counter() - start:.2f}s")
-
-
-class NIXLWeightReceiver(WeightReceiver):
-    """Drives NIXL discovery and policy synchronization for the orchestrator."""
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        set_ucx_env_defaults(0)
-        self.nixl_agent = NixlAgent(make_agent_name("orchestrator", 0))
-        self.trainer_peer: NixlPeer | None = None
-        self.model_express = ModelExpressSession(
-            client=MxClient(server_url=f"{self.config.host}:{self.config.port}"),
-            role="orchestrator",
-            rank=0,
-            session_id=self.config.session_id,
-            worker_id="orchestrator",
-        )
-
-    async def initialize(self) -> None:
-        await init_nixl_broadcast(
-            self.admin_plane,
-            self.config.host,
-            self.config.port,
-            self.config.timeout,
-            self.config.inference_world_size,
-            self.config.session_id,
-        )
-        self.model_express.publish(nixl_metadata=self.nixl_agent.get_metadata())
-
-    async def receive(self, step: int) -> None:
-        self._ack(step)
-        if self.trainer_peer is None:
-            trainer_refs = await asyncio.to_thread(
-                self.model_express.wait_for,
-                "trainer",
-                count=1,
-                timeout=self.config.timeout,
-            )
-            trainer_worker = await asyncio.to_thread(self.model_express.fetch, trainer_refs[0])
-            trainer_table = TrainerTensorTable.decode(trainer_worker.nixl_metadata)
-            self.trainer_peer = self.nixl_agent.add_remote_agent(trainer_table.agents[0].metadata)
-            self.nixl_agent.make_connection(self.trainer_peer)
-
-        trainer_peer = self.trainer_peer
-        await asyncio.to_thread(
-            self.nixl_agent.wait_for_notification,
-            [trainer_peer],
-            policy_notification(step, "ready"),
-            timeout=self.config.timeout,
-        )
-        await self.admin_plane.update_weights(None, transport="nixl", step=step)
-        self.nixl_agent.send_notification(
-            trainer_peer,
-            policy_notification(step, "complete"),
-        )

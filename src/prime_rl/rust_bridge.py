@@ -1,4 +1,5 @@
-"""Python side of the Rust orchestrator, run by the ``orchestrator`` entrypoint.
+"""Python side of the Rust orchestrator (``prime_rl_orch_rs``), run by the ``orchestrator``,
+``eval`` and ``online_eval`` entrypoints.
 
 ``run_rust_orchestrator`` hands the validated config to ``prime_rl_orch_rs.run``, which
 releases the GIL and runs the orchestrator on a tokio runtime until it exits. The Rust side
@@ -20,8 +21,7 @@ from renderers import RendererConfig
 from prime_rl.configs.eval import EvalConfig, SFTOnlineEvalConfig
 from prime_rl.configs.orchestrator import EnvConfig, OrchestratorConfig
 from prime_rl.monitors.wandb.bridge import WandbBridge
-from prime_rl.orchestrator.utils import intercept_vf_logging
-from prime_rl.utils.logger import get_logger, setup_logger
+from prime_rl.utils.logger import get_logger, intercept_vf_logging, setup_logger
 from prime_rl.utils.pathing import write_resolved_config
 from prime_rl.utils.utils import import_object
 

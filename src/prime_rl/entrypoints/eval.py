@@ -1,7 +1,7 @@
 """Launcher for ``uv run eval``: one epoch of every configured eval source.
 
 Defers heavy ML imports until after the config is parsed, so ``eval --help``
-short-circuits. The implementation lives in ``prime_rl.eval.eval``.
+short-circuits. The eval itself runs on the Rust core (``prime_rl_orch_rs.run_eval``).
 """
 
 import json
@@ -162,8 +162,8 @@ def main():
     dashboard_url = ensure_dashboard(config.output_dir, logger) if config.dashboard else None
     import prime_rl_orch_rs
 
-    from prime_rl.orchestrator.rust import PyBridge
-    from prime_rl.orchestrator.utils import intercept_vf_logging
+    from prime_rl.rust_bridge import PyBridge
+    from prime_rl.utils.logger import intercept_vf_logging
 
     processes: list[Popen] = []
     for source in env_servers:

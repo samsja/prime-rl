@@ -2,8 +2,7 @@
 
 The Rust ``WeightReceiver`` drives the handshake (broadcast-dir markers, ``/init_broadcaster``,
 ``/update_weights``) and calls into this class (``prl_io::weights::NixlBridge``) for the parts
-with no Rust bindings: the orchestrator's NIXL agent (UCX) and its ModelExpress session. Each
-method is the agent/ModelExpress half of the matching step of ``NIXLWeightReceiver``.
+with no Rust bindings: the orchestrator's NIXL agent (UCX) and its ModelExpress session.
 """
 
 from __future__ import annotations
@@ -11,7 +10,13 @@ from __future__ import annotations
 from modelexpress.client import MxClient
 
 from prime_rl.configs.shared import NIXLWeightBroadcastConfig
-from prime_rl.transports.weights.nixl.agent import NixlAgent, NixlPeer, make_agent_name, policy_notification, set_ucx_env_defaults
+from prime_rl.transports.weights.nixl.agent import (
+    NixlAgent,
+    NixlPeer,
+    make_agent_name,
+    policy_notification,
+    set_ucx_env_defaults,
+)
 from prime_rl.transports.weights.nixl.model_express import ModelExpressSession
 from prime_rl.transports.weights.nixl.trainer_tensor_table import TrainerTensorTable
 

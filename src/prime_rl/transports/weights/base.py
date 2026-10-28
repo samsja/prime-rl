@@ -1,15 +1,11 @@
-import asyncio
 import shutil
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from pathlib import Path
 from typing import final
 
 import torch.nn as nn
 
-from prime_rl.configs.shared import WeightBroadcastConfig
-from prime_rl.orchestrator.clients import AdminPlane
 from prime_rl.trainer.world import get_world, wait_for_master
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.pathing import get_all_ckpt_steps, get_broadcast_dir, get_step_path
@@ -106,64 +102,3 @@ class WeightSender(ABC):
         for old_step in get_all_ckpt_steps(broadcast_dir):
             if old_step < step - 1:
                 shutil.rmtree(get_step_path(broadcast_dir, old_step), ignore_errors=True)
-
-
-class WeightReceiver(ABC):
-    """Consumer-side counterpart of ``WeightSender`` — moves the inference
-    engines onto trainer-offered policy versions. It runs in the consumer
-    process (the RL orchestrator, or the SFT evals process): the weight
-    watcher, the orchestrator's startup rendezvous, and the evals process all
-    drive the same object instead of hand-rolling transport branches. The
-    engines' in-process receive hooks are its data plane, reached through the
-    admin plane."""
-
-    def __init__(
-        self,
-        broadcast_dir: Path,
-        config: WeightBroadcastConfig,
-        admin_plane: AdminPlane,
-        model_name: str,
-    ) -> None:
-        self.logger = get_logger()
-        self.broadcast_dir = broadcast_dir
-        self.config = config
-        self.admin_plane = admin_plane
-        self.model_name = model_name
-
-    async def initialize(self) -> None:
-        """One-time transport bootstrap (rendezvous groups, sessions)."""
-
-    def step_dir(self, step: int) -> Path:
-        return get_step_path(self.broadcast_dir, step)
-
-    def is_published(self, step: int) -> bool:
-        """Whether the trainer has offered v{step}."""
-        return (self.step_dir(step) / SENDER_READY_MARKER).exists()
-
-    def next_version(self, current: int) -> int:
-        """Newest version offered beyond ``current``; ``current`` if none."""
-        published = [step for step in get_all_ckpt_steps(self.broadcast_dir) if self.is_published(step)]
-        return max(published, default=current)
-
-    async def wait_published(self, step: int, cancelled: Callable[[], bool] | None = None) -> None:
-        """Block until the trainer offers v{step}. Runs before the orchestrator
-        advances ``policy.version`` — the version must never move ahead of a
-        confirmed offer."""
-        sender_ready = self.step_dir(step) / SENDER_READY_MARKER
-        while not sender_ready.exists():
-            if cancelled is not None and cancelled():
-                raise asyncio.CancelledError
-            await asyncio.sleep(0.1)
-
-    def _ack(self, step: int) -> None:
-        """Acknowledge the offered version — unblocks the waiting trainer."""
-        (self.step_dir(step) / RECEIVER_READY_MARKER).touch()
-
-    @abstractmethod
-    async def receive(self, step: int) -> None:
-        """Acknowledge the offered v{step} and move the engines onto it."""
-
-    async def sync_startup(self, step: int, timeout: float) -> None:
-        """Rendezvous with the trainer's startup broadcast of v{step}."""
-        await asyncio.wait_for(self.wait_published(step), timeout=timeout)
-        await self.receive(step)

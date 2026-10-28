@@ -101,7 +101,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 ```
 
-4. Install dependencies from the lock file
+4. Install [Rust](https://rustup.rs) (the orchestrator is a Rust extension that `uv sync` builds)
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source $HOME/.cargo/env
+```
+
+5. Install dependencies from the lock file
 
 ```bash
 uv sync --all-extras

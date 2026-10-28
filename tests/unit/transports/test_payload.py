@@ -14,17 +14,14 @@ from verifiers.v1 import graph
 from verifiers.v1.episode import EnvInfo, Episode
 from verifiers.v1.types import SamplingMask, TopLogprobs, TurnTokens
 
-from prime_rl.orchestrator.batch import prepare_batch
-from prime_rl.orchestrator.trajectories import trace_to_samples
 from prime_rl.trainer.rl.data import DataLoader
 from prime_rl.transports import payload
 from prime_rl.transports.batch import types as wire
-from prime_rl.transports.batch.types import PAYLOAD_INFO_KEY, MicroBatch, PayloadSlice, TrainingSample, encode_array
+from prime_rl.transports.batch.types import PAYLOAD_INFO_KEY, MicroBatch, PayloadSlice, encode_array
 from prime_rl.transports.payload import (
     PayloadHook,
     PayloadServer,
     delete_payloads,
-    encode_branch_arrays,
     payload_host,
     resolve_payloads,
     wait_for_deletes,
@@ -75,98 +72,25 @@ def _episode(
     return Episode(env=EnvInfo(id="e"), task=trace.task, ok=True, traces=[trace])
 
 
-def _samples(episodes: list[vf.Episode]):
-    samples = []
-    for episode in episodes:
-        for sample in trace_to_samples(episode.traces[0], env_name="env"):
-            sample.temperatures = np.ones(len(sample.token_ids), dtype=np.float32)
-            sample.advantages = np.ones(len(sample.token_ids), dtype=np.float32)
-            samples.append(sample)
-    return samples
-
-
-def _rows(counts: bytes, *columns: bytes | None) -> list[tuple]:
-    """Per token, its row of each column (ids, logprobs) as Python values."""
-    counts = np.frombuffer(counts, np.int32)
-    ends = np.cumsum(counts)
-    out = []
-    for start, end in zip(ends - counts, ends):
-        out.append(
-            tuple(
-                None if c is None else tuple(np.frombuffer(c, np.int32 if i == 0 else np.float32)[start:end].tolist())
-                for i, c in enumerate(columns)
-            )
-        )
-    return out
-
-
-def test_fetched_micro_batches_hold_each_branchs_arrays():
-    rng = np.random.default_rng(0)
-    episodes = [
-        _episode(rng, 40, 300),
-        _episode(rng, 5, 30, masked=True),
-        _episode(rng, 20, 90),
-        _episode(rng, 8, 12, masked=True),
-        _episode(rng, 6, 40, routed=False),
-        _episode(rng, 9, 25, routed=False, masked=True),
-    ]
-    expected = {
-        episode.traces[0].id: encode_branch_arrays(branch, len(branch.token_ids))
-        for episode in episodes
-        for branch in episode.traces[0].branches
-    }
-    hook = PayloadHook()
-    for episode in episodes:
-        hook.keep(episode, vf.SamplingConfig())
-        assert all(node.routed_experts is None for node in episode.traces[0].nodes)
-    samples = _samples(episodes)
-    assert all(sample.payload is not None for sample in samples)
-
-    for pad in (1, 64):
-        kwargs = dict(seq_len=256, num_train_workers=2, bin_cost=sum, pad_to_multiple_of=pad)
-        with ThreadPoolExecutor(4) as pool:
-            for rank in prepare_batch(samples, **kwargs):
-                layout = [(mb.trace_ids, list(mb.sequence_lengths), mb.padding) for mb in rank]
-                failed, urls = resolve_payloads(rank, pool)
-                assert failed == [] and urls
-                for mb, (trace_ids, lengths, padding) in zip(rank, layout, strict=True):
-                    lengths[-1] -= padding
-                    want = [(expected[trace_id], n) for trace_id, n in zip(trace_ids, lengths, strict=True)]
-                    # Routing replays per micro batch: all of its samples have rows or none.
-                    assert len({arrays.routed_experts is None for arrays, _ in want}) == 1
-                    if want[0][0].routed_experts is None:
-                        assert mb.routed_experts is None
-                    else:
-                        rows = b"".join(
-                            arrays.routed_experts.data[
-                                : n * len(arrays.routed_experts.data) // arrays.routed_experts.shape[0]
-                            ]
-                            for arrays, n in want
-                        )
-                        rows += payload._tile(rows, padding * len(rows) // sum(lengths))
-                        assert mb.routed_experts.data == rows
-                    for name, empty in (("sampling_mask", (0, 0)), ("top_logprobs", (0, 0))):
-                        got = getattr(mb, name)
-                        heads = [getattr(arrays, name) for arrays, _ in want]
-                        if all(head is None for head in heads):
-                            assert got is None
-                            continue
-                        got_rows = _rows(got.counts, got.ids, got.logprobs)
-                        want_rows = []
-                        for head, (_, n) in zip(heads, want):
-                            want_rows += (
-                                _rows(head.counts, head.ids, head.logprobs)[:n]
-                                if head is not None
-                                else [((), None)] * n
-                            )
-                        want_rows += [((), None)] * padding
-                        assert [ids for ids, _ in got_rows] == [ids for ids, _ in want_rows]
-                        for (_, got_lp), (ids, want_lp) in zip(got_rows, want_rows):
-                            if want_lp is not None:
-                                assert got_lp == want_lp
-                            elif got_lp is not None:
-                                assert all(np.isnan(got_lp)) and len(got_lp) == len(ids)
-                    assert mb.payloads is None
+def _micro_batch(lengths: list[int], payloads: list[PayloadSlice | None], padding: int = 0) -> MicroBatch:
+    """A packed micro batch as the trainer receives it: ``lengths`` per sequence, the last one
+    extended by ``padding``, each sequence referencing its kept arrays."""
+    lengths = [*lengths[:-1], lengths[-1] + padding]
+    n = sum(lengths)
+    micro_batch = MicroBatch(
+        input_ids=np.zeros(n, np.int32),
+        loss_mask=np.ones(n, np.bool_),
+        advantages=np.zeros(n, np.float32),
+        inference_logprobs=np.zeros(n, np.float32),
+        position_ids=np.zeros(n, np.int32),
+        sequence_lengths=lengths,
+        temperatures=np.ones(n, np.float32),
+        env_names=["env"] * len(lengths),
+        seq_lens=lengths,
+        padding=padding,
+        payloads=payloads,
+    )
+    return msgspec.msgpack.decode(msgspec.msgpack.encode(micro_batch, enc_hook=encode_array), type=MicroBatch)
 
 
 def test_heads_and_masks_survive_truncation_mixed_packing_and_padding():
@@ -174,18 +98,9 @@ def test_heads_and_masks_survive_truncation_mixed_packing_and_padding():
     the trainer cut to their slices, packed together and padded."""
     server = PayloadServer("127.0.0.1")
 
-    def sample(key: str | None, fields: list[str], **arrays) -> TrainingSample:
-        if key is not None:
-            server.put(key, payload._encoder.encode(wire.BranchArrays(**arrays)))
-        return TrainingSample(
-            token_ids=np.array([1, 2, 3, 4], np.int32),
-            mask=np.array([False, False, True, True]),
-            logprobs=np.array([0.0, 0.0, -0.1, -0.2], np.float32),
-            temperatures=np.ones(4, np.float32),
-            advantages=np.array([0.0, 0.0, 1.0, 1.0], np.float32),
-            env_name="env",
-            payload=PayloadSlice(url=server.url, id=key, num_tokens=4, fields=fields) if key is not None else None,
-        )
+    def ref(key: str, fields: list[str], num_tokens: int = 4, **arrays) -> PayloadSlice:
+        server.put(key, payload._encoder.encode(wire.BranchArrays(**arrays)))
+        return PayloadSlice(url=server.url, id=key, num_tokens=num_tokens, fields=fields)
 
     head = wire.TopLogprobs(
         ids=np.array([3, 7, 4], np.int32).tobytes(),
@@ -198,27 +113,19 @@ def test_heads_and_masks_survive_truncation_mixed_packing_and_padding():
         logprobs=np.log(np.array([1.0, 0.75, 0.25], np.float32)).tobytes(),
     )
     plain = wire.SamplingMask(ids=np.array([9], np.int32).tobytes(), counts=np.array([0, 0, 0, 1], np.int32).tobytes())
-    samples = [
-        sample("head", ["top_logprobs"], top_logprobs=head),
-        sample("replayed", ["sampling_mask", "sampling_mask_logprobs"], sampling_mask=replayed),
-        sample("plain", ["sampling_mask"], sampling_mask=plain),
+    payloads = [
+        # Truncated to 3 of its 4 tokens: the head's last row is cut.
+        ref("head", ["top_logprobs"], num_tokens=3, top_logprobs=head),
+        ref("replayed", ["sampling_mask", "sampling_mask_logprobs"], sampling_mask=replayed),
+        ref("plain", ["sampling_mask"], sampling_mask=plain),
         # No arrays at all: it shares the micro batch and gets empty rows.
-        sample(None, []),
+        None,
     ]
+    packed = _micro_batch([3, 4, 4, 4], payloads, padding=1)
     with ThreadPoolExecutor(2) as pool:
-        [[truncated]] = prepare_batch(samples[:1], seq_len=3, num_train_workers=1, bin_cost=sum)
-        assert resolve_payloads([truncated], pool)[0] == []
-        np.testing.assert_array_equal(np.frombuffer(truncated.top_logprobs.counts, np.int32), [0, 0, 2])
-        np.testing.assert_array_equal(np.frombuffer(truncated.top_logprobs.ids, np.int32), [3, 7])
-        [[truncated]] = prepare_batch(samples[1:2], seq_len=3, num_train_workers=1, bin_cost=sum)
-        assert resolve_payloads([truncated], pool)[0] == []
-        np.testing.assert_array_equal(np.frombuffer(truncated.sampling_mask.ids, np.int32), [5])
-        np.testing.assert_array_equal(np.frombuffer(truncated.sampling_mask.logprobs, np.float32), [0.0])
-
-        [[packed]] = prepare_batch(samples, seq_len=16, num_train_workers=1, bin_cost=sum, pad_to_multiple_of=16)
-        packed = msgspec.msgpack.decode(msgspec.msgpack.encode(packed, enc_hook=encode_array), type=MicroBatch)
         assert resolve_payloads([packed], pool)[0] == []
-    assert len(packed.top_logprobs.ids) == 3 * 4
+    assert packed.payloads is None
+    assert len(packed.top_logprobs.ids) == 2 * 4
     tensor = DataLoader._micro_batch_to_tensor(None, packed)
     ids, values = tensor["top_logprobs_ids"][0], tensor["top_logprobs_values"][0]
     assert ids.shape == values.shape
@@ -226,10 +133,30 @@ def test_heads_and_masks_survive_truncation_mixed_packing_and_padding():
     rows = {
         tuple(row[row >= 0].tolist()): value[row >= 0].tolist() for row, value in zip(ids, values) if (row >= 0).any()
     }
-    expected = {(3, 7): [-0.3, -1.8], (4,): [-0.2], (5,): [0.0], (6, 8): np.log([0.75, 0.25]), (9,): [np.nan]}
+    expected = {(3, 7): [-0.3, -1.8], (5,): [0.0], (6, 8): np.log([0.75, 0.25]), (9,): [np.nan]}
     assert rows.keys() == expected.keys()
     for key, value in expected.items():
         np.testing.assert_allclose(rows[key], value, rtol=1e-6)
+
+
+def test_unfetchable_micro_batches_are_reported():
+    server = PayloadServer("127.0.0.1")
+    missing = PayloadSlice(
+        url=server.url,
+        id="missing",
+        num_tokens=16,
+        fields=["routed_experts"],
+        routed_shape=[3, 2],
+        routed_dtype="uint8",
+    )
+    micro_batch = _micro_batch([16], [missing])
+    with ThreadPoolExecutor(1) as pool:
+        assert resolve_payloads([micro_batch], pool)[0] == [0]
+    # Still replayable: the model's routing shape, every top-k slot a different expert.
+    routed = micro_batch.routed_experts
+    assert routed.shape == [16, 3, 2]
+    rows = np.frombuffer(routed.data, dtype=routed.dtype).reshape(routed.shape)
+    assert (rows[..., 0] != rows[..., 1]).all()
 
 
 @pytest.mark.parametrize("support", ["complete", "mismatch"])
@@ -255,23 +182,6 @@ def test_sampler_evidence_moves_masked_top_logprobs_onto_the_mask(support):
     np.testing.assert_array_equal(np.frombuffer(top_logprobs.ids, np.int32), [1, 2])
     np.testing.assert_array_equal(np.frombuffer(top_logprobs.logprobs, np.float32), np.float32([-0.1, -2.5]))
     np.testing.assert_array_equal(np.frombuffer(top_logprobs.counts, np.int32), [0, 2, 0, 0])
-
-
-def test_unfetchable_micro_batches_are_reported():
-    rng = np.random.default_rng(1)
-    episode = _episode(rng, 10, 20)
-    PayloadHook().keep(episode, vf.SamplingConfig())
-    [sample] = _samples([episode])
-    sample.payload.id = "missing"
-    # Truncated, so the reference the trainer sees is the packer's copy.
-    [[micro_batch]] = prepare_batch([sample], seq_len=16, num_train_workers=1, bin_cost=sum)
-    with ThreadPoolExecutor(1) as pool:
-        assert resolve_payloads([micro_batch], pool)[0] == [0]
-    # Still replayable: the model's routing shape, every top-k slot a different expert.
-    routed = micro_batch.routed_experts
-    assert routed.shape == [16, 3, 2]
-    rows = np.frombuffer(routed.data, dtype=routed.dtype).reshape(routed.shape)
-    assert (rows[..., 0] != rows[..., 1]).all()
 
 
 def _two_trace_episode(rng: np.random.Generator) -> Episode:
