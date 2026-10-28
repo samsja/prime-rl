@@ -1,0 +1,19 @@
+[package]
+name = "prl-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prl-types = { workspace = true }
+prl-wire = { workspace = true }
+prl-monitors = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
+tracing = { workspace = true }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
