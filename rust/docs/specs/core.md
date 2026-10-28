@@ -164,6 +164,9 @@ Ordering and semantics notes:
 - **Deltas**: run tasks relay deltas to the dispatcher on a channel; a per-episode latch stops
   relaying once the episode is claimed (dropped/cancelled), and pending deltas are drained before
   any completion or claim, so no live trace is left without its `done` event.
+- **Checkpoint pickle class path**: `progress.pt` pickles `Progress` as `prime_rl.orchestrator.types.Progress`
+  on purpose (an older Python orchestrator can resume a Rust checkpoint); that module no longer exists in this
+  branch, so only an older Python env can `torch.load` it.
 - **Not ported**: `gc.run`/`malloc_trim` (no Python GC; gc gauges are kept), `set_default_executor`,
   `intercept_vf_logging` (stays in Python), the tokenizer load (unused by the Rust sink).
 
