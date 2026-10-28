@@ -13,9 +13,6 @@ pub struct MMRefs {
     pub images: Vec<MMImageRef>,
 }
 
-/// Where trace info keeps an env server's payload references.
-pub const PAYLOAD_INFO_KEY: &str = "prime_rl_payload";
-
 /// A sample's training arrays kept by the env-server worker at `url`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayloadSlice {

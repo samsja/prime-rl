@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use anyhow::{bail, Result};
 use prl_wire::{Branch, Trace, Value};
 
-use crate::sample::{MMImageRef, MMRefs, PayloadSlice, TrainingSample, PAYLOAD_INFO_KEY};
+use prl_wire::payload::PAYLOAD_INFO_KEY;
+
+use crate::sample::{MMImageRef, MMRefs, PayloadSlice, TrainingSample};
 
 fn image_urls(branch: &Branch<'_>) -> Vec<String> {
     let mut urls = Vec::new();
@@ -112,28 +114,19 @@ fn loss_weights(
     Ok(weights.iter().any(|&x| x != 0.0).then_some(weights))
 }
 
-fn payload_slice(trace: &Trace, branch_index: usize, num_tokens: usize) -> Result<Option<PayloadSlice>> {
-    let Some(info) = trace.info.get(PAYLOAD_INFO_KEY).filter(|v| v.truthy()) else {
-        return Ok(None);
-    };
-    let Some(reference) = info.get("branches").and_then(|b| b.get(&branch_index.to_string())) else {
-        return Ok(None);
-    };
-    let field = |key: &str| reference.get(key).filter(|v| !v.is_nil());
-    let str_of = |v: &Value, what: &str| -> Result<String> {
-        v.as_str().map(str::to_owned).ok_or_else(|| anyhow::anyhow!("payload reference {what} must be a string"))
-    };
-    Ok(Some(PayloadSlice {
-        url: str_of(info.get("url").unwrap_or(&Value::Nil), "url")?,
-        id: str_of(field("id").unwrap_or(&Value::Nil), "id")?,
+/// The branch's arrays an env server kept (`trace.info[PAYLOAD_INFO_KEY]`), if any.
+fn payload_slice(trace: &Trace, branch_index: usize, num_tokens: usize) -> Option<PayloadSlice> {
+    let info = trace.info.get(PAYLOAD_INFO_KEY).filter(|v| v.truthy())?;
+    let reference = info.get("branches")?.get(&branch_index.to_string())?;
+    let get = |key: &str| reference.get(key).filter(|v| !v.is_nil());
+    Some(PayloadSlice {
+        url: info.get("url")?.as_str()?.to_owned(),
+        id: get("id")?.as_str()?.to_owned(),
         num_tokens,
-        fields: field("fields")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_owned)).collect())
-            .unwrap_or_default(),
-        routed_shape: field("routed_shape").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).collect()),
-        routed_dtype: field("routed_dtype").and_then(Value::as_str).map(str::to_owned),
-    }))
+        fields: get("fields")?.as_array()?.iter().filter_map(|f| f.as_str().map(str::to_owned)).collect(),
+        routed_shape: get("routed_shape").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).collect()),
+        routed_dtype: get("routed_dtype").and_then(Value::as_str).map(str::to_owned),
+    })
 }
 
 /// One `TrainingSample` per trainable branch. `temperatures` is left empty for the sink to fill.
@@ -153,7 +146,7 @@ pub fn trace_to_samples(trace: &Trace, env_name: &str) -> Result<Vec<TrainingSam
             (Some(types), refs)
         };
         let [rl, ce, ref_kl] = &mut trained;
-        let payload = payload_slice(trace, branch.index, token_ids.len())?;
+        let payload = payload_slice(trace, branch.index, token_ids.len());
         samples.push(TrainingSample {
             mask,
             logprobs: branch.logprobs(),

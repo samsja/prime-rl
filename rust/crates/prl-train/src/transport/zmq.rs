@@ -22,12 +22,12 @@ struct BatchRequest {
 /// One libzmq ROUTER socket answering every trainer rank's DEALER, replying on the connection it
 /// asked on (`ROUTER_MANDATORY`: replying to a rank that went away errors). The socket is blocking,
 /// so each send runs on a blocking thread.
-pub struct ZmqBatchSender {
+pub(super) struct ZmqBatchSender {
     socket: Option<zmq::Socket>,
     _context: zmq::Context,
     closed: Arc<AtomicBool>,
     data_world_size: usize,
-    pub current_step: u64,
+    current_step: u64,
 }
 
 impl ZmqBatchSender {
@@ -65,11 +65,6 @@ impl ZmqBatchSender {
         Ok(elapsed)
     }
 
-    pub async fn close(mut self) {
-        self.closed.store(true, Ordering::Relaxed);
-        drop(self.socket.take());
-        tracing::debug!("Closed ZMQ micro batch sender");
-    }
 }
 
 impl Drop for ZmqBatchSender {

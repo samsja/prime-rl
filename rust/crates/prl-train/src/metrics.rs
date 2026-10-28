@@ -17,12 +17,22 @@ pub fn dispatch_failure_metrics(failures: &[DispatchFailure], prefix: &str, tota
         return out;
     }
     out.insert(format!("{prefix}/dispatch_failure/mean"), Scalar::Float(failures.len() as f64 / total_attempts as f64));
-    let mut types: Vec<&str> = failures.iter().map(|f| f.error.type_.as_str()).collect();
-    types.sort();
-    types.dedup();
-    for ty in types {
-        let count = failures.iter().filter(|f| f.error.type_ == ty).count();
+    let types: Vec<&str> = failures.iter().map(|f| f.error.type_.as_str()).collect();
+    for (ty, count) in counted(types) {
         out.insert(format!("{prefix}/dispatch_failure/{ty}"), Scalar::Float(count as f64));
+    }
+    out
+}
+
+/// `(item, count)` per distinct item, sorted.
+fn counted(mut items: Vec<&str>) -> Vec<(&str, usize)> {
+    items.sort();
+    let mut out: Vec<(&str, usize)> = Vec::new();
+    for item in items {
+        match out.last_mut() {
+            Some((last, count)) if *last == item => *count += 1,
+            _ => out.push((item, 1)),
+        }
     }
     out
 }
@@ -31,12 +41,7 @@ fn comb(n: u64, k: u64) -> u128 {
     if k > n {
         return 0;
     }
-    let k = k.min(n - k);
-    let mut result: u128 = 1;
-    for i in 0..k {
-        result = result * u128::from(n - i) / u128::from(i + 1);
-    }
-    result
+    (0..k.min(n - k)).fold(1u128, |acc, i| acc * u128::from(n - i) / u128::from(i + 1))
 }
 
 /// Unbiased pass@k and pass^k for one example's binary rewards, k = powers of 2 in [1, n].
@@ -54,7 +59,7 @@ pub fn compute_pass_metrics(rewards: &[f64]) -> IndexMap<String, f64> {
     out
 }
 
-/// A distribution with mean, extrema and linearly interpolated percentiles.
+/// A distribution with mean, extrema and linearly interpolated percentiles (0.0 when empty).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stat {
     pub values: Vec<f64>,
@@ -65,20 +70,24 @@ impl Stat {
         Self { values }
     }
 
+    pub fn sum(&self) -> f64 {
+        self.values.iter().sum()
+    }
+
     pub fn mean(&self) -> f64 {
         if self.values.is_empty() {
             0.0
         } else {
-            self.values.iter().sum::<f64>() / self.values.len() as f64
+            self.sum() / self.values.len() as f64
         }
     }
 
     pub fn max(&self) -> f64 {
-        self.values.iter().copied().fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| if v > m { v } else { m }))).unwrap_or(0.0)
+        self.values.iter().copied().reduce(f64::max).unwrap_or(0.0)
     }
 
     pub fn min(&self) -> f64 {
-        self.values.iter().copied().fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| if v < m { v } else { m }))).unwrap_or(0.0)
+        self.values.iter().copied().reduce(f64::min).unwrap_or(0.0)
     }
 
     pub fn percentile(&self, q: f64) -> f64 {
@@ -86,28 +95,11 @@ impl Stat {
             return 0.0;
         }
         let mut values = self.values.clone();
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        values.sort_by(f64::total_cmp);
         let rank = q / 100.0 * (values.len() - 1) as f64;
         let low = rank as usize;
         let high = (low + 1).min(values.len() - 1);
         values[low] + (values[high] - values[low]) * (rank - low as f64)
-    }
-
-    pub fn sum(&self) -> f64 {
-        self.values.iter().sum()
-    }
-
-    pub fn to_dict(&self, prefix: &str) -> Vec<(String, f64)> {
-        if self.values.is_empty() {
-            return Vec::new();
-        }
-        vec![
-            (format!("{prefix}/mean"), self.mean()),
-            (format!("{prefix}/max"), self.max()),
-            (format!("{prefix}/min"), self.min()),
-            (format!("{prefix}/p10"), self.percentile(10.0)),
-            (format!("{prefix}/p90"), self.percentile(90.0)),
-        ]
     }
 }
 
@@ -120,12 +112,12 @@ pub struct MetricWindow {
 }
 
 impl MetricWindow {
-    pub fn distribution(&mut self, key: impl Into<String>, stat: &Stat) {
-        self.distributions.entry(key.into()).or_default().extend_from_slice(&stat.values);
+    pub fn distribution(&mut self, key: impl Into<String>, values: &[f64]) {
+        self.distributions.entry(key.into()).or_default().extend_from_slice(values);
     }
 
     pub fn rate<'a>(&mut self, prefix: impl Into<String>, counts: impl IntoIterator<Item = (&'a str, f64)>, total: usize) {
-        let entry = self.rates.entry(prefix.into()).or_insert_with(|| (IndexMap::new(), 0));
+        let entry = self.rates.entry(prefix.into()).or_default();
         for (name, count) in counts {
             *entry.0.entry(name.to_owned()).or_insert(0.0) += count;
         }
@@ -138,7 +130,7 @@ impl MetricWindow {
 
     pub fn extend(&mut self, other: &MetricWindow) {
         for (key, values) in &other.distributions {
-            self.distributions.entry(key.clone()).or_default().extend_from_slice(values);
+            self.distribution(key.clone(), values);
         }
         for (key, &value) in &other.counts {
             self.count(key.clone(), value);
@@ -148,24 +140,25 @@ impl MetricWindow {
         }
     }
 
-    pub fn is_empty_counts(&self) -> bool {
-        self.counts.is_empty()
-    }
-
+    /// Counts, then distributions (`/mean,/max,/min,/p10,/p90`), then rates (`prefix/name`).
     pub fn to_dict(&self) -> Metrics {
         let mut out = Metrics::new();
         for (key, &value) in &self.counts {
-            out.insert(key.clone(), Scalar::Float(value));
+            out.insert(key.clone(), value.into());
         }
         for (key, values) in &self.distributions {
-            for (k, v) in Stat::new(values.clone()).to_dict(key) {
-                out.insert(k, Scalar::Float(v));
+            if values.is_empty() {
+                continue;
+            }
+            let stat = Stat::new(values.clone());
+            for (name, value) in [("mean", stat.mean()), ("max", stat.max()), ("min", stat.min()), ("p10", stat.percentile(10.0)), ("p90", stat.percentile(90.0))] {
+                out.insert(format!("{key}/{name}"), value.into());
             }
         }
         for (prefix, (counts, total)) in &self.rates {
             for (name, &count) in counts {
                 let key = if name.is_empty() { prefix.clone() } else { format!("{prefix}/{name}") };
-                out.insert(key, Scalar::Float(if *total > 0 { count / *total as f64 } else { 0.0 }));
+                out.insert(key, (if *total > 0 { count / *total as f64 } else { 0.0 }).into());
             }
         }
         out
@@ -188,175 +181,98 @@ fn group_id(episode: &EpisodeRef) -> &str {
     episode_group_id(&episode.episode).unwrap_or_default()
 }
 
-fn bool_f(b: bool) -> f64 {
-    if b {
-        1.0
-    } else {
-        0.0
-    }
+fn f(b: bool) -> f64 {
+    f64::from(u8::from(b))
 }
 
-/// Trace-level statistics of one agent's records.
-pub struct TraceMetrics<'r, 'a> {
-    pub records: &'r [TraceRecord<'a>],
+fn values<'a>(records: &[TraceRecord<'a>], value: impl Fn(&'a Trace) -> f64) -> Vec<f64> {
+    records.iter().map(|r| value(r.trace)).collect()
 }
 
-const TRACE_DISTRIBUTIONS: [&str; 6] =
-    ["reward", "num_total_tokens", "num_input_tokens", "num_output_tokens", "num_turns", "num_branches"];
-const TRACE_RATES: [&str; 3] = ["is_truncated", "is_timeout", "is_completed"];
-
-fn trace_attr(trace: &Trace, name: &str) -> f64 {
-    match name {
-        "reward" => trace.reward(),
-        "num_total_tokens" => trace.num_total_tokens() as f64,
-        "num_input_tokens" => trace.num_input_tokens() as f64,
-        "num_output_tokens" => trace.num_output_tokens() as f64,
-        "num_turns" => trace.num_turns() as f64,
-        "num_branches" => trace.num_branches() as f64,
-        "is_truncated" => bool_f(trace.is_truncated()),
-        "is_timeout" => bool_f(trace.is_timeout),
-        "is_completed" => bool_f(trace.is_completed),
-        other => unreachable!("unknown trace attribute {other}"),
+/// `TraceMetrics.snapshot`: trace-level statistics of one agent's records.
+fn trace_snapshot(records: &[TraceRecord<'_>], prefix: &str, subset: Subset) -> MetricWindow {
+    let mut out = MetricWindow::default();
+    let n = records.len();
+    let distributions: [(&str, fn(&Trace) -> f64); 6] = [
+        ("reward", |t| t.reward()),
+        ("num_total_tokens", |t| t.num_total_tokens() as f64),
+        ("num_input_tokens", |t| t.num_input_tokens() as f64),
+        ("num_output_tokens", |t| t.num_output_tokens() as f64),
+        ("num_turns", |t| t.num_turns() as f64),
+        ("num_branches", |t| t.num_branches() as f64),
+    ];
+    for (name, value) in distributions {
+        out.distribution(format!("{prefix}/{name}"), &values(records, value));
     }
-}
-
-impl TraceMetrics<'_, '_> {
-    pub fn stat(&self, name: &str) -> Stat {
-        Stat::new(self.records.iter().map(|r| trace_attr(r.trace, name)).collect())
+    let rates: [(&str, fn(&Trace) -> bool); 3] =
+        [("is_truncated", |t| t.is_truncated()), ("is_timeout", |t| t.is_timeout), ("is_completed", |t| t.is_completed)];
+    for (name, value) in rates {
+        out.rate(format!("{prefix}/{name}"), [("mean", values(records, |t| f(value(t))).iter().sum())], n);
     }
 
-    fn timing(&self) -> Vec<(String, Stat)> {
-        let traces = || self.records.iter().map(|r| &r.trace.timing);
-        let phase = |t: &prl_wire::Timing, p: &str| match p {
-            "setup" => t.setup.duration(),
-            "agent" => t.agent.duration(),
-            "finalize" => t.finalize.duration(),
-            "scoring" => t.scoring.duration(),
-            _ => unreachable!(),
-        };
-        let phases = ["setup", "agent", "finalize", "scoring"];
-        let mut out: Vec<(String, Stat)> =
-            phases.iter().map(|p| (p.to_string(), Stat::new(traces().map(|t| phase(t, p)).collect()))).collect();
-        out.push(("agent/model".into(), Stat::new(traces().map(|t| t.agent.model.duration).collect())));
-        out.push(("agent/harness".into(), Stat::new(traces().map(|t| t.agent.harness.duration).collect())));
-        out.push(("total".into(), Stat::new(traces().map(|t| phases.iter().map(|p| phase(t, p)).sum()).collect())));
-        out
+    let phases = ["setup", "agent", "finalize", "scoring"];
+    let phase = |t: &Trace, p: &str| t.timing.phase(p).map_or(0.0, |s| s.duration());
+    for p in phases {
+        out.distribution(format!("{prefix}/timing/{p}"), &values(records, |t| phase(t, p)));
+    }
+    out.distribution(format!("{prefix}/timing/agent/model"), &values(records, |t| t.timing.agent.model.duration));
+    out.distribution(format!("{prefix}/timing/agent/harness"), &values(records, |t| t.timing.agent.harness.duration));
+    out.distribution(format!("{prefix}/timing/total"), &values(records, |t| phases.iter().map(|p| phase(t, p)).sum()));
+
+    // Named metrics / rewards: a trace without the name is skipped, an unscored one reads 0.0.
+    let mut names: Vec<&str> = records.iter().flat_map(|r| r.trace.metrics.keys().map(String::as_str)).collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        let values: Vec<f64> = records.iter().filter_map(|r| r.trace.metrics.get(name).map(|v| v.unwrap_or(0.0))).collect();
+        out.distribution(format!("{prefix}/metrics/{name}"), &values);
+    }
+    let mut names: Vec<&str> = records.iter().flat_map(|r| r.trace.rewards.keys().map(String::as_str)).collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        let values: Vec<f64> =
+            records.iter().filter_map(|r| r.trace.rewards.get(name).map(|v| v.as_ref().map_or(0.0, |rw| rw.value()))).collect();
+        out.distribution(format!("{prefix}/rewards/{name}"), &values);
     }
 
-    fn custom(&self, rewards: bool) -> Vec<(String, Stat)> {
-        let mut names: Vec<&str> = Vec::new();
-        for r in self.records {
-            if rewards {
-                names.extend(r.trace.rewards.keys().map(String::as_str));
-            } else {
-                names.extend(r.trace.metrics.keys().map(String::as_str));
-            }
+    if subset == Subset::All {
+        let count = |pred: &dyn Fn(&TraceRecord<'_>) -> bool| records.iter().filter(|r| pred(r)).count() as f64;
+        out.rate(format!("{prefix}/has_error"), [("mean", count(&|r| r.trace.has_error()))], n);
+        out.rate(format!("{prefix}/cancelled"), [("mean", count(&|r| r.cancelled))], n);
+        let error_types = records.iter().filter(|r| r.trace.has_error()).filter_map(|r| r.trace.last_error()).map(|e| e.type_.as_str());
+        for (ty, c) in counted(error_types.collect()) {
+            out.count(format!("{prefix}/error/{ty}"), c as f64);
         }
-        names.sort();
-        names.dedup();
-        names
-            .into_iter()
-            .map(|name| {
-                let values = self
-                    .records
-                    .iter()
-                    .filter_map(|r| {
-                        if rewards {
-                            r.trace.rewards.get(name).map(|v| v.as_ref().map_or(0.0, |rw| rw.value()))
-                        } else {
-                            r.trace.metrics.get(name).map(|v| v.unwrap_or(0.0))
-                        }
-                    })
-                    .collect();
-                (name.to_owned(), Stat::new(values))
-            })
-            .collect()
-    }
-
-    fn solve_rates(&self) -> [(&'static str, f64); 3] {
+        out.rate(format!("{prefix}/dropped"), [("mean", count(&|r| r.trace.is_dropped()))], n);
+        for (reason, c) in counted(records.iter().filter_map(|r| r.trace.dropped.as_deref()).collect()) {
+            out.count(format!("{prefix}/dropped/{reason}"), c as f64);
+        }
         let mut groups: IndexMap<&str, Vec<f64>> = IndexMap::new();
-        for r in self.records {
+        for r in records {
             groups.entry(group_id(r.episode)).or_default().push(r.trace.reward());
         }
         let num_groups = groups.len() as f64;
-        let solved_none = groups.values().filter(|g| g.iter().sum::<f64>() == 0.0).count() as f64;
-        let solved_all = groups.values().filter(|g| g.iter().all(|&r| r == 1.0)).count() as f64;
-        [
-            ("solved_none", solved_none / num_groups),
-            ("solved_all", solved_all / num_groups),
-            ("solved_some", 1.0 - (solved_none + solved_all) / num_groups),
-        ]
+        let none = groups.values().filter(|g| g.iter().sum::<f64>() == 0.0).count() as f64;
+        let all = groups.values().filter(|g| g.iter().all(|&r| r == 1.0)).count() as f64;
+        let solve_rates = [
+            ("solved_none", none / num_groups),
+            ("solved_all", all / num_groups),
+            ("solved_some", 1.0 - (none + all) / num_groups),
+        ];
+        out.rate(prefix, solve_rates.map(|(k, v)| (k, v * num_groups)), groups.len());
     }
-
-    pub fn snapshot(&self, prefix: &str, subset: Subset) -> MetricWindow {
-        let mut out = MetricWindow::default();
-        let n = self.records.len();
-        for name in TRACE_DISTRIBUTIONS {
-            out.distribution(format!("{prefix}/{name}"), &self.stat(name));
-        }
-        for name in TRACE_RATES {
-            out.rate(format!("{prefix}/{name}"), [("mean", self.stat(name).sum())], n);
-        }
-        for (group, stats) in [("timing", self.timing()), ("metrics", self.custom(false)), ("rewards", self.custom(true))] {
-            for (key, stat) in stats {
-                out.distribution(format!("{prefix}/{group}/{key}"), &stat);
-            }
-        }
-        if subset == Subset::All {
-            let has_error = self.records.iter().filter(|r| r.trace.has_error()).count() as f64;
-            out.rate(format!("{prefix}/has_error"), [("mean", has_error)], n);
-            let cancelled = self.records.iter().filter(|r| r.cancelled).count() as f64;
-            out.rate(format!("{prefix}/cancelled"), [("mean", cancelled)], n);
-            let mut error_types: Vec<&str> = self
-                .records
-                .iter()
-                .filter(|r| r.trace.has_error())
-                .filter_map(|r| r.trace.last_error().map(|e| e.type_.as_str()))
-                .collect();
-            error_types.sort();
-            for (ty, count) in counted(&error_types) {
-                out.count(format!("{prefix}/error/{ty}"), count as f64);
-            }
-            let dropped = self.records.iter().filter(|r| r.trace.is_dropped()).count() as f64;
-            out.rate(format!("{prefix}/dropped"), [("mean", dropped)], n);
-            let mut reasons: Vec<&str> = self.records.iter().filter_map(|r| r.trace.dropped.as_deref()).collect();
-            reasons.sort();
-            for (reason, count) in counted(&reasons) {
-                out.count(format!("{prefix}/dropped/{reason}"), count as f64);
-            }
-            let num_groups = self.records.iter().map(|r| group_id(r.episode)).collect::<HashSet<_>>().len();
-            let rates = self.solve_rates();
-            out.rate(prefix, rates.iter().map(|&(k, v)| (k, v * num_groups as f64)), num_groups);
-        }
-        let truncated = self
-            .records
-            .iter()
-            .filter(|r| r.trace.is_truncated() && r.trace.stop_condition.as_deref() != Some("prompt_too_long"))
-            .count() as f64;
-        out.rate(format!("{prefix}/stop_condition/generation_truncated"), [("", truncated)], n);
-        let conditions: Vec<&str> = self.records.iter().filter_map(|r| r.trace.stop_condition.as_deref()).collect();
-        let mut unique: IndexMap<&str, f64> = IndexMap::new();
-        for c in &conditions {
-            *unique.entry(c).or_insert(0.0) += 1.0;
-        }
-        out.rate(format!("{prefix}/stop_condition"), unique.iter().map(|(&k, &v)| (k, v)), conditions.len());
-        out
+    let truncated = records
+        .iter()
+        .filter(|r| r.trace.is_truncated() && r.trace.stop_condition.as_deref() != Some("prompt_too_long"))
+        .count() as f64;
+    out.rate(format!("{prefix}/stop_condition/generation_truncated"), [("", truncated)], n);
+    let mut conditions: IndexMap<&str, f64> = IndexMap::new();
+    for c in records.iter().filter_map(|r| r.trace.stop_condition.as_deref()) {
+        *conditions.entry(c).or_insert(0.0) += 1.0;
     }
-
-    pub fn to_dict(&self, prefix: &str, subset: Subset) -> Metrics {
-        self.snapshot(prefix, subset).to_dict()
-    }
-}
-
-/// Runs of equal adjacent items with their counts (input sorted).
-fn counted<'a>(sorted: &[&'a str]) -> Vec<(&'a str, usize)> {
-    let mut out: Vec<(&str, usize)> = Vec::new();
-    for &item in sorted {
-        match out.last_mut() {
-            Some((last, count)) if *last == item => *count += 1,
-            _ => out.push((item, 1)),
-        }
-    }
+    let total = conditions.values().sum::<f64>() as usize;
+    out.rate(format!("{prefix}/stop_condition"), conditions.iter().map(|(&k, &v)| (k, v)), total);
     out
 }
 
@@ -388,44 +304,48 @@ pub struct EpisodeCollection {
 }
 
 impl EpisodeCollection {
-    fn all_records(&self) -> Vec<TraceRecord<'_>> {
-        let mut out = Vec::new();
-        for (episode_index, episode) in self.episodes.iter().enumerate() {
+    fn new(episodes: Vec<EpisodeRef>, sampled_trace_ids: HashSet<String>, admitted: bool, cancelled: HashSet<String>) -> Self {
+        let admitted = if admitted { episodes.iter().map(|e| e.id().to_owned()).collect() } else { HashSet::new() };
+        Self {
+            episodes,
+            sampled_trace_ids: Arc::new(sampled_trace_ids),
+            admitted: Arc::new(admitted),
+            cancelled: Arc::new(cancelled),
+            predicate: None,
+        }
+    }
+
+    /// The selected episodes (all, or those with a record the predicate keeps) and their records.
+    fn select(&self) -> (Vec<&EpisodeRef>, Vec<TraceRecord<'_>>) {
+        let (mut episodes, mut records) = (Vec::new(), Vec::new());
+        for episode in &self.episodes {
+            let before = records.len();
             for trace in episode.traces() {
-                out.push(TraceRecord {
-                    episode_index,
+                let record = TraceRecord {
+                    episode_index: episodes.len(),
                     episode,
                     trace,
                     sampled: self.sampled_trace_ids.contains(&trace.id),
                     admitted: self.admitted.contains(episode.id()),
                     cancelled: self.cancelled.contains(episode.id()),
-                });
+                };
+                if self.predicate.is_none_or(|p| p.keep(&record)) {
+                    records.push(record);
+                }
+            }
+            if self.predicate.is_none() || records.len() > before {
+                episodes.push(episode);
             }
         }
-        out
+        (episodes, records)
     }
 
-    /// Records of the selected episodes (episode indices refer to `selected_episodes`).
     pub fn records(&self) -> Vec<TraceRecord<'_>> {
-        let records = self.all_records();
-        let Some(predicate) = self.predicate else { return records };
-        let kept: Vec<TraceRecord<'_>> = records.into_iter().filter(|r| predicate.keep(r)).collect();
-        // Renumber episode indices to the selected episodes.
-        let mut renumber: IndexMap<usize, usize> = IndexMap::new();
-        for r in &kept {
-            let next = renumber.len();
-            renumber.entry(r.episode_index).or_insert(next);
-        }
-        let mut order: Vec<usize> = renumber.keys().copied().collect();
-        order.sort();
-        let position: IndexMap<usize, usize> = order.iter().enumerate().map(|(i, &e)| (e, i)).collect();
-        kept.into_iter().map(|r| TraceRecord { episode_index: position[&r.episode_index], ..r }).collect()
+        self.select().1
     }
 
     pub fn selected_episodes(&self) -> Vec<&EpisodeRef> {
-        let Some(predicate) = self.predicate else { return self.episodes.iter().collect() };
-        let selected: HashSet<usize> = self.all_records().iter().filter(|r| predicate.keep(r)).map(|r| r.episode_index).collect();
-        self.episodes.iter().enumerate().filter(|(i, _)| selected.contains(i)).map(|(_, e)| e).collect()
+        self.select().0
     }
 
     pub fn num_traces(&self) -> usize {
@@ -450,45 +370,37 @@ impl EpisodeCollection {
         if self.predicate.is_none() {
             return self.episodes.iter().map(EpisodeRef::to_episode).collect();
         }
-        let records = self.records();
-        let selected = self.selected_episodes();
-        let mut by_episode: Vec<Vec<Trace>> = vec![Vec::new(); selected.len()];
+        let (episodes, records) = self.select();
+        let mut traces: Vec<Vec<Trace>> = vec![Vec::new(); episodes.len()];
         for r in &records {
             let mut trace = r.trace.clone();
             if let Some(advantage) = scalar_advantage(&trace) {
                 trace.info.insert("advantage".to_string(), advantage.into());
             }
-            by_episode[r.episode_index].push(trace);
+            traces[r.episode_index].push(trace);
         }
-        selected
-            .iter()
-            .zip(by_episode)
-            .map(|(episode, traces)| episode.with_traces(traces))
-            .collect()
+        episodes.iter().zip(traces).map(|(episode, traces)| episode.with_traces(traces)).collect()
     }
 
     fn narrowed(&self, predicate: Predicate) -> Self {
         Self { predicate: Some(predicate), ..self.clone() }
     }
 
-    fn with_episodes(&self, episodes: Vec<EpisodeRef>) -> Self {
-        Self { episodes, ..self.clone() }
-    }
-
-    fn episode_metrics<'s>(&'s self, records: &'s [TraceRecord<'s>]) -> EpisodeMetrics<'s> {
-        EpisodeMetrics { episodes: self.selected_episodes(), records, cancelled: &self.cancelled }
+    fn with_metrics<R>(&self, f: impl FnOnce(&EpisodeMetrics<'_>) -> R) -> R {
+        let (episodes, records) = self.select();
+        f(&EpisodeMetrics { episodes, records: &records, cancelled: &self.cancelled })
     }
 }
 
 /// Episode- and agent-level statistics.
 pub struct EpisodeMetrics<'a> {
-    pub episodes: Vec<&'a EpisodeRef>,
-    pub records: &'a [TraceRecord<'a>],
-    pub cancelled: &'a HashSet<String>,
+    episodes: Vec<&'a EpisodeRef>,
+    records: &'a [TraceRecord<'a>],
+    cancelled: &'a HashSet<String>,
 }
 
 impl<'a> EpisodeMetrics<'a> {
-    pub fn by_agent(&self) -> Vec<(&'a str, Vec<TraceRecord<'a>>)> {
+    fn by_agent(&self) -> Vec<(&'a str, Vec<TraceRecord<'a>>)> {
         let mut per_agent: IndexMap<&'a str, Vec<TraceRecord<'a>>> = IndexMap::new();
         for r in self.records {
             per_agent.entry(r.trace.agent.name.as_str()).or_default().push(*r);
@@ -497,85 +409,70 @@ impl<'a> EpisodeMetrics<'a> {
         per_agent.into_iter().collect()
     }
 
-    fn episode_stat(&self, attr: &str) -> Stat {
+    /// Per selected episode, the sum over its records.
+    fn episode_stat(&self, value: impl Fn(&Trace) -> f64) -> Stat {
         let mut by_episode = vec![0f64; self.episodes.len()];
         for r in self.records {
-            by_episode[r.episode_index] += trace_attr(r.trace, attr);
+            by_episode[r.episode_index] += value(r.trace);
         }
         Stat::new(by_episode)
     }
 
-    pub fn num_total_tokens(&self) -> Stat {
-        self.episode_stat("num_total_tokens")
-    }
-    pub fn num_input_tokens(&self) -> Stat {
-        self.episode_stat("num_input_tokens")
-    }
-    pub fn num_output_tokens(&self) -> Stat {
-        self.episode_stat("num_output_tokens")
-    }
     pub fn num_turns(&self) -> Stat {
-        self.episode_stat("num_turns")
+        self.episode_stat(|t| t.num_turns() as f64)
     }
+
     pub fn num_branches(&self) -> Stat {
-        self.episode_stat("num_branches")
+        self.episode_stat(|t| t.num_branches() as f64)
     }
 
     pub fn reward(&self) -> Stat {
-        Stat::new(self.records.iter().map(|r| r.trace.reward()).collect())
+        Stat::new(values(self.records, |t| t.reward()))
     }
 
     pub fn is_truncated(&self) -> Stat {
-        Stat::new(self.records.iter().map(|r| bool_f(r.trace.is_truncated())).collect())
+        Stat::new(values(self.records, |t| f(t.is_truncated())))
     }
 
     pub fn is_timeout(&self) -> Stat {
-        Stat::new(self.records.iter().map(|r| bool_f(r.trace.is_timeout)).collect())
+        Stat::new(values(self.records, |t| f(t.is_timeout)))
     }
 
     pub fn has_error(&self) -> Stat {
-        Stat::new(self.episodes.iter().map(|e| bool_f(!e.ok() || e.traces().any(Trace::has_error))).collect())
+        Stat::new(self.episodes.iter().map(|e| f(!e.episode.ok || e.traces().any(Trace::has_error))).collect())
     }
 
-    pub fn cancelled(&self) -> Stat {
-        Stat::new(self.episodes.iter().map(|e| bool_f(self.cancelled.contains(e.id()))).collect())
-    }
-
-    pub fn snapshot(&self, prefix: &str, subset: Subset) -> MetricWindow {
+    fn snapshot(&self, prefix: &str, subset: Subset) -> MetricWindow {
         let mut out = MetricWindow::default();
         if self.episodes.is_empty() {
             return out;
         }
         let metric_prefix = format!("{prefix}/{}", subset.as_str());
-        for name in ["num_total_tokens", "num_input_tokens", "num_output_tokens", "num_turns", "num_branches"] {
-            out.distribution(format!("{metric_prefix}/{name}"), &self.episode_stat(name));
+        let episode_stats: [(&str, fn(&Trace) -> f64); 5] = [
+            ("num_total_tokens", |t| t.num_total_tokens() as f64),
+            ("num_input_tokens", |t| t.num_input_tokens() as f64),
+            ("num_output_tokens", |t| t.num_output_tokens() as f64),
+            ("num_turns", |t| t.num_turns() as f64),
+            ("num_branches", |t| t.num_branches() as f64),
+        ];
+        for (name, value) in episode_stats {
+            out.distribution(format!("{metric_prefix}/{name}"), &self.episode_stat(value).values);
         }
         if subset == Subset::All {
-            out.rate(format!("{metric_prefix}/has_error"), [("mean", self.has_error().sum())], self.episodes.len());
-            out.rate(format!("{metric_prefix}/cancelled"), [("mean", self.cancelled().sum())], self.episodes.len());
+            let n = self.episodes.len();
+            out.rate(format!("{metric_prefix}/has_error"), [("mean", self.has_error().sum())], n);
+            let cancelled = self.episodes.iter().filter(|e| self.cancelled.contains(e.id())).count() as f64;
+            out.rate(format!("{metric_prefix}/cancelled"), [("mean", cancelled)], n);
         }
         for (agent, records) in self.by_agent() {
-            out.extend(&TraceMetrics { records: &records }.snapshot(&format!("{metric_prefix}/{agent}"), subset));
-        }
-        out
-    }
-
-    /// `TrainMetrics.snapshot`: plus per-agent `is_trainable` / `is_admitted` rates.
-    pub fn train_snapshot(&self, prefix: &str, subset: Subset) -> MetricWindow {
-        let mut out = self.snapshot(prefix, subset);
-        for (agent, records) in self.by_agent() {
-            let metric_prefix = format!("{prefix}/{}/{agent}", subset.as_str());
-            let trainable = records.iter().filter(|r| is_trainable(r.trace)).count() as f64;
-            out.rate(format!("{metric_prefix}/is_trainable"), [("mean", trainable)], records.len());
-            let admitted = records.iter().filter(|r| r.admitted).count() as f64;
-            out.rate(format!("{metric_prefix}/is_admitted"), [("mean", admitted)], records.len());
+            out.extend(&trace_snapshot(&records, &format!("{metric_prefix}/{agent}"), subset));
         }
         out
     }
 }
 
 /// pass@k / pass^k averaged over examples, for binary rewards only.
-pub fn pass_at_k(records: &[TraceRecord<'_>]) -> IndexMap<String, f64> {
+fn pass_at_k(records: &[TraceRecord<'_>]) -> IndexMap<String, f64> {
     if !records.iter().all(|r| r.trace.reward() == 0.0 || r.trace.reward() == 1.0) {
         return IndexMap::new();
     }
@@ -597,31 +494,17 @@ pub fn pass_at_k(records: &[TraceRecord<'_>]) -> IndexMap<String, f64> {
 
 /// Train-side collection (`TrainEpisodes`).
 #[derive(Debug, Clone, Default)]
-pub struct TrainEpisodes(pub EpisodeCollection);
+pub struct TrainEpisodes(EpisodeCollection);
 
 impl TrainEpisodes {
-    /// `TrainEpisodes(episodes, sampled_trace_ids)`: every episode admitted.
+    /// A shipped cohort: every episode admitted.
     pub fn new(episodes: Vec<EpisodeRef>, sampled_trace_ids: HashSet<String>) -> Self {
-        let admitted = episodes.iter().map(|e| e.id().to_owned()).collect();
-        Self(EpisodeCollection {
-            episodes,
-            sampled_trace_ids: Arc::new(sampled_trace_ids),
-            admitted: Arc::new(admitted),
-            cancelled: Arc::default(),
-            predicate: None,
-        })
+        Self(EpisodeCollection::new(episodes, sampled_trace_ids, true, HashSet::new()))
     }
 
-    /// `TrainEpisodes(cancelled=...).extend(group, admitted=...)` of the train sink.
+    /// A finalized group as the train sink records it.
     pub fn group(episodes: Vec<EpisodeRef>, admitted: bool, cancelled: HashSet<String>) -> Self {
-        let admitted = if admitted { episodes.iter().map(|e| e.id().to_owned()).collect() } else { HashSet::new() };
-        Self(EpisodeCollection {
-            episodes,
-            sampled_trace_ids: Arc::default(),
-            admitted: Arc::new(admitted),
-            cancelled: Arc::new(cancelled),
-            predicate: None,
-        })
+        Self(EpisodeCollection::new(episodes, HashSet::new(), admitted, cancelled))
     }
 
     pub fn effective(&self) -> Self {
@@ -634,17 +517,26 @@ impl TrainEpisodes {
             let env = episode_env_name(&episode.episode).unwrap_or_default().to_owned();
             grouped.entry(env).or_default().push(episode.clone());
         }
-        grouped.into_iter().map(|(env, episodes)| (env, Self(self.0.with_episodes(episodes)))).collect()
+        grouped.into_iter().map(|(env, episodes)| (env, Self(EpisodeCollection { episodes, ..self.0.clone() }))).collect()
     }
 
-    /// Runs `f` over the collection's `TrainMetrics`.
     pub fn with_metrics<R>(&self, f: impl FnOnce(&EpisodeMetrics<'_>) -> R) -> R {
-        let records = self.0.records();
-        f(&self.0.episode_metrics(&records))
+        self.0.with_metrics(f)
     }
 
+    /// `TrainMetrics.snapshot`: plus per-agent `is_trainable` / `is_admitted` rates.
     pub fn snapshot(&self, prefix: &str, subset: Subset) -> MetricWindow {
-        self.with_metrics(|m| m.train_snapshot(prefix, subset))
+        self.with_metrics(|m| {
+            let mut out = m.snapshot(prefix, subset);
+            for (agent, records) in m.by_agent() {
+                let metric_prefix = format!("{prefix}/{}/{agent}", subset.as_str());
+                let trainable = records.iter().filter(|r| is_trainable(r.trace)).count() as f64;
+                out.rate(format!("{metric_prefix}/is_trainable"), [("mean", trainable)], records.len());
+                let admitted = records.iter().filter(|r| r.admitted).count() as f64;
+                out.rate(format!("{metric_prefix}/is_admitted"), [("mean", admitted)], records.len());
+            }
+            out
+        })
     }
 
     pub fn to_wandb(&self, prefix: &str, subset: Subset) -> Metrics {
@@ -662,24 +554,14 @@ impl std::ops::Deref for TrainEpisodes {
 /// Eval-side collection (`EvalEpisodes`): one env's epoch.
 #[derive(Debug, Clone, Default)]
 pub struct EvalEpisodes {
-    pub inner: EpisodeCollection,
-    pub group_size: usize,
+    inner: EpisodeCollection,
+    group_size: usize,
 }
 
 impl EvalEpisodes {
     pub fn new(episodes: Vec<Arc<Episode>>, group_size: usize) -> Self {
-        let episodes: Vec<EpisodeRef> = episodes.into_iter().map(EpisodeRef::whole).collect();
-        let admitted = episodes.iter().map(|e| e.id().to_owned()).collect();
-        Self {
-            inner: EpisodeCollection {
-                episodes,
-                sampled_trace_ids: Arc::default(),
-                admitted: Arc::new(admitted),
-                cancelled: Arc::default(),
-                predicate: None,
-            },
-            group_size,
-        }
+        let episodes = episodes.into_iter().map(EpisodeRef::whole).collect();
+        Self { inner: EpisodeCollection::new(episodes, HashSet::new(), true, HashSet::new()), group_size }
     }
 
     pub fn effective(&self) -> Self {
@@ -687,8 +569,7 @@ impl EvalEpisodes {
     }
 
     pub fn with_metrics<R>(&self, f: impl FnOnce(&EpisodeMetrics<'_>) -> R) -> R {
-        let records = self.inner.records();
-        f(&self.inner.episode_metrics(&records))
+        self.inner.with_metrics(f)
     }
 
     /// `EvalMetrics.to_wandb`: plus per-agent `avg@{group_size}` and, on `effective`, pass@k / pass^k.
@@ -697,11 +578,11 @@ impl EvalEpisodes {
             let mut out = m.snapshot(prefix, subset).to_dict();
             for (agent, records) in m.by_agent() {
                 let metric_prefix = format!("{prefix}/{}/{agent}", subset.as_str());
-                let rewards = Stat::new(records.iter().map(|r| r.trace.reward()).collect());
-                out.insert(format!("{metric_prefix}/avg@{}", self.group_size), Scalar::Float(rewards.mean()));
+                let rewards = Stat::new(values(&records, |t| t.reward()));
+                out.insert(format!("{metric_prefix}/avg@{}", self.group_size), rewards.mean().into());
                 if subset == Subset::Effective {
                     for (key, value) in pass_at_k(&records) {
-                        out.insert(format!("{metric_prefix}/{key}"), Scalar::Float(value));
+                        out.insert(format!("{metric_prefix}/{key}"), value.into());
                     }
                 }
             }
@@ -741,9 +622,9 @@ impl RolloutWindow {
         queued_trace_ids: &HashSet<String>,
     ) {
         let cancelled = cancellation.map_or(0, |c| c.count);
-        let selected = episodes.selected_episodes();
-        let num_traces = episodes.num_traces();
-        self.tokens += episodes.num_total_tokens();
+        let (selected, records) = episodes.select();
+        let num_traces = records.len();
+        self.tokens += records.iter().map(|r| r.trace.num_total_tokens()).sum::<i64>();
         self.traces += num_traces;
         self.groups += 1;
         self.attempts += selected.len() + failures.len() + cancelled;
@@ -759,16 +640,12 @@ impl RolloutWindow {
         self.errored += failures.len()
             + discarded
                 .iter()
-                .filter(|e| !episodes.cancelled.contains(e.id()) && (!e.ok() || e.traces().any(Trace::has_error)))
+                .filter(|e| !episodes.cancelled.contains(e.id()) && (!e.episode.ok || e.traces().any(Trace::has_error)))
                 .count();
-        let snapshot = |prefix: &str| episodes.snapshot(prefix, Subset::All);
         for prefix in ["train/agg".to_string(), format!("train/{env_name}")] {
-            self.metrics.extend(&snapshot(&prefix));
-            self.metrics.rate(
-                format!("{prefix}/all/dispatch_failure"),
-                [("mean", failures.len() as f64)],
-                selected.len() + failures.len(),
-            );
+            self.metrics.extend(&episodes.snapshot(&prefix, Subset::All));
+            let attempts = selected.len() + failures.len();
+            self.metrics.rate(format!("{prefix}/all/dispatch_failure"), [("mean", failures.len() as f64)], attempts);
             for failure in failures {
                 self.metrics.count(format!("{prefix}/all/dispatch_failure/{}", failure.error.type_), 1.0);
             }

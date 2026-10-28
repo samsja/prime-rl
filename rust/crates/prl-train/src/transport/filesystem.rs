@@ -9,10 +9,10 @@ const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Writes `{output_dir}/batches/step_{n}/rank_{r}.bin.tmp`, waits for every trainer rank's
 /// `rank_*.request` marker (each holds the trainer world size), then renames to `.bin`.
-pub struct FileSystemBatchSender {
+pub(super) struct FileSystemBatchSender {
     batch_dir: PathBuf,
     data_world_size: usize,
-    pub current_step: u64,
+    current_step: u64,
 }
 
 impl FileSystemBatchSender {

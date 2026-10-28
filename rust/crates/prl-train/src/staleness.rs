@@ -2,7 +2,7 @@
 
 use prl_wire::{Branch, Episode, MessageNode};
 
-use crate::episodes::train_work;
+use crate::episodes::train_policy;
 use crate::sample::TrainingSample;
 
 /// Oldest policy version whose tokens may still train in batch `step`.
@@ -46,7 +46,7 @@ pub struct Staleness {
 
 /// `None` for frozen-sourced episodes (no policy span), which never go stale.
 pub fn rollout_staleness<'a>(episode: &Episode, traces: impl IntoIterator<Item = &'a prl_wire::Trace>, training_step: i64) -> anyhow::Result<Option<Staleness>> {
-    let Some(policy) = train_work(episode)?.1 else {
+    let Some(policy) = train_policy(episode)? else {
         return Ok(None);
     };
     let trained_version = training_step - 1;

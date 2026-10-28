@@ -15,6 +15,6 @@ pub mod transport;
 pub use episodes::EpisodeRef;
 pub use metrics::{dispatch_failure_metrics, EvalEpisodes, MetricWindow, RolloutWindow, Stat, TrainEpisodes};
 pub use packer::{BatchPacker, FlopTable};
-pub use sample::{sample_payload_urls, MMImageRef, MMRefs, PayloadSlice, TrainingSample, PAYLOAD_INFO_KEY};
+pub use sample::{sample_payload_urls, MMImageRef, MMRefs, PayloadSlice, TrainingSample};
 pub use sink::{AdmitAll, Admission, PayloadReleaser, SinkConfig, TrainBatch, TrainEnvSpec, TrainSink};
 pub use transport::{encode_micro_batches, BatchSender, MicroBatch};

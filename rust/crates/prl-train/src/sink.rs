@@ -16,7 +16,7 @@ use prl_wire::payload::trace_payload_urls;
 use prl_wire::Episode;
 
 use crate::algo::{iter_trainable_traces, stamp_loss_routing, Algorithm};
-use crate::episodes::{episode_env_name, episode_group_id, train_work, EpisodeRef};
+use crate::episodes::{episode_env_name, episode_group_id, train_policy, EpisodeRef};
 use crate::metrics::{RolloutWindow, TrainEpisodes};
 use crate::sample::{sample_payload_urls, TrainingSample};
 use crate::staleness::{mask_stale_tokens, min_fresh_version, stale_token_runs, token_staleness};
@@ -276,7 +276,7 @@ impl TrainSink {
         let mut dropped = 0usize;
         for trace_id in trace_ids {
             let episode = self.episode_by_trace[&trace_id].clone();
-            let Some(policy) = train_work(&episode.episode)?.1 else { continue };
+            let Some(policy) = train_policy(&episode.episode)? else { continue };
             if policy.start >= min_version {
                 continue;
             }
@@ -558,7 +558,7 @@ it requires vLLM's native sampling-mask capture (>= 0.28). {KEEP_ARRAYS_HINT}"
             let min_version = min_fresh_version(step, max_staleness);
             let (mut kept, mut masked) = (0usize, 0usize);
             for (_, episode, samples) in &mut shipped {
-                let policy = train_work(&episode.episode)?.1.cloned();
+                let policy = train_policy(&episode.episode)?.cloned();
                 let trace = episode.first_trace();
                 let branches = trace.branches();
                 if let Some(policy) = &policy {

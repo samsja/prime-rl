@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use prl_wire::{Episode, PolicySpan, RunInfo, Trace, WorkInfo};
+use prl_wire::{Episode, PolicySpan, RunInfo, Trace, TrainRunInfo, WorkInfo};
 
 /// An episode restricted to some of its traces — the Rust counterpart of Python's
 /// `episode.model_copy(update={"traces": [...]})`, without copying the traces.
@@ -25,10 +25,6 @@ impl EpisodeRef {
 
     pub fn id(&self) -> &str {
         &self.episode.id
-    }
-
-    pub fn ok(&self) -> bool {
-        self.episode.ok
     }
 
     pub fn trace_indices(&self) -> &[usize] {
@@ -77,23 +73,10 @@ pub fn episode_group_id(episode: &Episode) -> Result<&str> {
     episode.group.as_ref().map(|g| g.id.as_str()).ok_or_else(|| anyhow!("Orchestrated episode is missing its rollout group"))
 }
 
-/// The episode's training-work provenance: `(dispatch step, live policy span)`.
-pub fn train_work(episode: &Episode) -> Result<(i64, Option<&PolicySpan>)> {
+/// The live policy span a train episode was generated under; `None` for frozen-sourced work.
+pub fn train_policy(episode: &Episode) -> Result<Option<&PolicySpan>> {
     match &episode.run {
-        Some(RunInfo::Train(run)) => match &run.work {
-            WorkInfo::Train { step, policy } => Ok((*step, policy.as_ref())),
-            WorkInfo::Eval { .. } => Err(anyhow!("Train episode is missing training-work provenance")),
-        },
+        Some(RunInfo::Train(TrainRunInfo { work: WorkInfo::Train { policy, .. }, .. })) => Ok(policy.as_ref()),
         _ => Err(anyhow!("Train episode is missing training-work provenance")),
-    }
-}
-
-pub fn eval_work(episode: &Episode) -> Result<(i64, Option<&PolicySpan>)> {
-    match &episode.run {
-        Some(RunInfo::Train(run)) => match &run.work {
-            WorkInfo::Eval { step, policy } => Ok((*step, policy.as_ref())),
-            WorkInfo::Train { .. } => Err(anyhow!("Eval episode is missing evaluation-work provenance")),
-        },
-        _ => Err(anyhow!("Eval episode is missing evaluation-work provenance")),
     }
 }
