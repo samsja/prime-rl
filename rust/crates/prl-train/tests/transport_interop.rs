@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use prl_train::packer::prepare_batch;
-use prl_train::{encode_micro_batches, BatchSender, MicroBatch, PayloadSlice, TrainingSample, TransportConfig};
+use prl_config::{TransportConfig, ZMQTransportConfig};
+use prl_train::{encode_micro_batches, BatchSender, MicroBatch, PayloadSlice, TrainingSample};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -62,8 +63,8 @@ async fn run(kind: &str) {
         .spawn()
         .expect("uv must be on PATH");
     let transport = match kind {
-        "zmq" => TransportConfig::Zmq { host: "127.0.0.1".into(), port },
-        _ => TransportConfig::FileSystem,
+        "zmq" => TransportConfig::Zmq(ZMQTransportConfig { host: "127.0.0.1".into(), port }),
+        _ => TransportConfig::Filesystem,
     };
     let mut sender = BatchSender::new(dir.path().to_path_buf(), 2, 0, &transport).await.unwrap();
     let mut expected = Vec::new();

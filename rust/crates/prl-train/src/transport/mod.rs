@@ -8,17 +8,11 @@ mod zmq;
 use std::path::PathBuf;
 
 use anyhow::{ensure, Result};
+use prl_config::TransportConfig;
 
 pub use filesystem::FileSystemBatchSender;
 pub use types::{encode_micro_batches, MicroBatch};
 pub use zmq::ZmqBatchSender;
-
-/// `rollout_transport` of the orchestrator config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransportConfig {
-    FileSystem,
-    Zmq { host: String, port: u16 },
-}
 
 /// Sends a step's micro batch grid once every trainer rank requested it.
 pub enum BatchSender {
@@ -30,11 +24,11 @@ impl BatchSender {
     /// `setup_batch_sender`.
     pub async fn new(output_dir: PathBuf, data_world_size: usize, current_step: u64, transport: &TransportConfig) -> Result<Self> {
         Ok(match transport {
-            TransportConfig::FileSystem => {
+            TransportConfig::Filesystem => {
                 BatchSender::FileSystem(FileSystemBatchSender::new(output_dir, data_world_size, current_step))
             }
-            TransportConfig::Zmq { host, port } => {
-                BatchSender::Zmq(ZmqBatchSender::new(data_world_size, current_step, host, *port).await?)
+            TransportConfig::Zmq(zmq) => {
+                BatchSender::Zmq(ZmqBatchSender::new(data_world_size, current_step, &zmq.host, zmq.port).await?)
             }
         })
     }

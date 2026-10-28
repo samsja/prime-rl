@@ -1146,6 +1146,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "prl-config",
+ "prl-core",
  "prl-eval",
  "prl-io",
  "prl-monitors",
@@ -1155,8 +1156,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1167,6 +1168,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "futures",
  "indexmap",
  "prl-config",
