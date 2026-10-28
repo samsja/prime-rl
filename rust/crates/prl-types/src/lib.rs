@@ -121,6 +121,8 @@ pub struct ErrorInfo {
     pub message: String,
     #[serde(default)]
     pub traceback: Option<String>,
+    #[serde(default)]
+    pub status_code: Option<i64>,
 }
 
 /// An environment request that failed before producing an episode.
@@ -160,6 +162,40 @@ pub enum PipelineEvent {
     Draining { reason: String },
 }
 
+/// One task: `data` is shipped verbatim as the run request's `task_data`; `key`/`hash` are the
+/// identity checked against the returned episode's `task`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub key: String,
+    pub hash: String,
+    pub data: serde_json::Value,
+}
+
+/// A bounded taskset comes back whole (`num_tasks = Some(len)`); an unbounded one has
+/// `num_tasks = None`, no tasks, and is pulled with `Bridge::next_tasks`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoadedTasks {
+    pub num_tasks: Option<usize>,
+    pub tasks: Vec<TaskRecord>,
+}
+
+/// Calls back into the Python process (`prime_rl.orchestrator.rust.PyBridge`), implemented by
+/// prl-py. Only for work with no sane Rust equivalent.
+#[async_trait::async_trait]
+pub trait Bridge: Send + Sync + 'static {
+    async fn load_tasks(&self, kind: Kind, env_name: &str) -> anyhow::Result<LoadedTasks>;
+    /// Up to `n` more tasks of an unbounded taskset; fewer means the stream ended.
+    async fn next_tasks(&self, kind: Kind, env_name: &str, n: usize) -> anyhow::Result<Vec<TaskRecord>>;
+    /// `[bin_cost([n]) for n in 0..=max_len]` from the trainer model's FlopCounter.
+    async fn flop_cost_table(&self, max_len: usize) -> anyhow::Result<Vec<i128>>;
+    /// opsd: renderer token ids of a single system message (no generation prompt).
+    async fn render_ids(&self, model_name: &str, renderer_config: serde_json::Value, system_content: &str)
+        -> anyhow::Result<Vec<i32>>;
+    /// echo: user filter masks for one trace (JSON-encoded trace).
+    async fn echo_filter(&self, import_path: &str, kwargs: serde_json::Value, trace: serde_json::Value)
+        -> anyhow::Result<Vec<Vec<bool>>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,7 +213,7 @@ mod tests {
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["kind"], "train");
         assert_eq!(v["reason"], "overload");
-        let e = ErrorInfo { type_: "ValueError".into(), message: "m".into(), traceback: None };
+        let e = ErrorInfo { type_: "ValueError".into(), message: "m".into(), traceback: None, status_code: None };
         assert_eq!(serde_json::to_value(&e).unwrap()["type"], "ValueError");
         assert_eq!(Progress::default().step, 1);
     }
