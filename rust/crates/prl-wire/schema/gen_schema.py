@@ -51,6 +51,8 @@ def discriminator_of(metadata) -> str | None:
         disc = getattr(item, "discriminator", None)
         if isinstance(disc, str):
             return disc
+        if disc is not None:
+            raise TypeError(f"unsupported callable discriminator {disc!r}")
     return None
 
 
@@ -104,19 +106,29 @@ def describe(tp, discriminator: str | None = None) -> dict:
 
 
 def describe_model(cls: type[BaseModel]) -> dict:
+    # A plain field serializer returns a plain value (dict, list, ...), which a dump
+    # writes as-is: no `exclude_none` inside it.
+    serialized = {
+        name
+        for decorator in cls.__pydantic_decorators__.field_serializers.values()
+        for name in decorator.info.fields
+    }
     fields = []
     for name, field in cls.model_fields.items():
         tp = field.annotation
         if field.metadata:
             tp = typing.Annotated[(tp, *field.metadata)]
-        entry = {"name": name, "schema": describe(tp, field.discriminator if isinstance(field.discriminator, str) else None)}
+        if name in serialized:
+            schema = {"k": "any"}
+        else:
+            disc = field.discriminator if isinstance(field.discriminator, str) else None
+            schema = describe(tp, disc)
+        entry = {"name": name, "schema": schema}
         if field.exclude:
             entry["exclude"] = True
         if field.exclude_if is not None:
             # every exclude_if in verifiers is "exclude when empty"
             entry["exclude_if_empty"] = True
-        if field.default is not ... and field.default is not None and not callable(field.default) and isinstance(field.default, (str, int, float, bool)):
-            entry["default"] = field.default
         fields.append(entry)
     return {
         "fields": fields,

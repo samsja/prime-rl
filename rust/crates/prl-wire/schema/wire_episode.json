@@ -69,15 +69,13 @@
      "name": "ok",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "is_timeout",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "errors",
@@ -113,8 +111,7 @@
      "name": "id",
      "schema": {
       "k": "str"
-     },
-     "default": ""
+     }
     },
     {
      "name": "name",
@@ -395,8 +392,7 @@
      "name": "artifact_max_bytes",
      "schema": {
       "k": "int"
-     },
-     "default": 33554432
+     }
     },
     {
      "name": "timeout",
@@ -425,8 +421,7 @@
       "values": [
        "system"
       ]
-     },
-     "default": "system"
+     }
     },
     {
      "name": "content",
@@ -470,8 +465,7 @@
       "values": [
        "text"
       ]
-     },
-     "default": "text"
+     }
     },
     {
      "name": "text",
@@ -492,8 +486,7 @@
       "values": [
        "image_url"
       ]
-     },
-     "default": "image_url"
+     }
     },
     {
      "name": "image_url",
@@ -527,8 +520,7 @@
       "values": [
        "user"
       ]
-     },
-     "default": "user"
+     }
     },
     {
      "name": "content",
@@ -572,8 +564,7 @@
       "values": [
        "assistant"
       ]
-     },
-     "default": "assistant"
+     }
     },
     {
      "name": "content",
@@ -665,8 +656,7 @@
        "function",
        "custom"
       ]
-     },
-     "default": "function"
+     }
     },
     {
      "name": "name",
@@ -708,8 +698,7 @@
       "values": [
        "tool"
       ]
-     },
-     "default": "tool"
+     }
     },
     {
      "name": "tool_call_id",
@@ -775,41 +764,12 @@
        "shared",
        "isolated"
       ]
-     },
-     "default": "shared"
+     }
     },
     {
      "name": "runtime",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "union",
-        "disc": "type",
-        "options": [
-         {
-          "k": "model",
-          "ref": "SubprocessConfig"
-         },
-         {
-          "k": "model",
-          "ref": "DockerConfig"
-         },
-         {
-          "k": "model",
-          "ref": "PrimeConfig"
-         },
-         {
-          "k": "model",
-          "ref": "CustomRuntimeConfig"
-         }
-        ]
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
@@ -857,388 +817,12 @@
      "name": "skip_on_truncated",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "skip_on_timeout",
      "schema": {
       "k": "bool"
-     },
-     "default": false
-    }
-   ],
-   "extra": false,
-   "computed": []
-  },
-  "SubprocessConfig": {
-   "fields": [
-    {
-     "name": "type",
-     "schema": {
-      "k": "literal",
-      "values": [
-       "subprocess"
-      ]
-     },
-     "default": "subprocess"
-    }
-   ],
-   "extra": false,
-   "computed": []
-  },
-  "DockerConfig": {
-   "fields": [
-    {
-     "name": "allow",
-     "schema": {
-      "k": "list",
-      "item": {
-       "k": "str"
-      }
-     }
-    },
-    {
-     "name": "block",
-     "schema": {
-      "k": "list",
-      "item": {
-       "k": "str"
-      }
-     }
-    },
-    {
-     "name": "type",
-     "schema": {
-      "k": "literal",
-      "values": [
-       "docker"
-      ]
-     },
-     "default": "docker"
-    },
-    {
-     "name": "image",
-     "schema": {
-      "k": "str"
-     },
-     "default": "python:3.11-slim"
-    },
-    {
-     "name": "workdir",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "str"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "cpu",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "float"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "memory",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "float"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "gpu",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "str"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "disk",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "float"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "mounts",
-     "schema": {
-      "k": "dict",
-      "value": {
-       "k": "model",
-       "ref": "BindMount"
-      }
-     }
-    }
-   ],
-   "extra": false,
-   "computed": []
-  },
-  "BindMount": {
-   "fields": [
-    {
-     "name": "source",
-     "schema": {
-      "k": "str"
-     }
-    },
-    {
-     "name": "read_only",
-     "schema": {
-      "k": "bool"
-     },
-     "default": true
-    }
-   ],
-   "extra": false,
-   "computed": []
-  },
-  "PrimeConfig": {
-   "fields": [
-    {
-     "name": "allow",
-     "schema": {
-      "k": "list",
-      "item": {
-       "k": "str"
-      }
-     }
-    },
-    {
-     "name": "block",
-     "schema": {
-      "k": "list",
-      "item": {
-       "k": "str"
-      }
-     }
-    },
-    {
-     "name": "type",
-     "schema": {
-      "k": "literal",
-      "values": [
-       "prime"
-      ]
-     },
-     "default": "prime"
-    },
-    {
-     "name": "image",
-     "schema": {
-      "k": "str"
-     },
-     "default": "python:3.11-slim"
-    },
-    {
-     "name": "workdir",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "str"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "region",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "str"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "labels",
-     "schema": {
-      "k": "list",
-      "item": {
-       "k": "str"
-      }
-     }
-    },
-    {
-     "name": "cpu",
-     "schema": {
-      "k": "float"
-     },
-     "default": 1.0
-    },
-    {
-     "name": "memory",
-     "schema": {
-      "k": "float"
-     },
-     "default": 2.0
-    },
-    {
-     "name": "gpu",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "str"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "disk",
-     "schema": {
-      "k": "float"
-     },
-     "default": 5.0
-    },
-    {
-     "name": "checkpoint",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "str"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "idle_timeout",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "float"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     },
-     "default": 3600
-    },
-    {
-     "name": "creates_per_min",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "int"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "mounts",
-     "schema": {
-      "k": "dict",
-      "value": {
-       "k": "model",
-       "ref": "PrimeVolume"
-      }
-     }
-    }
-   ],
-   "extra": false,
-   "computed": []
-  },
-  "PrimeVolume": {
-   "fields": [
-    {
-     "name": "name",
-     "schema": {
-      "k": "str"
-     }
-    },
-    {
-     "name": "read_only",
-     "schema": {
-      "k": "bool"
-     },
-     "default": true
-    }
-   ],
-   "extra": false,
-   "computed": []
-  },
-  "CustomRuntimeConfig": {
-   "fields": [
-    {
-     "name": "type",
-     "schema": {
-      "k": "literal",
-      "values": [
-       "custom"
-      ]
-     },
-     "default": "custom"
-    },
-    {
-     "name": "import_path",
-     "schema": {
-      "k": "str"
      }
     }
    ],
@@ -1251,8 +835,7 @@
      "name": "max_retries",
      "schema": {
       "k": "int"
-     },
-     "default": 0
+     }
     },
     {
      "name": "rules",
@@ -1404,8 +987,7 @@
      "name": "required",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -1564,8 +1146,7 @@
       "values": [
        "train"
       ]
-     },
-     "default": "train"
+     }
     },
     {
      "name": "id",
@@ -1618,8 +1199,7 @@
       "values": [
        "train"
       ]
-     },
-     "default": "train"
+     }
     },
     {
      "name": "step",
@@ -1674,8 +1254,7 @@
       "values": [
        "eval"
       ]
-     },
-     "default": "eval"
+     }
     },
     {
      "name": "step",
@@ -1712,8 +1291,7 @@
       "values": [
        "eval"
       ]
-     },
-     "default": "eval"
+     }
     },
     {
      "name": "id",
@@ -1794,8 +1372,7 @@
      "name": "version",
      "schema": {
       "k": "int"
-     },
-     "default": 1
+     }
     },
     {
      "name": "id",
@@ -1857,10 +1434,7 @@
     {
      "name": "mm_token_type_id_map",
      "schema": {
-      "k": "dict",
-      "value": {
-       "k": "int"
-      }
+      "k": "any"
      }
     },
     {
@@ -1966,15 +1540,13 @@
      "name": "is_completed",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "ok",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "stop_condition",
@@ -1995,8 +1567,7 @@
      "name": "is_timeout",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "errors",
@@ -2112,15 +1683,13 @@
      "name": "name",
      "schema": {
       "k": "str"
-     },
-     "default": "agent"
+     }
     },
     {
      "name": "trainable",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -2172,8 +1741,7 @@
     {
      "name": "scoring",
      "schema": {
-      "k": "model",
-      "ref": "ScoringConfig"
+      "k": "any"
      }
     },
     {
@@ -2227,17 +1795,7 @@
     {
      "name": "sampling",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "model",
-        "ref": "SamplingConfig"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
@@ -2333,8 +1891,7 @@
      "name": "network_notice",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -2346,8 +1903,7 @@
      "name": "id",
      "schema": {
       "k": "str"
-     },
-     "default": "bash"
+     }
     },
     {
      "name": "env",
@@ -2383,8 +1939,7 @@
      "name": "tool_timeout",
      "schema": {
       "k": "float"
-     },
-     "default": 600.0
+     }
     },
     {
      "name": "disabled_tools",
@@ -2425,8 +1980,7 @@
         ]
        }
       ]
-     },
-     "default": "auto"
+     }
     },
     {
      "name": "skills",
@@ -2453,6 +2007,368 @@
    "extra": true,
    "computed": []
   },
+  "SubprocessConfig": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "subprocess"
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "DockerConfig": {
+   "fields": [
+    {
+     "name": "allow",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "block",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "docker"
+      ]
+     }
+    },
+    {
+     "name": "image",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "workdir",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "cpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "memory",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "gpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "disk",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "mounts",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "model",
+       "ref": "BindMount"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "BindMount": {
+   "fields": [
+    {
+     "name": "source",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "read_only",
+     "schema": {
+      "k": "bool"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PrimeConfig": {
+   "fields": [
+    {
+     "name": "allow",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "block",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "prime"
+      ]
+     }
+    },
+    {
+     "name": "image",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "workdir",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "region",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "labels",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "cpu",
+     "schema": {
+      "k": "float"
+     }
+    },
+    {
+     "name": "memory",
+     "schema": {
+      "k": "float"
+     }
+    },
+    {
+     "name": "gpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "disk",
+     "schema": {
+      "k": "float"
+     }
+    },
+    {
+     "name": "checkpoint",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "idle_timeout",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "creates_per_min",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "mounts",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "model",
+       "ref": "PrimeVolume"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PrimeVolume": {
+   "fields": [
+    {
+     "name": "name",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "read_only",
+     "schema": {
+      "k": "bool"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "CustomRuntimeConfig": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "custom"
+      ]
+     }
+    },
+    {
+     "name": "import_path",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
   "DeploymentConfig": {
    "fields": [
     {
@@ -2462,15 +2378,13 @@
       "values": [
        "colocated"
       ]
-     },
-     "default": "colocated"
+     }
     },
     {
      "name": "trust_compose",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     }
    ],
    "extra": false,
@@ -2482,15 +2396,13 @@
      "name": "base_url",
      "schema": {
       "k": "str"
-     },
-     "default": "https://api.pinference.ai/api/v1"
+     }
     },
     {
      "name": "api_key_var",
      "schema": {
       "k": "str"
-     },
-     "default": "PRIME_API_KEY"
+     }
     },
     {
      "name": "headers",
@@ -2524,8 +2436,7 @@
       "values": [
        "eval"
       ]
-     },
-     "default": "eval"
+     }
     }
    ],
    "extra": false,
@@ -2546,8 +2457,7 @@
         "k": "none"
        }
       ]
-     },
-     "default": 30.0
+     }
     },
     {
      "name": "read",
@@ -2604,15 +2514,13 @@
      "name": "base_url",
      "schema": {
       "k": "str"
-     },
-     "default": "https://api.pinference.ai/api/v1"
+     }
     },
     {
      "name": "api_key_var",
      "schema": {
       "k": "str"
-     },
-     "default": "PRIME_API_KEY"
+     }
     },
     {
      "name": "headers",
@@ -2646,8 +2554,7 @@
       "values": [
        "train"
       ]
-     },
-     "default": "train"
+     }
     },
     {
      "name": "renderer",
@@ -2818,8 +2725,7 @@
      "name": "multiplex",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -2853,8 +2759,7 @@
       "values": [
        "auto"
       ]
-     },
-     "default": "auto"
+     }
     }
    ],
    "extra": false,
@@ -2888,8 +2793,7 @@
       "values": [
        "default"
       ]
-     },
-     "default": "default"
+     }
     },
     {
      "name": "tool_parser",
@@ -2953,15 +2857,13 @@
       "values": [
        "qwen3"
       ]
-     },
-     "default": "qwen3"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -2995,8 +2897,7 @@
       "values": [
        "prime-qwen3"
       ]
-     },
-     "default": "prime-qwen3"
+     }
     }
    ],
    "extra": false,
@@ -3030,8 +2931,7 @@
       "values": [
        "qwen3.5"
       ]
-     },
-     "default": "qwen3.5"
+     }
     },
     {
      "name": "enable_thinking",
@@ -3052,15 +2952,13 @@
      "name": "add_vision_id",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "image_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -3094,8 +2992,7 @@
       "values": [
        "qwen3.6"
       ]
-     },
-     "default": "qwen3.6"
+     }
     },
     {
      "name": "enable_thinking",
@@ -3116,22 +3013,19 @@
      "name": "add_vision_id",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "preserve_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "image_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -3165,8 +3059,7 @@
       "values": [
        "qwen3.8"
       ]
-     },
-     "default": "qwen3.8"
+     }
     },
     {
      "name": "enable_thinking",
@@ -3187,15 +3080,13 @@
      "name": "add_vision_id",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "preserve_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "reasoning_effort",
@@ -3206,15 +3097,13 @@
        "medium",
        "low"
       ]
-     },
-     "default": "xhigh"
+     }
     },
     {
      "name": "image_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -3248,22 +3137,19 @@
       "values": [
        "qwen3-vl"
       ]
-     },
-     "default": "qwen3-vl"
+     }
     },
     {
      "name": "add_vision_id",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "image_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -3297,29 +3183,25 @@
       "values": [
        "gemma4"
       ]
-     },
-     "default": "gemma4"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "preserve_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "image_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -3353,22 +3235,19 @@
       "values": [
        "glm-5"
       ]
-     },
-     "default": "glm-5"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "clear_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -3402,22 +3281,19 @@
       "values": [
        "glm-5.1"
       ]
-     },
-     "default": "glm-5.1"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "clear_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -3451,15 +3327,13 @@
       "values": [
        "glm-5.3"
       ]
-     },
-     "default": "glm-5.3"
+     }
     },
     {
      "name": "clear_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "reasoning_effort",
@@ -3470,8 +3344,7 @@
        "high",
        "max"
       ]
-     },
-     "default": "max"
+     }
     }
    ],
    "extra": false,
@@ -3505,15 +3378,13 @@
       "values": [
        "glm-5.3-flash"
       ]
-     },
-     "default": "glm-5.3-flash"
+     }
     },
     {
      "name": "clear_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "reasoning_effort",
@@ -3524,8 +3395,7 @@
        "high",
        "max"
       ]
-     },
-     "default": "max"
+     }
     }
    ],
    "extra": false,
@@ -3559,15 +3429,13 @@
       "values": [
        "glm-4.5"
       ]
-     },
-     "default": "glm-4.5"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -3601,8 +3469,7 @@
       "values": [
        "gpt-oss"
       ]
-     },
-     "default": "gpt-oss"
+     }
     },
     {
      "name": "reasoning_effort",
@@ -3613,8 +3480,7 @@
        "medium",
        "high"
       ]
-     },
-     "default": "medium"
+     }
     },
     {
      "name": "conversation_start_date",
@@ -3635,8 +3501,7 @@
      "name": "use_system_prompt",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "knowledge_cutoff",
@@ -3672,8 +3537,7 @@
      "name": "auto_drop_analysis",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -3707,8 +3571,7 @@
       "values": [
        "muse-glimmer"
       ]
-     },
-     "default": "muse-glimmer"
+     }
     },
     {
      "name": "reasoning_strength",
@@ -3720,15 +3583,13 @@
        "high",
        "xhigh"
       ]
-     },
-     "default": "high"
+     }
     },
     {
      "name": "knowledge_cutoff",
      "schema": {
       "k": "str"
-     },
-     "default": "2026-01-04"
+     }
     },
     {
      "name": "current_date",
@@ -3777,8 +3638,7 @@
       "values": [
        "hy3"
       ]
-     },
-     "default": "hy3"
+     }
     },
     {
      "name": "reasoning_effort",
@@ -3789,8 +3649,7 @@
        "low",
        "high"
       ]
-     },
-     "default": "no_think"
+     }
     },
     {
      "name": "preserved_thinking",
@@ -3811,15 +3670,13 @@
      "name": "is_training",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "raw_last_assistant",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "fallback_strategy",
@@ -3871,8 +3728,7 @@
       "values": [
        "inkling"
       ]
-     },
-     "default": "inkling"
+     }
     },
     {
      "name": "reasoning_effort",
@@ -3887,22 +3743,19 @@
         "k": "float"
        }
       ]
-     },
-     "default": 0.9
+     }
     },
     {
      "name": "image_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     },
     {
      "name": "audio_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -3936,15 +3789,13 @@
       "values": [
        "kimi-k2"
       ]
-     },
-     "default": "kimi-k2"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -3978,22 +3829,19 @@
       "values": [
        "kimi-k2.5"
       ]
-     },
-     "default": "kimi-k2.5"
+     }
     },
     {
      "name": "thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "image_cache_max",
      "schema": {
       "k": "int"
-     },
-     "default": 256
+     }
     }
    ],
    "extra": false,
@@ -4027,22 +3875,19 @@
       "values": [
        "laguna-xs.2"
       ]
-     },
-     "default": "laguna-xs.2"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "render_assistant_messages_raw",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     }
    ],
    "extra": false,
@@ -4076,22 +3921,19 @@
       "values": [
        "laguna-m.1"
       ]
-     },
-     "default": "laguna-m.1"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "render_assistant_messages_raw",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     }
    ],
    "extra": false,
@@ -4125,15 +3967,13 @@
       "values": [
        "laguna-xs-2.1"
       ]
-     },
-     "default": "laguna-xs-2.1"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     }
    ],
    "extra": false,
@@ -4167,22 +4007,19 @@
       "values": [
        "laguna-s-2.1"
       ]
-     },
-     "default": "laguna-s-2.1"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "preserve_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     }
    ],
    "extra": false,
@@ -4216,22 +4053,19 @@
       "values": [
        "llama-3"
       ]
-     },
-     "default": "llama-3"
+     }
     },
     {
      "name": "date_string",
      "schema": {
       "k": "str"
-     },
-     "default": "26 Jul 2024"
+     }
     },
     {
      "name": "tools_in_user_message",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -4265,15 +4099,13 @@
       "values": [
        "minimax-m2"
       ]
-     },
-     "default": "minimax-m2"
+     }
     },
     {
      "name": "model_identity",
      "schema": {
       "k": "str"
-     },
-     "default": "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax."
+     }
     }
    ],
    "extra": false,
@@ -4307,29 +4139,25 @@
       "values": [
        "nemotron-3"
       ]
-     },
-     "default": "nemotron-3"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "truncate_history_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "low_effort",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     }
    ],
    "extra": false,
@@ -4363,29 +4191,25 @@
       "values": [
        "nemotron-3-ultra"
       ]
-     },
-     "default": "nemotron-3-ultra"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "truncate_history_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "medium_effort",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     }
    ],
    "extra": false,
@@ -4419,22 +4243,19 @@
       "values": [
        "nemotron-3.5"
       ]
-     },
-     "default": "nemotron-3.5"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "truncate_history_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     }
    ],
    "extra": false,
@@ -4468,8 +4289,7 @@
       "values": [
        "deepseek-v3"
       ]
-     },
-     "default": "deepseek-v3"
+     }
     }
    ],
    "extra": false,
@@ -4503,8 +4323,7 @@
       "values": [
        "deepseek-r1"
       ]
-     },
-     "default": "deepseek-r1"
+     }
     }
    ],
    "extra": false,
@@ -4538,22 +4357,19 @@
       "values": [
        "deepseek-v4"
       ]
-     },
-     "default": "deepseek-v4"
+     }
     },
     {
      "name": "enable_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "drop_thinking",
      "schema": {
       "k": "bool"
-     },
-     "default": true
+     }
     },
     {
      "name": "reasoning_effort",
@@ -4564,8 +4380,7 @@
        "high",
        "max"
       ]
-     },
-     "default": "low"
+     }
     }
    ],
    "extra": false,
@@ -4599,79 +4414,12 @@
       "values": [
        "custom"
       ]
-     },
-     "default": "custom"
+     }
     },
     {
      "name": "import_path",
      "schema": {
       "k": "str"
-     }
-    }
-   ],
-   "extra": true,
-   "computed": []
-  },
-  "SamplingConfig": {
-   "fields": [
-    {
-     "name": "temperature",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "float"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "top_p",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "float"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "reasoning_effort",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "str"
-       },
-       {
-        "k": "none"
-       }
-      ]
-     }
-    },
-    {
-     "name": "max_tokens",
-     "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "int"
-       },
-       {
-        "k": "none"
-       }
-      ]
      }
     }
    ],
@@ -4765,8 +4513,7 @@
      "name": "borrowed",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "type",
@@ -4775,8 +4522,7 @@
       "values": [
        "subprocess"
       ]
-     },
-     "default": "subprocess"
+     }
     }
    ],
    "extra": false,
@@ -4803,8 +4549,7 @@
      "name": "borrowed",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "allow",
@@ -4831,15 +4576,13 @@
       "values": [
        "docker"
       ]
-     },
-     "default": "docker"
+     }
     },
     {
      "name": "image",
      "schema": {
       "k": "str"
-     },
-     "default": "python:3.11-slim"
+     }
     },
     {
      "name": "workdir",
@@ -4951,8 +4694,7 @@
      "name": "borrowed",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "allow",
@@ -4979,15 +4721,13 @@
       "values": [
        "prime"
       ]
-     },
-     "default": "prime"
+     }
     },
     {
      "name": "image",
      "schema": {
       "k": "str"
-     },
-     "default": "python:3.11-slim"
+     }
     },
     {
      "name": "workdir",
@@ -5032,15 +4772,13 @@
      "name": "cpu",
      "schema": {
       "k": "float"
-     },
-     "default": 1.0
+     }
     },
     {
      "name": "memory",
      "schema": {
       "k": "float"
-     },
-     "default": 2.0
+     }
     },
     {
      "name": "gpu",
@@ -5061,8 +4799,7 @@
      "name": "disk",
      "schema": {
       "k": "float"
-     },
-     "default": 5.0
+     }
     },
     {
      "name": "checkpoint",
@@ -5092,8 +4829,7 @@
         "k": "none"
        }
       ]
-     },
-     "default": 3600
+     }
     },
     {
      "name": "creates_per_min",
@@ -5160,8 +4896,7 @@
      "name": "borrowed",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "type",
@@ -5170,8 +4905,7 @@
       "values": [
        "custom"
       ]
-     },
-     "default": "custom"
+     }
     },
     {
      "name": "import_path",
@@ -5189,8 +4923,7 @@
      "name": "type",
      "schema": {
       "k": "str"
-     },
-     "default": "function"
+     }
     },
     {
      "name": "name",
@@ -5217,8 +4950,7 @@
      "name": "description",
      "schema": {
       "k": "str"
-     },
-     "default": ""
+     }
     },
     {
      "name": "parameters",
@@ -5315,8 +5047,7 @@
      "name": "sampled",
      "schema": {
       "k": "bool"
-     },
-     "default": false
+     }
     },
     {
      "name": "timestamp",
@@ -5327,7 +5058,7 @@
     {
      "name": "token_ids",
      "schema": {
-      "k": "ndarray"
+      "k": "any"
      }
     },
     {
@@ -5349,127 +5080,61 @@
     {
      "name": "mask",
      "schema": {
-      "k": "ndarray"
+      "k": "any"
      }
     },
     {
      "name": "is_content",
      "schema": {
-      "k": "ndarray"
+      "k": "any"
      }
     },
     {
      "name": "logprobs",
      "schema": {
-      "k": "ndarray"
+      "k": "any"
      }
     },
     {
      "name": "advantages",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "ndarray"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
      "name": "reference_logprobs",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "ndarray"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
      "name": "trainer_logprobs",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "ndarray"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
      "name": "entropies",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "ndarray"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
      "name": "loss_weights",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "dict",
-        "value": {
-         "k": "ndarray"
-        }
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
      "name": "routed_experts",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "ndarray"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
      "name": "sampling_mask",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "any"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     },
     {
@@ -5494,16 +5159,7 @@
     {
      "name": "top_logprobs",
      "schema": {
-      "k": "union",
-      "disc": null,
-      "options": [
-       {
-        "k": "any"
-       },
-       {
-        "k": "none"
-       }
-      ]
+      "k": "any"
      }
     }
    ],
@@ -5710,6 +5366,72 @@
    "extra": false,
    "computed": []
   },
+  "SamplingConfig": {
+   "fields": [
+    {
+     "name": "temperature",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "top_p",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
   "Usage": {
    "fields": [
     {
@@ -5779,15 +5501,13 @@
      "name": "start",
      "schema": {
       "k": "float"
-     },
-     "default": 0.0
+     }
     },
     {
      "name": "end",
      "schema": {
       "k": "float"
-     },
-     "default": 0.0
+     }
     }
    ],
    "extra": false,
@@ -5850,8 +5570,7 @@
      "name": "weight",
      "schema": {
       "k": "float"
-     },
-     "default": 1.0
+     }
     }
    ],
    "extra": false,
@@ -5934,15 +5653,13 @@
      "name": "start",
      "schema": {
       "k": "float"
-     },
-     "default": 0.0
+     }
     },
     {
      "name": "end",
      "schema": {
       "k": "float"
-     },
-     "default": 0.0
+     }
     },
     {
      "name": "model",
@@ -5968,8 +5685,7 @@
      "name": "duration",
      "schema": {
       "k": "float"
-     },
-     "default": 0.0
+     }
     }
    ],
    "extra": false,
