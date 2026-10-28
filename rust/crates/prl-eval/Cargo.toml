@@ -10,6 +10,7 @@ prl-types = { workspace = true }
 prl-wire = { workspace = true }
 prl-monitors = { workspace = true }
 prl-core = { workspace = true }
+prl-io = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
