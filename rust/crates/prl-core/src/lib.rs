@@ -10,3 +10,4 @@ pub mod curriculum;
 pub mod train_source;
 pub mod live;
 pub mod dispatcher;
+pub mod envs;
