@@ -154,7 +154,7 @@ impl EvalPipeline {
         }
         let is_final = self.config.max_steps.is_some_and(|max| step >= max);
         let reason = format!("eval was triggered at step {step}");
-        let outcome = self.dispatcher.trigger_eval(step, is_final, Vec::new(), reason).await?;
+        let outcome = self.dispatcher.trigger_eval(step, is_final, Vec::new(), Some(reason)).await?;
         if outcome.fired.is_empty() {
             return Ok(());
         }

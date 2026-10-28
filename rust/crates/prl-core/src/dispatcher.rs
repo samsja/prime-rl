@@ -168,7 +168,7 @@ enum Command {
     SwitchMode { mode: Mode, reason: String },
     VersionPending { ack: oneshot::Sender<()> },
     VersionApplied { ack: oneshot::Sender<()> },
-    TriggerEval { step: u64, force: bool, completed: Vec<Episode>, reason: String, reply: oneshot::Sender<TriggerOutcome> },
+    TriggerEval { step: u64, force: bool, completed: Vec<Episode>, reason: Option<String>, reply: oneshot::Sender<TriggerOutcome> },
     CancelEvalStep { step: u64, reply: oneshot::Sender<usize> },
     Drain { reply: oneshot::Sender<Vec<GroupCancellation>> },
     View { reply: oneshot::Sender<DispatcherView> },
@@ -210,15 +210,14 @@ impl DispatcherHandle {
         self.call(|ack| Command::VersionApplied { ack }).await
     }
 
-    /// Fire eligible eval epochs; switches to PREFER_EVAL with `reason` if anything fires.
+    /// Fire eligible eval epochs; with a `reason`, switches to PREFER_EVAL if anything fires.
     pub async fn trigger_eval(
         &self,
         step: u64,
         force: bool,
         completed: Vec<Episode>,
-        reason: impl Into<String>,
+        reason: Option<String>,
     ) -> Result<TriggerOutcome> {
-        let reason = reason.into();
         self.call(|reply| Command::TriggerEval { step, force, completed, reason, reply }).await
     }
 
@@ -1115,7 +1114,7 @@ impl Dispatcher {
                         TriggerOutcome { fired, restored, owed }
                     }
                 };
-                if !outcome.fired.is_empty() {
+                if let Some(reason) = reason.filter(|_| !outcome.fired.is_empty()) {
                     self.switch_mode(Mode::PreferEval, &reason);
                 }
                 let _ = reply.send(outcome);
@@ -1465,7 +1464,7 @@ mod tests {
     #[tokio::test]
     async fn eval_trigger_prefers_eval_then_flips_back() {
         let mut h = harness(4, 2, true);
-        let outcome = h.handle.trigger_eval(0, false, vec![], "eval was triggered at step 0").await.unwrap();
+        let outcome = h.handle.trigger_eval(0, false, vec![], Some("eval was triggered at step 0".into())).await.unwrap();
         assert_eq!((outcome.fired, outcome.owed), (vec!["eval-env".to_string()], 2));
         h.handle.start().unwrap();
         let calls = take(&mut h.calls, 2).await;

@@ -1,5 +1,4 @@
-//! The pipeline-view logger (`periodic_logger.py`): every `interval` seconds (and once more on
-//! stop) collect `(console body, payload)` in one call, log the body and send the payload to
+//! The pipeline-view logger (`periodic_logger.py`): every `interval` seconds collect `(console body, payload)` in one call, log the body and send the payload to
 //! the monitors as a time-keyed row.
 
 use std::future::Future;
@@ -25,24 +24,21 @@ impl PeriodicLogger {
         let (stop, mut stopped) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             loop {
-                let stopping = tokio::select! {
-                    _ = &mut stopped => true,
-                    _ = tokio::time::sleep(interval) => false,
-                };
+                tokio::select! {
+                    _ = &mut stopped => return,
+                    _ = tokio::time::sleep(interval) => {}
+                }
                 let (body, payload) = collect().await;
                 info!("{body}");
                 if !payload.is_empty() {
                     monitors.log_metrics(payload, None).await;
-                }
-                if stopping {
-                    return;
                 }
             }
         });
         Self { stop: Some(stop), task }
     }
 
-    /// Emit a final tick and wait for it.
+    /// Stop without a final tick (Python cancels the task before the woken loop emits).
     pub async fn stop(mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
