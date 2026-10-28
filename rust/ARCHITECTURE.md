@@ -38,6 +38,7 @@ rust/
     prl-core       dispatcher, concurrency, train/eval sources,           (owner: core)
                    curriculum, watcher, eval sink, periodic logger,
                    orchestrator supervisor/wiring
+    prl-eval       `uv run eval` on the Rust core (port of src/prime_rl/eval) (owner: eval)
     prl-py         pyo3 extension module `prime_rl_orch_rs`               (owner: scaffold, then core)
 packages/prime-rl-orch-rs/   maturin python package (uv workspace member) building prl-py
 ```
