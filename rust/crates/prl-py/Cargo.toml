@@ -9,8 +9,12 @@ publish.workspace = true
 name = "prime_rl_orch_rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Enabled by maturin; off for `cargo test` so the rlib links against libpython.
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3 = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

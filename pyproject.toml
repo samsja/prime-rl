@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = "~=3.12.0"
 dependencies = [
     "prime-rl-configs",
+    "prime-rl-orch-rs",
     "prime-pydantic-config>=0.4.3",
     "beartype>=0.21.0",
     "datasets>=4.0.0",
@@ -168,6 +169,7 @@ override-dependencies = [
 # `uv sync --all-packages`.
 [tool.uv.workspace]
 members = [
+    "packages/prime-rl-orch-rs",
     "deps/prime-envs/environments/*/*",
     "deps/verifiers/environments/alphabet_sort",
     "deps/verifiers/environments/color_codeword",
@@ -274,6 +276,7 @@ deep-select = false
 
 [tool.uv.sources]
 prime-rl-configs = { path = "packages/prime-rl-configs", editable = true }
+prime-rl-orch-rs = { workspace = true }
 # prime-rl consumes `verifiers.v1` (incl. the built-in harnesses/tasksets); env tasksets
 # live under deps/{verifiers,prime-envs}/environments.
 verifiers = { path = "deps/verifiers", editable = true }

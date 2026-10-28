@@ -118,6 +118,7 @@ members = [
     "pi-terminalbench2-1",
     "pinchbench",
     "prime-rl",
+    "prime-rl-orch-rs",
     "prolog",
     "proofnet",
     "proposer-solver",
@@ -5059,6 +5060,7 @@ dependencies = [
     { name = "prime" },
     { name = "prime-pydantic-config" },
     { name = "prime-rl-configs" },
+    { name = "prime-rl-orch-rs" },
     { name = "prime-runs", extra = ["train"] },
     { name = "prometheus-client" },
     { name = "psutil" },
@@ -5247,6 +5249,7 @@ requires-dist = [
     { name = "prime-rl", extras = ["quack"], marker = "extra == 'all'" },
     { name = "prime-rl", extras = ["sonic-moe"], marker = "extra == 'all'" },
     { name = "prime-rl-configs", editable = "packages/prime-rl-configs" },
+    { name = "prime-rl-orch-rs", editable = "packages/prime-rl-orch-rs" },
     { name = "prime-runs", extras = ["train"], git = "https://github.com/PrimeIntellect-ai/prime?subdirectory=packages%2Fprime-runs&rev=adf8d25c3e34df8e039674fae9e0e4bf9cee27f3" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "psutil", specifier = ">=7.0.0" },
@@ -5317,6 +5320,11 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.2.0" },
     { name = "verifiers", specifier = ">=0.3.2.dev158" },
 ]
+
+[[package]]
+name = "prime-rl-orch-rs"
+version = "0.1.0"
+source = { editable = "packages/prime-rl-orch-rs" }
 
 [[package]]
 name = "prime-runs"
