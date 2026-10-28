@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod client;
+pub mod eval;
 pub mod run;
 pub mod sinks;
 pub mod worker;
@@ -54,7 +55,7 @@ pub fn base_url_override() -> Option<String> {
 }
 
 /// A row as the SDK's metrics JSON, after naming dropped non-finite values.
-fn metrics_json(metrics: &Row) -> Map<String, Json> {
+pub(crate) fn metrics_json(metrics: &Row) -> Map<String, Json> {
     let (metrics, dropped) = sanitize(metrics);
     if !dropped.is_empty() {
         tracing::warn!(

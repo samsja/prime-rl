@@ -39,12 +39,6 @@ impl Num {
             Num::Float(f) => f,
         }
     }
-    fn add(self, other: Num) -> Num {
-        match (self, other) {
-            (Num::Int(a), Num::Int(b)) => Num::Int(a + b),
-            (a, b) => Num::Float(a.f() + b.f()),
-        }
-    }
     fn mul(self, other: Num) -> Num {
         match (self, other) {
             (Num::Int(a), Num::Int(b)) => Num::Int(a * b),
@@ -59,8 +53,37 @@ impl Num {
     }
 }
 
+/// Python 3.12 `sum(values)` (start 0): ints add exactly until the first float, which adds
+/// plainly; later floats add Neumaier-compensated, later ints plainly.
 fn sum(values: &[Num]) -> Num {
-    values.iter().fold(Num::Int(0), |acc, v| acc.add(*v))
+    let mut iter = values.iter();
+    let mut int_total = 0i64;
+    let mut total = loop {
+        match iter.next() {
+            None => return Num::Int(int_total),
+            Some(Num::Int(i)) => int_total += i,
+            Some(Num::Float(f)) => break int_total as f64 + f,
+        }
+    };
+    let mut c = 0.0;
+    for value in iter {
+        match value {
+            Num::Float(x) => {
+                let t = total + x;
+                if total.abs() >= x.abs() {
+                    c += (total - t) + x;
+                } else {
+                    c += (x - t) + total;
+                }
+                total = t;
+            }
+            Num::Int(i) => total += *i as f64,
+        }
+    }
+    if c != 0.0 && c.is_finite() {
+        total += c;
+    }
+    Num::Float(total)
 }
 
 fn mean(values: &[Num]) -> Value {
@@ -170,20 +193,20 @@ pub fn summarize_episode(line: u64, rec: &Value, offset: Option<u64>) -> Map {
             .collect();
         branches += (nodes.len() as i64 - parents.len() as i64).max(0);
         if let Some(trace_rewards) = get(trace, "rewards").and_then(Value::as_map) {
-            let mut total = Num::Int(0);
-            for r in trace_rewards
+            let products: Vec<Num> = trace_rewards
                 .values()
                 .filter(|r| matches!(r, Value::Map(_)))
-            {
-                let score = get(r, "score").and_then(Num::of).unwrap_or(Num::Int(0));
-                let weight = r
-                    .get("weight")
-                    .filter(|w| !w.is_nil())
-                    .and_then(Num::of)
-                    .unwrap_or(Num::Int(1));
-                total = total.add(score.mul(weight));
-            }
-            rewards.push(total);
+                .map(|r| {
+                    let score = get(r, "score").and_then(Num::of).unwrap_or(Num::Int(0));
+                    let weight = r
+                        .get("weight")
+                        .filter(|w| !w.is_nil())
+                        .and_then(Num::of)
+                        .unwrap_or(Num::Int(1));
+                    score.mul(weight)
+                })
+                .collect();
+            rewards.push(sum(&products));
             for (name, r) in trace_rewards {
                 if let Some(score) = r.get("score").and_then(Num::of) {
                     reward_parts.entry(name.clone()).or_default().push(score);
@@ -313,7 +336,7 @@ fn episode_duration(info: &Value, timing: &IndexMap<String, f64>) -> Value {
     if phases.is_empty() {
         Value::Nil
     } else {
-        Value::F64(phases.iter().sum())
+        Value::F64(crate::pyjson::py_sum(phases))
     }
 }
 

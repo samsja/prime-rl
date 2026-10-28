@@ -268,6 +268,8 @@ pub enum PrimeSetup {
         name: Option<String>,
         run: Option<PrimeTrainSetup>,
     },
+    /// `PrimeEvalMonitorConfig` (eval processes).
+    Eval(prime::eval::PrimeEvalSetup),
 }
 
 /// `monitors.setup(...)`: one monitor per configured block.
@@ -354,11 +356,22 @@ pub async fn spawn(
             tracing::info!("Initializing monitors ({})", names.join(", "));
         }
         let t0 = std::time::Instant::now();
-        if let Some(PrimeSetup::Train { name, run }) = setup.prime {
-            tracing::info!("Initializing prime monitor (name={})", py_opt(&name));
-            monitors.push(Box::new(
-                PrimeTrainMonitor::init(run, name, Some(setup.output_dir.clone())).await?,
-            ));
+        match setup.prime {
+            Some(PrimeSetup::Train { name, run }) => {
+                tracing::info!("Initializing prime monitor (name={})", py_opt(&name));
+                let output_dir = Some(setup.output_dir.clone());
+                monitors.push(Box::new(
+                    PrimeTrainMonitor::init(run, name, output_dir).await?,
+                ));
+            }
+            Some(PrimeSetup::Eval(eval)) => {
+                tracing::info!("Initializing prime monitor (name={})", py_opt(&eval.name));
+                let output_dir = Some(setup.output_dir.clone());
+                monitors.push(Box::new(
+                    prime::eval::PrimeEvalMonitor::init(eval, output_dir).await?,
+                ));
+            }
+            None => {}
         }
         if let Some(bridge) = setup.wandb {
             tracing::info!("Initializing wandb monitor");

@@ -16,6 +16,7 @@ const RECORD_LOCK_POLL: Duration = Duration::from_millis(50);
 /// previous launch's.
 pub const ATTEMPT_VAR: &str = "PRL_ATTEMPT_LOG_DIR";
 pub const PRIME_LINKS: &str = "prime";
+pub const PRIME_EVAL_LINKS: &str = "prime/eval";
 pub const WANDB_LINKS: &str = "wandb";
 
 pub fn links_path(output_dir: &Path) -> PathBuf {

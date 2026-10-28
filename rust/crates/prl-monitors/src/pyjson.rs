@@ -16,6 +16,28 @@ pub fn scalar_json(value: &Scalar) -> serde_json::Value {
     }
 }
 
+/// Python 3.12 `sum()` over floats: Neumaier-compensated, starting from the first item.
+pub fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut values = values.into_iter();
+    let Some(mut total) = values.next() else {
+        return 0.0;
+    };
+    let mut c = 0.0;
+    for x in values {
+        let t = total + x;
+        if total.abs() >= x.abs() {
+            c += (total - t) + x;
+        } else {
+            c += (x - t) + total;
+        }
+        total = t;
+    }
+    if c != 0.0 && c.is_finite() {
+        total += c;
+    }
+    total
+}
+
 /// `prime_rl.utils.utils.sanitize` on a flat row: drops non-finite floats, returns their keys.
 pub fn sanitize(row: &Row) -> (Row, Vec<String>) {
     let mut dropped = Vec::new();
