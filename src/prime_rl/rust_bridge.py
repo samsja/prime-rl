@@ -1,16 +1,15 @@
-"""Python side of the Rust orchestrator (``prime_rl_orch_rs``), run by the ``orchestrator``,
+"""Python side of the Rust orchestrator (``prime_rl_orch_rs``), used by the ``orchestrator``,
 ``eval`` and ``online_eval`` entrypoints.
 
-``run_rust_orchestrator`` hands the validated config to ``prime_rl_orch_rs.run``, which
-releases the GIL and runs the orchestrator on a tokio runtime until it exits. The Rust side
-calls back into ``PyBridge`` (from blocking threads, holding the GIL) for the work that stays
-in Python. See ``rust/docs/specs/boundary.md``.
+``prime_rl_orch_rs.run*`` release the GIL and run on a tokio runtime until they exit. The Rust
+side calls back into ``PyBridge`` (from blocking threads, holding the GIL) for the work that
+stays in Python. Arguments are plain values; results are JSON-encoded ``bytes``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING
 
 import orjson
@@ -30,15 +29,24 @@ if TYPE_CHECKING:
 
 
 def task_record(task: vf.Task) -> dict:
-    """A task as the Rust side sees it: ``data`` is what the dispatcher ships as
-    ``task_data``; ``key``/``hash`` are the identity checked against the returned episode."""
+    """``data`` is shipped as the run request's ``task_data``; ``key``/``hash`` identify the task
+    on the returned episode (a taskset may override ``key``)."""
     return {"key": task.key, "hash": task.hash, "data": task.data.model_dump(mode="json")}
 
 
-class PyBridge:
-    """Callbacks from the Rust orchestrator into Python. Arguments are plain values; results
-    are JSON-encoded ``bytes``."""
+@cache
+def _renderer(model_name: str, renderer_config: str) -> Renderer:
+    from renderers.base import create_renderer, load_tokenizer
 
+    return create_renderer(load_tokenizer(model_name), TypeAdapter(RendererConfig).validate_json(renderer_config))
+
+
+@cache
+def _echo_filter(import_path: str, kwargs: str) -> Callable[[vf.Trace], list]:
+    return partial(import_object(import_path), **orjson.loads(kwargs))
+
+
+class PyBridge:
     def __init__(self, config: OrchestratorConfig | EvalConfig | SFTOnlineEvalConfig):
         self.config = config
         if isinstance(config, OrchestratorConfig):
@@ -46,33 +54,20 @@ class PyBridge:
             self._sources: dict[str, list[EnvConfig]] = {"train": config.train.source, "eval": eval_sources}
         else:
             self._sources = {"train": [], "eval": config.source}
-        # The W&B monitor, driven by the Rust monitors actor (``prl_monitors::WandbBridge``).
-        # Same output dir as the Python ``monitors.setup`` call of each process.
+        # Driven by the Rust monitors actor; same output dir as each process's Python monitors.
         output_dir = config.run_dir if isinstance(config, EvalConfig) else config.output_dir
         wandb = config.monitors.wandb
         self.wandb = WandbBridge(wandb, output_dir, config) if wandb is not None else None
         self._streams: dict[tuple[str, str], Iterator[vf.Task]] = {}
-        self._renderers: dict[tuple[str, str], Renderer] = {}
-        self._echo_filters: dict[tuple[str, str], Callable[[vf.Trace], list]] = {}
-        # datasets' parallel arrow read races on tqdm's lock when tasksets load concurrently
-        # (see ``Envs.start``); pre-seed it.
+        # datasets' parallel arrow read races on tqdm's lock when tasksets load concurrently.
         from datasets.utils import tqdm as hf_tqdm
 
         hf_tqdm.set_lock(hf_tqdm.get_lock())
 
-    def _source(self, split: str, env_name: str) -> EnvConfig:
-        for source in self._sources[split]:
-            if source.resolved_name == env_name:
-                return source
-        raise KeyError(f"No {split} env named {env_name!r}")
-
     def load_tasks(self, split: str, env_name: str) -> bytes:
-        """Load the env's taskset client-side, as ``Env.start`` does.
-
-        Returns ``{"num_tasks": int | null, "tasks": [task_record, ...]}``. A bounded
-        selection is materialized whole. An unbounded one returns ``num_tasks: null`` and no
-        tasks; pull them with ``next_tasks``."""
-        source = self._source(split, env_name)
+        """``{"num_tasks": int | null, "tasks": [task_record]}``. A bounded selection comes back
+        whole; an unbounded one has ``num_tasks: null`` and is pulled with ``next_tasks``."""
+        (source,) = (s for s in self._sources[split] if s.resolved_name == env_name)
         taskset = vf.load_taskset(source.env.taskset).select(source.select)
         if taskset.bounded:
             tasks = [task_record(task) for task in taskset]
@@ -81,21 +76,13 @@ class PyBridge:
         return orjson.dumps({"num_tasks": None, "tasks": []})
 
     def next_tasks(self, split: str, env_name: str, n: int) -> bytes:
-        """Up to ``n`` more tasks of an unbounded taskset opened by ``load_tasks``, as a JSON
-        list of task records. Fewer than ``n`` means the stream ended."""
+        """Up to ``n`` more task records of an unbounded taskset; fewer means it ended."""
         stream = self._streams[(split, env_name)]
-        tasks = []
-        for task in stream:
-            tasks.append(task_record(task))
-            if len(tasks) == n:
-                break
-        return orjson.dumps(tasks)
+        return orjson.dumps([task_record(task) for _, task in zip(range(n), stream)])
 
     def flop_cost_table(self, max_len: int) -> bytes:
-        """``[bin_cost([n]) for n in 0..=max_len]`` of the FlopCounter ``BatchPacker`` builds
-        for the trainer model. Entries are decimal strings: they can exceed 64 bits.
-        Orchestrator only."""
-        assert isinstance(self.config, OrchestratorConfig)
+        """``[bin_cost([n]) for n in 0..=max_len]`` of the trainer model's FlopCounter, as decimal
+        strings (they can exceed 64 bits)."""
         import torch
 
         from prime_rl.configs.trainer import ModelConfig
@@ -111,36 +98,21 @@ class PyBridge:
         return orjson.dumps([str(bin_cost([n])) for n in range(max_len + 1)])
 
     def render_ids(self, model_name: str, renderer_config: str, system_content: str) -> bytes:
-        """opsd's hint block: token ids of one system message (no generation prompt), rendered
-        with ``create_renderer(load_tokenizer(model_name), renderer_config)``.
-        ``renderer_config`` is the JSON of a ``RendererConfig``."""
-        cache_key = (model_name, renderer_config)
-        renderer = self._renderers.get(cache_key)
-        if renderer is None:
-            from renderers.base import create_renderer, load_tokenizer
-
-            config = TypeAdapter(RendererConfig).validate_json(renderer_config)
-            renderer = self._renderers[cache_key] = create_renderer(load_tokenizer(model_name), config)
+        """opsd's hint block: token ids of one system message, without generation prompt."""
+        renderer = _renderer(model_name, renderer_config)
         ids = renderer.render_ids([{"role": "system", "content": system_content}], add_generation_prompt=False)
         return orjson.dumps(list(ids))
 
+    def echo_filter(self, import_path: str, kwargs: str, trace: str) -> bytes:
+        """Echo's user filter masks for one ``vf.WireTrace`` (JSON), unchecked."""
+        masks = _echo_filter(import_path, kwargs)(vf.WireTrace.model_validate_json(trace))
+        return orjson.dumps(masks, option=orjson.OPT_SERIALIZE_NUMPY)
+
     def nixl_receiver(self):
-        """The consumer's NIXL agent + ModelExpress session (``prl_io::weights::NixlBridge``),
-        built when the weight broadcast is ``nixl``."""
+        """The consumer's NIXL agent + ModelExpress session, for ``nixl`` weight broadcasts."""
         from prime_rl.transports.weights.nixl.bridge import NixlReceiverBridge
 
         return NixlReceiverBridge(self.config.weight_broadcast)
-
-    def echo_filter(self, import_path: str, kwargs: str, trace: bytes) -> bytes:
-        """Masks from echo's user filter ``import_object(import_path)(trace, **kwargs)``.
-        ``kwargs`` is a JSON object; ``trace`` is a JSON-encoded ``vf.WireTrace``. Returns the
-        filter's masks unchecked (the caller validates their shape, as ``EchoAlgorithm`` does)."""
-        cache_key = (import_path, kwargs)
-        filter_fn = self._echo_filters.get(cache_key)
-        if filter_fn is None:
-            filter_fn = self._echo_filters[cache_key] = partial(import_object(import_path), **orjson.loads(kwargs))
-        masks = filter_fn(vf.WireTrace.model_validate_json(trace))
-        return orjson.dumps(masks, option=orjson.OPT_SERIALIZE_NUMPY)
 
 
 def run_rust_orchestrator(config: OrchestratorConfig) -> None:
