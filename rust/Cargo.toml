@@ -39,6 +39,7 @@ prl-train = { path = "crates/prl-train" }
 prl-io = { path = "crates/prl-io" }
 prl-monitors = { path = "crates/prl-monitors" }
 prl-core = { path = "crates/prl-core" }
+prl-eval = { path = "crates/prl-eval" }
 
 [profile.release]
 debug = 1
