@@ -4,3 +4,5 @@
 pub mod concurrency;
 pub mod eval_source;
 pub mod eval_sink;
+pub mod watcher;
+pub mod lag;

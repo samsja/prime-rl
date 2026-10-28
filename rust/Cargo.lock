@@ -1015,7 +1015,10 @@ dependencies = [
 name = "prl-config"
 version = "0.1.0"
 dependencies = [
- "serde",
+ "indexmap",
+ "pyo3",
+ "pyo3-build-config",
+ "pythonize",
  "serde_json",
 ]
 
@@ -1024,7 +1027,9 @@ name = "prl-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "indexmap",
+ "prl-io",
  "prl-types",
  "serde",
  "serde_json",
@@ -1072,6 +1077,7 @@ dependencies = [
  "indexmap",
  "libc",
  "prl-types",
+ "prl-wire",
  "rand 0.8.8",
  "reqwest",
  "serde",
@@ -1108,6 +1114,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "indexmap",
@@ -1115,6 +1122,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
@@ -1171,6 +1179,7 @@ version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8970a78afe0628a3e3430376fc5fd76b6b45c4d43360ffd6cdd40bdde72b682a"
 dependencies = [
+ "indexmap",
  "indoc",
  "libc",
  "memoffset",
@@ -1225,6 +1234,16 @@ dependencies = [
  "pyo3-build-config",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "pythonize"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "597907139a488b22573158793aa7539df36ae863eba300c75f3a0d65fc475e27"
+dependencies = [
+ "pyo3",
+ "serde",
 ]
 
 [[package]]
