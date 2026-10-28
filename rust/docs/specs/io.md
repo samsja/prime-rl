@@ -206,17 +206,42 @@ JSON mode: `{"timestamp": iso, "level", "message", "module", "function", "line"}
 Optional plain file sink `HH:MM:SS {level:>7} {message}`. `format_time`: `<1s` -> `{ms:.0f}ms`, `<60` -> `{s:.1f}s`,
 `<3600` -> `{m}m {s}s`, `<86400` -> `{h}h {m}m`, else `{d}d {h}h`.
 
-### 1.10 Imports from outside the orchestrator (to handle when Python orchestrator is deleted)
+### 1.10 Deleting `src/prime_rl/orchestrator`: who still imports io-area code
 
-- `src/prime_rl/eval/runner.py`: `AdminPlane`, `InferenceClient`, `InferenceMetricsCollector`.
-- `src/prime_rl/transports/weights/{__init__,base,filesystem,nixl/nixl}.py`: `AdminPlane`, `load_lora_adapter`,
-  `init_nixl_broadcast` (also imported by the trainer through `transports.weights`).
-- `src/prime_rl/inference/dynamo.py`: `ADMIN_TIMEOUT_S`, `UPDATE_WEIGHTS_TIMEOUT_S`, `AdminPlane`, `_admin_post`,
-  `check_health`, `maybe_check_has_model`, `setup_admin_clients`.
-- tests: `tests/unit/inference/test_dynamo.py`, `tests/unit/orchestrator/test_{clients,prefill_logprobs}.py`.
-`control/`, `utils/heartbeat.py`, `utils/logger.py` live outside the orchestrator and stay (the trainer uses them).
-=> `clients.py` + `inference_metrics.py` must move out of `orchestrator/` (e.g. `prime_rl/inference/clients.py`)
-before deletion; `ckpt.py`/`gc.py` have no outside users.
+Python importers outside `orchestrator/` and `eval/` (both become Rust), by symbol:
+
+| Importer | Symbols from `orchestrator/clients.py` | Used by |
+|---|---|---|
+| `transports/weights/__init__.py` | `AdminPlane` | `setup_weight_receiver` signature |
+| `transports/weights/base.py` | `AdminPlane` | `WeightReceiver.__init__` type |
+| `transports/weights/filesystem.py` | `load_lora_adapter` | `FileSystemWeightReceiver.receive` |
+| `transports/weights/nixl/nixl.py` | `init_nixl_broadcast` | `NIXLWeightReceiver.initialize` |
+| `inference/dynamo.py` | `ADMIN_TIMEOUT_S`, `UPDATE_WEIGHTS_TIMEOUT_S`, `AdminPlane`, `_admin_post`, `check_health`, `maybe_check_has_model`, `setup_admin_clients` | `DynamoAdminPlane` |
+| `tests/unit/orchestrator/test_clients.py`, `test_prefill_logprobs.py` | clients symbols | ported to `prl-io` tests |
+| `tests/unit/inference/test_dynamo.py` | `AdminPlane`, `setup_admin_plane` (+ `inference.dynamo`) | ported to `prl_io::dynamo` tests |
+
+Nothing outside imports `inference_metrics.py`, `ckpt.py` or `gc.py`. Every importer above is consumer-side
+code that the Rust port replaces; the trainer only needs `setup_weight_sender` and `prune_broadcasts_beyond`
+(`trainer/{rl,sft}/train.py`), which reach `clients.py` solely through the receiver imports in
+`transports/weights/__init__.py`.
+
+Proposal: nothing moves; delete instead.
+1. `transports/weights`: delete the consumer side — `WeightReceiver` (base.py), `FileSystemWeightReceiver`,
+   `NCCLWeightReceiver`, `NIXLWeightReceiver`, `setup_weight_receiver`, and the `nixl/__init__.py` export of
+   `NIXLWeightReceiver`. Keep the senders, `prune_broadcasts_beyond`, the marker constants, and
+   `nixl/bridge.py` (`NixlReceiverBridge`, used by the Rust receiver; imports no orchestrator code). Then
+   `transports/weights` imports nothing from `orchestrator/`.
+2. `inference/dynamo.py`: its only user is `clients.setup_admin_plane`; delete it with
+   `tests/unit/inference/test_dynamo.py` (behavior lives in `prl_io::dynamo`). `DynamoConfig` stays in the configs.
+3. Then delete `clients.py`, `inference_metrics.py`, `ckpt.py`, `gc.py` and their unit tests.
+
+Other `prime_rl.orchestrator` imports from outside, not io-owned but in the way of the deletion:
+`orchestrator/rust.py` (the PyBridge + `run_rust_orchestrator`, imported by `entrypoints/orchestrator.py`) must move
+out (e.g. `prime_rl/rust_bridge.py`); it and `entrypoints/env_server.py` import `intercept_vf_logging` /
+`setup_env_server_logging` from `orchestrator/utils.py` (proposal: move both into `utils/logger.py`);
+`tests/unit/transports/test_payload.py` (`orchestrator.batch`, `orchestrator.trajectories`),
+`tests/unit/eval/test_control.py` (`orchestrator.concurrency`), `tests/unit/eval/test_resume.py`
+(`orchestrator.eval_source`). `control/`, `utils/heartbeat.py`, `utils/logger.py` stay (the trainer uses them).
 
 ## 2. Rust design (`prl_io`) — as implemented
 
@@ -301,7 +326,10 @@ payloads). Fixtures: `uv run --no-sync python rust/crates/prl-io/tools/gen_fixtu
   `release_and_trim` concern.
 - NIXL: the orchestrator side needs the NIXL C++ agent (UCX) and the ModelExpress gRPC client. The Rust receiver
   keeps the protocol (ack, init_broadcaster with session_id, ready/complete notifications) and delegates the agent +
-  ModelExpress calls to a `NixlBridge` (implemented via the Python bridge by prl-py/core).
+  ModelExpress calls to `NixlBridge`, implemented by `prime_rl_orch_rs::nixl::PyNixl` over
+  `transports/weights/nixl/bridge.py::NixlReceiverBridge` (see boundary.md). Verified: fake-agent tests, and real
+  NIXL agents exchanging the ready/complete notifications over UCX/TCP (`PRL_NIXL_LIVE=1`). Not verified here: a real
+  ModelExpress server and an actual RDMA weight pull by vLLM workers (needs InfiniBand).
 - Per-attempt httpx timeouts (connect/read/write/pool) map to reqwest `connect_timeout` (10 s on admin clients,
   also for the otherwise unbounded `/health` polls) + per-request total timeout = read timeout.
 - `statistics.mean` is computed as `fsum(values) / n` (Python divides the exact fraction): may differ in the last ulp.
