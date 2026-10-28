@@ -40,8 +40,7 @@ fn sample(len: usize, token: i32, with_payload: bool) -> TrainingSample {
 
 fn grid(step: i32) -> Vec<Vec<MicroBatch>> {
     let samples = (0..7).map(|i| sample(5 + i as usize * 3, 100 * step + i, i % 3 == 0)).collect();
-    let cost = |lens: &[usize]| lens.iter().map(|&n| n as i128).sum::<i128>();
-    prepare_batch(samples, 32, 2, &cost, 4).unwrap()
+    prepare_batch(samples, 32, 2, &prl_train::FlopTable::new((0..64).collect()), 4).unwrap()
 }
 
 fn free_port() -> u16 {

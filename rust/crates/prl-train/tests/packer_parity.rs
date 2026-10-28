@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use prl_train::packer::prepare_batch;
-use prl_train::{encode_micro_batches, MMImageRef, MMRefs, PayloadSlice, TrainingSample};
+use prl_train::{encode_micro_batches, FlopTable, MMImageRef, MMRefs, PayloadSlice, TrainingSample};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -52,13 +52,14 @@ fn sample(v: &Value) -> TrainingSample {
     }
 }
 
-fn cost(name: &str) -> fn(&[usize]) -> i128 {
-    match name {
-        "sum" => |lens| lens.iter().map(|&n| n as i128).sum(),
-        "flop" => |lens| lens.iter().map(|&n| 64 * n as i128 + (n * n) as i128).sum(),
-        "big" => |lens| lens.iter().map(|&n| n as i128 * 4 * 10i128.pow(16) + (n * n) as i128 * 10i128.pow(12)).sum(),
+fn cost(name: &str) -> FlopTable {
+    let per: fn(i128) -> i128 = match name {
+        "sum" => |n| n,
+        "flop" => |n| 64 * n + n * n,
+        "big" => |n| n * 4 * 10i128.pow(16) + n * n * 10i128.pow(12),
         other => panic!("unknown cost {other}"),
-    }
+    };
+    FlopTable::new((0..200).map(per).collect())
 }
 
 #[test]

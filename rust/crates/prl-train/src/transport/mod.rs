@@ -1,7 +1,6 @@
 //! Trainer-facing batch transport (`transports/batch/*`, sender side).
 
 mod filesystem;
-pub mod msgpack;
 mod types;
 mod zmq;
 

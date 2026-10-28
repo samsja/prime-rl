@@ -1,11 +1,12 @@
 //! `MicroBatch` (orchestrator -> trainer) and its msgspec-compatible encoding.
 
-use super::msgpack::Writer;
+use rmp::encode::{write_array_len, write_bin_len, write_nil, write_sint, write_str};
+
 use crate::sample::{MMRefs, PayloadSlice};
 
-/// A packed micro batch. Field order and defaults mirror the Python `msgspec.Struct`
-/// (`array_like=True`; msgspec writes every field of array-like structs). `routed_experts`, `sampling_mask` and `top_logprobs`
-/// are filled by the trainer from `payloads` and always travel as nil from the orchestrator.
+/// A packed micro batch. Field order mirrors the Python `msgspec.Struct` (`array_like=True`, so
+/// msgspec writes every field). `routed_experts`, `sampling_mask` and `top_logprobs` are filled by
+/// the trainer from `payloads` and always travel as nil from the orchestrator.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MicroBatch {
     pub input_ids: Vec<i32>,
@@ -30,142 +31,124 @@ pub struct MicroBatch {
     pub payloads: Option<Vec<Option<PayloadSlice>>>,
 }
 
-/// Number of struct fields (positions) in the Python `MicroBatch`.
-const NUM_FIELDS: usize = 23;
-
 impl MicroBatch {
     pub fn is_multimodal(&self) -> bool {
         self.mm_refs.is_some()
     }
 
-    /// Whether the sample's kept arrays include routing rows.
+    /// Whether the kept arrays of a packed sample include routing rows.
     pub fn has_routing(&self) -> bool {
-        self.payloads
-            .as_ref()
-            .is_some_and(|ps| ps.iter().flatten().any(|p| p.has("routed_experts")))
-    }
-
-    /// msgspec ignores `omit_defaults` for `array_like` structs: every field is written.
-    pub fn encode_into(&self, w: &mut Writer) {
-        w.array_header(NUM_FIELDS);
-        for field in 0..NUM_FIELDS {
-            self.encode_field(field, w);
-        }
-    }
-
-    fn encode_field(&self, field: usize, w: &mut Writer) {
-        fn opt_stream<T: super::msgpack::RawBytes>(w: &mut Writer, v: &Option<Vec<T>>) {
-            match v {
-                Some(v) => w.stream(v),
-                None => w.nil(),
-            }
-        }
-        fn ints(w: &mut Writer, v: &[usize]) {
-            w.array_header(v.len());
-            for &x in v {
-                w.int(x as i64);
-            }
-        }
-        fn strs(w: &mut Writer, v: &[String]) {
-            w.array_header(v.len());
-            for s in v {
-                w.str(s);
-            }
-        }
-        match field {
-            0 => w.stream(&self.input_ids),
-            1 => w.stream(&self.loss_mask),
-            2 => w.stream(&self.advantages),
-            3 => w.stream(&self.inference_logprobs),
-            4 => w.stream(&self.position_ids),
-            5 => ints(w, &self.sequence_lengths),
-            6 => w.stream(&self.temperatures),
-            7 => strs(w, &self.env_names),
-            8 => ints(w, &self.seq_lens),
-            9 => opt_stream(w, &self.ref_logprobs),
-            10 | 16 | 19 => w.nil(),
-            11 => match &self.mm_refs {
-                Some(refs) => encode_mm_refs(refs, w),
-                None => w.nil(),
-            },
-            12 => opt_stream(w, &self.mm_token_type_ids),
-            13 => opt_stream(w, &self.rl_weights),
-            14 => opt_stream(w, &self.ce_weights),
-            15 => opt_stream(w, &self.ref_kl_weights),
-            17 => match &self.trace_ids {
-                Some(v) => strs(w, v),
-                None => w.nil(),
-            },
-            18 => match &self.branch_indices {
-                Some(v) => {
-                    w.array_header(v.len());
-                    for &x in v {
-                        w.int(x);
-                    }
-                }
-                None => w.nil(),
-            },
-            20 => w.int(self.padding as i64),
-            21 => opt_stream(w, &self.staleness),
-            22 => match &self.payloads {
-                Some(ps) => {
-                    w.array_header(ps.len());
-                    for p in ps {
-                        match p {
-                            Some(p) => encode_payload_slice(p, w),
-                            None => w.nil(),
-                        }
-                    }
-                }
-                None => w.nil(),
-            },
-            _ => unreachable!("MicroBatch has {NUM_FIELDS} fields"),
-        }
+        self.payloads.as_ref().is_some_and(|ps| ps.iter().flatten().any(|p| p.has("routed_experts")))
     }
 }
 
-fn encode_mm_refs(refs: &MMRefs, w: &mut Writer) {
-    w.array_header(1);
-    w.array_header(refs.images.len());
+// Writing into a Vec cannot fail.
+type Buf = Vec<u8>;
+
+/// A per-token stream travels as msgpack bin of its raw little-endian bytes.
+fn stream<T: Copy>(buf: &mut Buf, values: &[T], to_le: impl Fn(T) -> Vec<u8>) {
+    write_bin_len(buf, (values.len() * size_of::<T>()) as u32).unwrap();
+    for &v in values {
+        buf.extend(to_le(v));
+    }
+}
+
+fn opt<T>(buf: &mut Buf, value: &Option<T>, write: impl FnOnce(&mut Buf, &T)) {
+    match value {
+        Some(v) => write(buf, v),
+        None => write_nil(buf).unwrap(),
+    }
+}
+
+fn f32s(buf: &mut Buf, v: &Vec<f32>) {
+    stream(buf, v, |x| x.to_le_bytes().to_vec());
+}
+
+fn i32s(buf: &mut Buf, v: &Vec<i32>) {
+    stream(buf, v, |x| x.to_le_bytes().to_vec());
+}
+
+fn ints<T: Copy + Into<i64>>(buf: &mut Buf, v: &[T]) {
+    write_array_len(buf, v.len() as u32).unwrap();
+    for &x in v {
+        write_sint(buf, x.into()).unwrap();
+    }
+}
+
+fn usizes(buf: &mut Buf, v: &[usize]) {
+    write_array_len(buf, v.len() as u32).unwrap();
+    for &x in v {
+        write_sint(buf, x as i64).unwrap();
+    }
+}
+
+fn strs(buf: &mut Buf, v: &Vec<String>) {
+    write_array_len(buf, v.len() as u32).unwrap();
+    for s in v {
+        write_str(buf, s).unwrap();
+    }
+}
+
+fn mm_refs(buf: &mut Buf, refs: &MMRefs) {
+    write_array_len(buf, 1).unwrap();
+    write_array_len(buf, refs.images.len() as u32).unwrap();
     for image in &refs.images {
-        w.array_header(3);
-        w.str(&image.url);
-        w.int(image.offset as i64);
-        w.int(image.length as i64);
+        write_array_len(buf, 3).unwrap();
+        write_str(buf, &image.url).unwrap();
+        write_sint(buf, image.offset as i64).unwrap();
+        write_sint(buf, image.length as i64).unwrap();
     }
 }
 
-fn encode_payload_slice(p: &PayloadSlice, w: &mut Writer) {
-    w.array_header(6);
-    w.str(&p.url);
-    w.str(&p.id);
-    w.int(p.num_tokens as i64);
-    w.array_header(p.fields.len());
-    for f in &p.fields {
-        w.str(f);
-    }
-    match &p.routed_shape {
-        Some(shape) => {
-            w.array_header(shape.len());
-            for &x in shape {
-                w.int(x);
-            }
+fn payload_slice(buf: &mut Buf, p: &PayloadSlice) {
+    write_array_len(buf, 6).unwrap();
+    write_str(buf, &p.url).unwrap();
+    write_str(buf, &p.id).unwrap();
+    write_sint(buf, p.num_tokens as i64).unwrap();
+    strs(buf, &p.fields);
+    opt(buf, &p.routed_shape, |b, s| ints(b, s));
+    opt(buf, &p.routed_dtype, |b, s| write_str(b, s).unwrap());
+}
+
+fn micro_batch(buf: &mut Buf, mb: &MicroBatch) {
+    write_array_len(buf, 23).unwrap();
+    i32s(buf, &mb.input_ids);
+    stream(buf, &mb.loss_mask, |x| vec![x as u8]);
+    f32s(buf, &mb.advantages);
+    f32s(buf, &mb.inference_logprobs);
+    i32s(buf, &mb.position_ids);
+    usizes(buf, &mb.sequence_lengths);
+    f32s(buf, &mb.temperatures);
+    strs(buf, &mb.env_names);
+    usizes(buf, &mb.seq_lens);
+    opt(buf, &mb.ref_logprobs, f32s);
+    write_nil(buf).unwrap(); // routed_experts
+    opt(buf, &mb.mm_refs, mm_refs);
+    opt(buf, &mb.mm_token_type_ids, i32s);
+    opt(buf, &mb.rl_weights, f32s);
+    opt(buf, &mb.ce_weights, f32s);
+    opt(buf, &mb.ref_kl_weights, f32s);
+    write_nil(buf).unwrap(); // sampling_mask
+    opt(buf, &mb.trace_ids, strs);
+    opt(buf, &mb.branch_indices, |b, v| ints(b, v));
+    write_nil(buf).unwrap(); // top_logprobs
+    write_sint(buf, mb.padding as i64).unwrap();
+    opt(buf, &mb.staleness, |b, v| stream(b, v, |x| x.to_le_bytes().to_vec()));
+    opt(buf, &mb.payloads, |b, ps| {
+        write_array_len(b, ps.len() as u32).unwrap();
+        for p in ps {
+            opt(b, p, payload_slice);
         }
-        None => w.nil(),
-    }
-    match &p.routed_dtype {
-        Some(d) => w.str(d),
-        None => w.nil(),
-    }
+    });
 }
 
 /// One data rank's micro batches as the trainer decodes them (`list[MicroBatch]`).
 pub fn encode_micro_batches(micro_batches: &[MicroBatch]) -> Vec<u8> {
     let tokens: usize = micro_batches.iter().map(|mb| mb.input_ids.len()).sum();
-    let mut w = Writer::with_capacity(tokens * 24 + 64);
-    w.array_header(micro_batches.len());
+    let mut buf = Vec::with_capacity(tokens * 24 + 64);
+    write_array_len(&mut buf, micro_batches.len() as u32).unwrap();
     for mb in micro_batches {
-        mb.encode_into(&mut w);
+        micro_batch(&mut buf, mb);
     }
-    w.buf
+    buf
 }

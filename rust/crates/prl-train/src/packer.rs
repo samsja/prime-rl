@@ -1,26 +1,14 @@
 //! `BatchPacker` (`orchestrator/batch.py`): packs a step's samples into one micro batch list per
 //! trainer data rank. CPU-bound: call `pack` from `spawn_blocking`.
 
-use std::sync::Arc;
-
 use anyhow::{bail, ensure, Result};
 
 use crate::partition::balanced_partition;
 use crate::sample::{MMImageRef, MMRefs, TrainingSample};
 use crate::transport::MicroBatch;
 
-/// Training cost of packed documents; additive over sequences.
-pub trait BinCost: Send + Sync {
-    fn cost(&self, seq_lens: &[usize]) -> i128;
-}
-
-impl<F: Fn(&[usize]) -> i128 + Send + Sync> BinCost for F {
-    fn cost(&self, seq_lens: &[usize]) -> i128 {
-        self(seq_lens)
-    }
-}
-
-/// `FlopCounter` of the trainer model, tabulated per document length (`table[n] = bin_cost([n])`).
+/// The trainer model's `FlopCounter` tabulated per document length (`per_len[n] = bin_cost([n])`);
+/// the cost of packed documents is the sum of theirs.
 pub struct FlopTable {
     per_len: Vec<i128>,
 }
@@ -34,36 +22,32 @@ impl FlopTable {
     pub fn max_len(seq_len: usize, pad_to_multiple_of: usize) -> usize {
         seq_len + pad_to_multiple_of
     }
-}
 
-impl BinCost for FlopTable {
-    fn cost(&self, seq_lens: &[usize]) -> i128 {
-        seq_lens
-            .iter()
-            .map(|&n| *self.per_len.get(n).unwrap_or_else(|| panic!("flop table covers {} tokens, got {n}", self.per_len.len() - 1)))
-            .sum()
+    pub fn cost(&self, seq_lens: &[usize]) -> i128 {
+        seq_lens.iter().map(|&n| self.per_len[n]).sum()
     }
 }
 
 pub struct BatchPacker {
-    pub seq_len: usize,
-    pub num_train_workers: usize,
-    pub pad_to_multiple_of: usize,
-    pub bin_cost: Arc<dyn BinCost>,
+    seq_len: usize,
+    num_train_workers: usize,
+    pad_to_multiple_of: usize,
+    bin_cost: FlopTable,
 }
 
 impl BatchPacker {
     /// `pad_to_seq_len` pads every row to exactly `seq_len`.
-    pub fn new(seq_len: usize, num_train_workers: usize, pad_to_multiple_of: usize, pad_to_seq_len: bool, bin_cost: Arc<dyn BinCost>) -> Self {
+    pub fn new(seq_len: usize, num_train_workers: usize, pad_to_multiple_of: usize, pad_to_seq_len: bool, bin_cost: FlopTable) -> Self {
         let pad_to_multiple_of = if pad_to_seq_len { seq_len } else { pad_to_multiple_of };
         Self { seq_len, num_train_workers, pad_to_multiple_of, bin_cost }
     }
 
     pub fn pack(&self, samples: Vec<TrainingSample>) -> Result<Vec<Vec<MicroBatch>>> {
-        prepare_batch(samples, self.seq_len, self.num_train_workers, self.bin_cost.as_ref(), self.pad_to_multiple_of)
+        prepare_batch(samples, self.seq_len, self.num_train_workers, &self.bin_cost, self.pad_to_multiple_of)
     }
 }
 
+/// Truncation never splits an image: a cut inside one moves back to its first placeholder.
 fn truncate_mm_refs(refs: &MMRefs, seq_len: usize) -> (usize, Option<MMRefs>) {
     let mut cut = seq_len;
     let mut kept = Vec::new();
@@ -80,143 +64,109 @@ fn truncate_mm_refs(refs: &MMRefs, seq_len: usize) -> (usize, Option<MMRefs>) {
     (cut, (!kept.is_empty()).then_some(MMRefs { images: kept }))
 }
 
-pub fn multimodal_sample_error(sample: &TrainingSample) -> Option<String> {
+fn check_multimodal(sample: &TrainingSample) -> Result<()> {
+    let n = sample.token_ids.len();
     if let Some(mm) = &sample.mm_token_type_ids {
-        if mm.len() != sample.token_ids.len() {
-            return Some(format!(
-                "mm_token_type_ids length must match token_ids length ({} != {})",
-                mm.len(),
-                sample.token_ids.len()
-            ));
-        }
+        ensure!(mm.len() == n, "mm_token_type_ids length must match token_ids length ({} != {n})", mm.len());
     }
     if let Some(refs) = &sample.mm_refs {
-        if sample.mm_token_type_ids.is_none() {
-            return Some("multimodal samples require mm_token_type_ids".into());
-        }
+        ensure!(sample.mm_token_type_ids.is_some(), "multimodal samples require mm_token_type_ids");
         let mut previous_end = 0;
         for image in &refs.images {
-            if image.offset < previous_end || image.offset + image.length > sample.token_ids.len() {
-                return Some("multimodal image refs must be ordered, non-overlapping, and within token_ids".into());
-            }
+            ensure!(
+                image.offset >= previous_end && image.offset + image.length <= n,
+                "multimodal image refs must be ordered, non-overlapping, and within token_ids"
+            );
             previous_end = image.offset + image.length;
         }
     }
-    None
+    Ok(())
 }
 
 /// One sample as a single-sequence micro batch, truncated to `seq_len`.
 pub fn prepare_sample(sample: TrainingSample, seq_len: usize) -> Result<MicroBatch> {
-    if let Some(error) = multimodal_sample_error(&sample) {
-        bail!(error);
-    }
-    let TrainingSample {
-        mut token_ids,
-        mask: mut loss_mask,
-        logprobs: mut inference_logprobs,
-        mut temperatures,
-        env_name,
-        mut ref_logprobs,
-        mut mm_refs,
-        mut mm_token_type_ids,
-        mut rl_weights,
-        mut ce_weights,
-        mut ref_kl_weights,
-        advantages,
-        trace_id,
-        branch_index,
-        mut staleness,
-        mut payload,
-    } = sample;
-    let mut advantages = match advantages {
+    check_multimodal(&sample)?;
+    ensure!(sample.env_name != "all", "env_name='all' is reserved for aggregate metric keys");
+    let advantages = match sample.advantages {
         Some(a) => a,
         None => {
-            let has_rl_members = match &rl_weights {
-                None => loss_mask.iter().any(|&m| m),
-                Some(w) => loss_mask.iter().zip(w).any(|(&m, &w)| m && w != 0.0),
+            let has_rl_members = match &sample.rl_weights {
+                None => sample.mask.iter().any(|&m| m),
+                Some(w) => sample.mask.iter().zip(w).any(|(&m, &w)| m && w != 0.0),
             };
             if has_rl_members {
                 bail!(
-                    "sample from env '{env_name}' has rl member tokens but no advantages — the producer must stamp the advantage stream (the orchestrator broadcasts the rollout scalar)"
+                    "sample from env '{}' has rl member tokens but no advantages — the producer must stamp the advantage stream (the orchestrator broadcasts the rollout scalar)",
+                    sample.env_name
                 );
             }
-            vec![0.0; token_ids.len()]
+            vec![0.0; sample.token_ids.len()]
         }
     };
-    ensure!(env_name != "all", "env_name='all' is reserved for aggregate metric keys");
-    let mut position_ids: Vec<i32> = (0..token_ids.len() as i32).collect();
-
-    if token_ids.len() > seq_len {
-        let mut cut = seq_len;
-        if let Some(refs) = &mm_refs {
-            let (c, kept) = truncate_mm_refs(refs, seq_len);
-            cut = c;
-            mm_refs = kept;
-        }
-        token_ids.truncate(cut);
-        loss_mask.truncate(cut);
-        inference_logprobs.truncate(cut);
-        position_ids.truncate(cut);
-        advantages.truncate(cut);
-        temperatures.truncate(cut);
-        for stream in [&mut ref_logprobs, &mut rl_weights, &mut ce_weights, &mut ref_kl_weights].into_iter().flatten() {
+    let mut mb = MicroBatch {
+        position_ids: (0..sample.token_ids.len() as i32).collect(),
+        input_ids: sample.token_ids,
+        loss_mask: sample.mask,
+        advantages,
+        inference_logprobs: sample.logprobs,
+        temperatures: sample.temperatures,
+        env_names: vec![sample.env_name],
+        ref_logprobs: sample.ref_logprobs,
+        mm_refs: sample.mm_refs,
+        mm_token_type_ids: sample.mm_token_type_ids,
+        rl_weights: sample.rl_weights,
+        ce_weights: sample.ce_weights,
+        ref_kl_weights: sample.ref_kl_weights,
+        trace_ids: Some(vec![sample.trace_id.unwrap_or_default()]),
+        branch_indices: Some(vec![sample.branch_index.unwrap_or(-1)]),
+        staleness: sample.staleness,
+        payloads: sample.payload.map(|p| vec![Some(p)]),
+        ..Default::default()
+    };
+    if mb.input_ids.len() > seq_len {
+        let (cut, mm_refs) = match &mb.mm_refs {
+            Some(refs) => truncate_mm_refs(refs, seq_len),
+            None => (seq_len, None),
+        };
+        mb.mm_refs = mm_refs;
+        mb.input_ids.truncate(cut);
+        mb.loss_mask.truncate(cut);
+        mb.advantages.truncate(cut);
+        mb.inference_logprobs.truncate(cut);
+        mb.position_ids.truncate(cut);
+        mb.temperatures.truncate(cut);
+        for stream in [&mut mb.ref_logprobs, &mut mb.rl_weights, &mut mb.ce_weights, &mut mb.ref_kl_weights].into_iter().flatten() {
             stream.truncate(cut);
         }
-        if let Some(mm) = &mut mm_token_type_ids {
+        if let Some(mm) = &mut mb.mm_token_type_ids {
             mm.truncate(cut);
         }
-        if let Some(p) = &mut payload {
-            p.num_tokens = cut;
-        }
-        if let Some(s) = &mut staleness {
+        if let Some(s) = &mut mb.staleness {
             s.truncate(cut);
         }
-    }
-
-    let n = token_ids.len();
-    ensure!(
-        n == advantages.len() && n == loss_mask.len() && n == inference_logprobs.len() && n == temperatures.len(),
-        "input_ids: {n}, advantages: {}, loss_mask: {}, position_ids: {}, inference_logprobs: {}, temperatures: {}",
-        advantages.len(),
-        loss_mask.len(),
-        position_ids.len(),
-        inference_logprobs.len(),
-        temperatures.len()
-    );
-    for (name, len) in [
-        ("ref_logprobs", ref_logprobs.as_ref().map(Vec::len)),
-        ("rl_weights", rl_weights.as_ref().map(Vec::len)),
-        ("ce_weights", ce_weights.as_ref().map(Vec::len)),
-        ("ref_kl_weights", ref_kl_weights.as_ref().map(Vec::len)),
-        ("staleness", staleness.as_ref().map(Vec::len)),
-    ] {
-        if let Some(len) = len {
-            ensure!(len == n, "{name}: {len}");
+        if let Some(p) = mb.payloads.as_mut().and_then(|ps| ps[0].as_mut()) {
+            p.num_tokens = cut;
         }
     }
-
-    Ok(MicroBatch {
-        input_ids: token_ids,
-        advantages,
-        loss_mask,
-        position_ids,
-        inference_logprobs,
-        sequence_lengths: vec![n],
-        ref_logprobs,
-        temperatures,
-        mm_token_type_ids,
-        env_names: vec![env_name],
-        mm_refs,
-        rl_weights,
-        ce_weights,
-        ref_kl_weights,
-        seq_lens: vec![n],
-        trace_ids: Some(vec![trace_id.unwrap_or_default()]),
-        branch_indices: Some(vec![branch_index.unwrap_or(-1)]),
-        padding: 0,
-        staleness,
-        payloads: payload.map(|p| vec![Some(p)]),
-    })
+    let n = mb.input_ids.len();
+    let lens = [
+        mb.loss_mask.len(),
+        mb.advantages.len(),
+        mb.inference_logprobs.len(),
+        mb.temperatures.len(),
+        mb.ref_logprobs.as_ref().map_or(n, Vec::len),
+        mb.rl_weights.as_ref().map_or(n, Vec::len),
+        mb.ce_weights.as_ref().map_or(n, Vec::len),
+        mb.ref_kl_weights.as_ref().map_or(n, Vec::len),
+        mb.staleness.as_ref().map_or(n, Vec::len),
+    ];
+    ensure!(
+        lens.iter().all(|&len| len == n),
+        "per-token streams must match input_ids ({n}): mask, advantages, logprobs, temperatures, ref_logprobs, rl, ce, ref_kl, staleness = {lens:?}"
+    );
+    mb.sequence_lengths = vec![n];
+    mb.seq_lens = vec![n];
+    Ok(mb)
 }
 
 struct Bin {
@@ -239,13 +189,13 @@ impl Bin {
         self.samples.push(sample);
     }
 
-    fn workload(&self, bin_cost: &dyn BinCost) -> i128 {
+    fn workload(&self, bin_cost: &FlopTable) -> i128 {
         let lens: Vec<usize> = self.samples.iter().map(|s| s.input_ids.len()).collect();
         bin_cost.cost(&lens)
     }
 
     /// Longest-processing-time split: heaviest sample to the lighter side.
-    fn split_by_workload(self, bin_cost: &dyn BinCost) -> (Bin, Bin) {
+    fn split_by_workload(self, bin_cost: &FlopTable) -> (Bin, Bin) {
         let mut ranked: Vec<(i128, MicroBatch)> =
             self.samples.into_iter().map(|s| (bin_cost.cost(&[s.input_ids.len()]), s)).collect();
         ranked.sort_by_key(|(workload, _)| std::cmp::Reverse(*workload));
@@ -338,7 +288,7 @@ fn materialize_bin(bin: Bin) -> Result<MicroBatch> {
     Ok(out)
 }
 
-fn expand_bins_by_splitting(bins: &mut Vec<Bin>, target_count: usize, bin_cost: &dyn BinCost) {
+fn expand_bins_by_splitting(bins: &mut Vec<Bin>, target_count: usize, bin_cost: &FlopTable) {
     while bins.len() < target_count {
         let Some((_, idx)) = bins
             .iter()
@@ -359,11 +309,11 @@ fn expand_bins_by_splitting(bins: &mut Vec<Bin>, target_count: usize, bin_cost: 
 
 /// First-fit decreasing packing (never truncates), then split bins until the count is a
 /// multiple of the worker count.
-pub fn packed_samples_into_micro_bs(
+fn packed_samples_into_micro_bs(
     mut samples: Vec<MicroBatch>,
     max_seq_len: usize,
     num_train_workers: usize,
-    bin_cost: &dyn BinCost,
+    bin_cost: &FlopTable,
 ) -> Result<Vec<MicroBatch>> {
     samples.sort_by_key(|s| std::cmp::Reverse(s.input_ids.len()));
     let mut bins: Vec<Bin> = Vec::new();
@@ -421,42 +371,6 @@ pub fn pad_micro_batch(mut mb: MicroBatch, pad_to_multiple_of: usize) -> Result<
     Ok(mb)
 }
 
-fn assert_token_arrays_aligned(mb: &MicroBatch) -> Result<()> {
-    let n = mb.input_ids.len();
-    let lens = [
-        ("loss_mask", Some(mb.loss_mask.len())),
-        ("advantages", Some(mb.advantages.len())),
-        ("inference_logprobs", Some(mb.inference_logprobs.len())),
-        ("position_ids", Some(mb.position_ids.len())),
-        ("temperatures", Some(mb.temperatures.len())),
-        ("ref_logprobs", mb.ref_logprobs.as_ref().map(Vec::len)),
-        ("rl_weights", mb.rl_weights.as_ref().map(Vec::len)),
-        ("ce_weights", mb.ce_weights.as_ref().map(Vec::len)),
-        ("ref_kl_weights", mb.ref_kl_weights.as_ref().map(Vec::len)),
-        ("mm_token_type_ids", mb.mm_token_type_ids.as_ref().map(Vec::len)),
-        ("staleness", mb.staleness.as_ref().map(Vec::len)),
-    ];
-    for (name, len) in lens {
-        if let Some(len) = len {
-            ensure!(len == n, "{name} misaligned after packing: {len} != {n} tokens");
-        }
-    }
-    ensure!(mb.sequence_lengths.iter().sum::<usize>() == n, "sequence_lengths sum != {n} tokens");
-    let num_sequences = mb.sequence_lengths.len();
-    for (name, len) in [
-        ("env_names", Some(mb.env_names.len())),
-        ("trace_ids", mb.trace_ids.as_ref().map(Vec::len)),
-        ("branch_indices", mb.branch_indices.as_ref().map(Vec::len)),
-        ("payloads", mb.payloads.as_ref().map(Vec::len)),
-    ] {
-        if let Some(len) = len {
-            ensure!(len == num_sequences, "{name} misaligned after packing: {len} != {num_sequences} sequences");
-        }
-    }
-    ensure!(mb.seq_lens.iter().sum::<usize>() == n, "seq_lens sum != {n} tokens");
-    Ok(())
-}
-
 /// A zero-loss copy of a micro batch, preserving its modality and routing.
 fn make_dummy_batch(source: &MicroBatch) -> MicroBatch {
     let mut dummy = source.clone();
@@ -491,7 +405,7 @@ fn pad_group_for_distribution(group: &mut Vec<MicroBatch>, num_train_workers: us
     }
 }
 
-fn distribute_group(group: Vec<MicroBatch>, num_train_workers: usize, bin_cost: &dyn BinCost) -> Vec<Vec<MicroBatch>> {
+fn distribute_group(group: Vec<MicroBatch>, num_train_workers: usize, bin_cost: &FlopTable) -> Vec<Vec<MicroBatch>> {
     assert!(group.len().is_multiple_of(num_train_workers), "Number of micro batches is not divisible by number of data ranks");
     if group.is_empty() {
         return (0..num_train_workers).map(|_| Vec::new()).collect();
@@ -510,7 +424,7 @@ pub fn prepare_batch(
     rollouts: Vec<TrainingSample>,
     seq_len: usize,
     num_train_workers: usize,
-    bin_cost: &dyn BinCost,
+    bin_cost: &FlopTable,
     pad_to_multiple_of: usize,
 ) -> Result<Vec<Vec<MicroBatch>>> {
     let samples = rollouts.into_iter().map(|s| prepare_sample(s, seq_len)).collect::<Result<Vec<_>>>()?;
@@ -520,9 +434,6 @@ pub fn prepare_batch(
     let (mut mm, mut text): (Vec<_>, Vec<_>) = micro_batches.into_iter().partition(MicroBatch::is_multimodal);
     pad_group_for_distribution(&mut mm, num_train_workers);
     pad_group_for_distribution(&mut text, num_train_workers);
-    for mb in mm.iter().chain(&text) {
-        assert_token_arrays_aligned(mb)?;
-    }
     let mut per_worker: Vec<Vec<MicroBatch>> = (0..num_train_workers).map(|_| Vec::new()).collect();
     for group in [mm, text] {
         for (worker, batches) in distribute_group(group, num_train_workers, bin_cost).into_iter().enumerate() {
