@@ -6,8 +6,78 @@ use std::fmt;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+/// One metric value. Ints and floats stay distinct so JSON outputs match Python
+/// (`5` vs `5.0`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Scalar {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    Null,
+}
+
+impl Scalar {
+    /// Numeric value (ints widened, bools as 0/1); None for strings and null.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Scalar::Int(v) => Some(*v as f64),
+            Scalar::Float(v) => Some(*v),
+            Scalar::Bool(v) => Some(f64::from(u8::from(*v))),
+            Scalar::Str(_) | Scalar::Null => None,
+        }
+    }
+}
+
+impl From<f64> for Scalar {
+    fn from(v: f64) -> Self {
+        Scalar::Float(v)
+    }
+}
+impl From<f32> for Scalar {
+    fn from(v: f32) -> Self {
+        Scalar::Float(f64::from(v))
+    }
+}
+impl From<i64> for Scalar {
+    fn from(v: i64) -> Self {
+        Scalar::Int(v)
+    }
+}
+impl From<i32> for Scalar {
+    fn from(v: i32) -> Self {
+        Scalar::Int(i64::from(v))
+    }
+}
+impl From<u64> for Scalar {
+    fn from(v: u64) -> Self {
+        Scalar::Int(v as i64)
+    }
+}
+impl From<usize> for Scalar {
+    fn from(v: usize) -> Self {
+        Scalar::Int(v as i64)
+    }
+}
+impl From<bool> for Scalar {
+    fn from(v: bool) -> Self {
+        Scalar::Bool(v)
+    }
+}
+impl From<&str> for Scalar {
+    fn from(v: &str) -> Self {
+        Scalar::Str(v.to_owned())
+    }
+}
+impl From<String> for Scalar {
+    fn from(v: String) -> Self {
+        Scalar::Str(v)
+    }
+}
+
 /// Ordered metric dict (Python dicts keep insertion order; monitors rely on it).
-pub type Metrics = IndexMap<String, f64>;
+pub type Metrics = IndexMap<String, Scalar>;
 
 /// `WorkKind` in Python.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -196,6 +266,12 @@ pub trait Bridge: Send + Sync + 'static {
         -> anyhow::Result<Vec<Vec<bool>>>;
 }
 
+/// Prefill logprobs of `token_ids` (one per token, 0.0 for the first).
+#[async_trait::async_trait]
+pub trait Scorer: Send + Sync {
+    async fn score(&self, token_ids: Vec<i32>) -> anyhow::Result<Vec<f32>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +292,9 @@ mod tests {
         let e = ErrorInfo { type_: "ValueError".into(), message: "m".into(), traceback: None, status_code: None };
         assert_eq!(serde_json::to_value(&e).unwrap()["type"], "ValueError");
         assert_eq!(Progress::default().step, 1);
+        let mut m = Metrics::new();
+        m.insert("a".into(), 5u64.into());
+        m.insert("b".into(), 1.0f64.into());
+        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"a":5,"b":1.0}"#);
     }
 }
