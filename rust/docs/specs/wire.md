@@ -189,7 +189,13 @@ is deleted, `monitors/*` type-only `vf` imports are unaffected by prl-wire.
   `to_json(Option<u32>) -> Vec<u8>`, plus the derived logic of 1.4.
 - `assembly`: `EpisodeAssembly{apply(&Value), finish(head, &[TraceSummary]) -> Result<Value>}`.
 - `protocol`: frames, `TraceSummary`, response decoding, errors.
-- `client`: `EnvClient` (tokio actor owning one `zeromq::DealerSocket`).
+- `client`: `EnvClient` (tokio actor owning one libzmq DEALER socket via the `zmq` crate with
+  vendored libzmq, driven through the socket's notification fd with `AsyncFd`, like pyzmq's
+  asyncio integration). The pure-Rust `zeromq` crate was rejected: it cannot queue sends before
+  the connection exists, does not reconnect, and panics on peer read errors.
+- `sampling`: `train_sampling` / `sampling_config` / `with_cache_salt` — the vf `SamplingConfig`
+  dicts of `TrainEnv.__init__` / `Env._sampling`, key order included.
+- `json::to_python_json`: Python `json.dumps` (for `task_key` hashes; `TraceTask::content_hash`).
 - `payload`: `PAYLOAD_INFO_KEY`, `trace_payload_urls(&Trace)`, `delete_payloads(urls)`.
 
 ### 2.2 EnvClient (actor)
@@ -213,7 +219,25 @@ let episode: Episode = client.run(&task_data /*Map*/, &client_cfg /*impl Seriali
 - Errors: `RunError` (`type_name()` gives the Python exception class: `RuntimeError` for
   `success=false`, assembly gaps and validation failures; `TimeoutError` for startup).
 
-### 2.3 What I need from siblings
+### 2.3 Tests
+
+- `tests/json.rs`: orjson float/string formatting (f64, numpy f32) and msgpack round trip.
+- `tests/model.rs`: a rich episode streamed by Python's `DeltaStreamer` (`tests/fixtures/
+  gen_episode.py`): assembly == Python's, `to_json(4|None)` and `Trace.to_record(2)` byte-equal,
+  branches/token counts equal, same after the orchestrator's mutations, record reload round trip,
+  pydantic strictness of record validation.
+- `tests/misc.rs`: sampling dicts, `task_key` hashes, Python `json.dumps`.
+- `src/client.rs` unit tests (port of `serve/test_client.py`): interleaved runs see their deltas
+  in order before the reply, malformed frames skipped; a dropped run stops seeing its stream and
+  sends `cancel`; multi-MB deltas intact; failed replies; health timeout; a run assembles the
+  fixture stream. `src/payload.rs`: DELETEs reach a server.
+- `tests/env_server.rs` (ignored) + `tests/e2e/run_env_server_e2e.py`: against a real
+  `uv run env-server` (gsm8k, null harness) with a mock OpenAI endpoint (eval client) or vLLM
+  (`--train URL MODEL`: token-in/out, sampling logprobs, payload hook blobs GET 200 then 404 after
+  `delete_payloads`); Python re-validates every received episode and its record is byte-equal to
+  the Rust one; a dropped run is cancelled server-side.
+
+### 2.4 What I need from siblings
 
 - io: `VfClientConfig` (serde, pydantic field names) — passed to `run` as `impl Serialize`.
 - core/config: the vf `SamplingConfig` dict (from `TrainSourceConfig.sampling` with logprobs
