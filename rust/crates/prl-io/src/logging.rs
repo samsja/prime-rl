@@ -178,6 +178,7 @@ pub fn format_time(seconds: f64) -> String {
 struct MessageVisitor {
     message: String,
     success: bool,
+    console: bool,
     fields: String,
 }
 
@@ -185,6 +186,8 @@ impl Visit for MessageVisitor {
     fn record_bool(&mut self, field: &Field, value: bool) {
         if field.name() == "success" {
             self.success = value;
+        } else if field.name() == "console" {
+            self.console = value;
         } else {
             self.record_debug(field, &value);
         }
@@ -216,7 +219,7 @@ enum Sink {
 struct LoguruLayer {
     sink: Sink,
     level: LogLevel,
-    tag: Option<String>,
+    console_level: LogLevel,
     file: Option<Mutex<File>>,
 }
 
@@ -250,31 +253,36 @@ impl<S: Subscriber> Layer<S> for LoguruLayer {
             line: event.metadata().line().unwrap_or(0),
             module: file.strip_suffix(".rs").unwrap_or(file),
         };
-        let line = match self.sink {
-            Sink::Console { with_location } => format_console(&record, self.tag.as_deref(), with_location),
-            Sink::Json => format_json(&record, self.tag.as_deref()),
-        };
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "{line}");
-        let _ = stdout.flush();
+        // Records carrying `console = true` (e.g. a banner) pass the console threshold.
+        if level >= self.console_level || visitor.console {
+            let line = match self.sink {
+                Sink::Console { with_location } => format_console(&record, None, with_location),
+                Sink::Json => format_json(&record, None),
+            };
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "{line}");
+            let _ = stdout.flush();
+        }
         if let Some(file) = &self.file {
             let mut file = file.lock().expect("log file lock");
-            let _ = writeln!(file, "{}", format_plain(&record, self.tag.as_deref()));
+            let _ = writeln!(file, "{}", format_plain(&record, None));
         }
     }
 }
 
 /// Install the process logger: colorized loguru-format console lines (or JSON lines) on stdout and,
-/// with `log_file`, a plain-text file sink. Only events from prime-rl crates (`prl_*` targets) pass
-/// `level`; third-party crates log at WARNING and above.
-pub fn setup_logger(level: &str, json_logging: bool, log_file: Option<&Path>, tag: Option<&str>) -> anyhow::Result<()> {
+/// with `log_file`, a plain-text file sink (appended). `console_level` raises the console
+/// threshold above `level`; the file keeps everything. Only events from prime-rl crates (`prl_*`
+/// targets) pass `level`; third-party crates log at WARNING and above.
+pub fn setup_logger(level: &str, json_logging: bool, log_file: Option<&Path>, console_level: Option<&str>) -> anyhow::Result<()> {
     let level = LogLevel::parse(level)?;
+    let console_level = console_level.map(LogLevel::parse).transpose()?.unwrap_or(level);
     let sink = if json_logging { Sink::Json } else { Sink::Console { with_location: level == LogLevel::Debug } };
     let file = match log_file {
         Some(path) => Some(Mutex::new(File::options().create(true).append(true).open(path)?)),
         None => None,
     };
-    let layer = LoguruLayer { sink, level, tag: tag.map(str::to_owned), file };
+    let layer = LoguruLayer { sink, level, console_level, file };
     let filter = filter_fn(|meta| meta.target().starts_with("prl_") || *meta.level() <= Level::WARN);
     Registry::default().with(layer.with_filter(filter)).try_init()?;
     Ok(())

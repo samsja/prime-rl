@@ -3,8 +3,13 @@
 //! See `rust/docs/specs/io.md`.
 
 pub mod ckpt;
+pub mod clients;
 pub mod control;
+pub mod dynamo;
 pub mod gc;
 pub mod heartbeat;
+pub mod http;
+pub mod inference_metrics;
 pub mod logging;
 pub mod pathing;
+pub mod weights;
