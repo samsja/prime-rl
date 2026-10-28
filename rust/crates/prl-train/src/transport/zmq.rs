@@ -36,8 +36,8 @@ impl ZmqBatchSender {
         let socket = context.socket(zmq::ROUTER)?;
         socket.set_router_mandatory(true)?;
         socket.set_linger(0)?;
-        let endpoint = format!("tcp://{host}:{port}");
-        socket.bind(&endpoint).with_context(|| format!("binding {endpoint}"))?;
+        let endpoint = format!("tcp://{}:{port}", bind_host(host, port).await?);
+        socket.bind(&endpoint).with_context(|| format!("binding {endpoint} (host {host})"))?;
         tracing::debug!("Initialized ZMQ micro batch sender (endpoint={endpoint})");
         Ok(Self {
             socket: Some(socket),
@@ -130,4 +130,15 @@ fn wait_for_requests(socket: &zmq::Socket, step: u64, closed: &AtomicBool) -> Re
         }
     }
     Ok(requests)
+}
+
+/// libzmq treats a bind host as an interface or address; resolve names to an address
+/// first (IPv4 preferred, as libzmq without IPv6 enabled), keep `*` and literals.
+async fn bind_host(host: &str, port: u16) -> Result<String> {
+    if host == "*" || host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(host.to_owned());
+    }
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+    let addr = addrs.iter().find(|a| a.is_ipv4()).or(addrs.first()).ok_or_else(|| anyhow!("cannot resolve {host}"))?;
+    Ok(addr.ip().to_string())
 }
