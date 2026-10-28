@@ -126,6 +126,100 @@ fn format_shortest(out: &mut Vec<u8>, repr: &str, decimal_exps: std::ops::Range<
     }
 }
 
+/// `json.dumps(value, sort_keys=sort_keys)` (Python's stdlib encoder): `", "` / `": "`
+/// separators, `ensure_ascii`, float `repr`, `NaN` / `Infinity`.
+pub fn to_python_json(value: &Value, sort_keys: bool) -> String {
+    let mut out = String::new();
+    write_python(&mut out, value, sort_keys);
+    out
+}
+
+fn write_python(out: &mut String, value: &Value, sort_keys: bool) {
+    match value {
+        Value::Nil => out.push_str("null"),
+        Value::Bool(true) => out.push_str("true"),
+        Value::Bool(false) => out.push_str("false"),
+        Value::Int(i) => out.push_str(&i.to_string()),
+        Value::UInt(u) => out.push_str(&u.to_string()),
+        Value::F32(f) => out.push_str(&python_float_repr(*f as f64)),
+        Value::F64(f) => out.push_str(&python_float_repr(*f)),
+        Value::Str(s) => write_python_str(out, s),
+        Value::Bin(b) => write_python_str(out, &String::from_utf8_lossy(b)),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_python(out, item, sort_keys);
+            }
+            out.push(']');
+        }
+        Value::Map(map) => {
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            if sort_keys {
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+            }
+            out.push('{');
+            for (i, (k, v)) in entries.into_iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_python_str(out, k);
+                out.push_str(": ");
+                write_python(out, v, sort_keys);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// Python's `repr(float)`: shortest round-trip digits, scientific notation (with a
+/// two-digit exponent) outside `1e-4 <= |x| < 1e16`.
+pub fn python_float_repr(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".into();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+    }
+    let mut buf = ryu::Buffer::new();
+    let mut out = Vec::new();
+    format_shortest(&mut out, buf.format_finite(f), -4..16);
+    let s = String::from_utf8(out).unwrap();
+    // orjson-style exponent `e-5` / `e+16` -> Python's `e-05` / `e+16`
+    match s.split_once('e') {
+        Some((mantissa, exp)) => {
+            let (sign, digits) = exp.split_at(1);
+            format!("{mantissa}e{sign}{digits:0>2}")
+        }
+        None => s,
+    }
+}
+
+fn write_python_str(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 pub fn write_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
     let bytes = s.as_bytes();

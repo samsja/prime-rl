@@ -7,6 +7,7 @@ pub mod model;
 pub mod ndarray;
 pub mod payload;
 pub mod protocol;
+pub mod sampling;
 pub mod schema;
 pub mod value;
 

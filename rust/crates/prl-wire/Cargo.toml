@@ -19,4 +19,5 @@ uuid = { workspace = true }
 zmq = "0.10"
 indexmap = { version = "2", features = ["serde"] }
 ryu = "1"
+sha2 = "0.10"
 rmp = "0.8"

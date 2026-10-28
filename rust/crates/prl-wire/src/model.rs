@@ -718,6 +718,14 @@ impl MessageNode {
     }
 }
 
+/// `verifiers.v1.task.task_key` of task wire data (`WireTaskData`, python-mode dump).
+pub fn task_hash(data: &Map) -> String {
+    use sha2::Digest;
+    let dumped = schema::dump_model(data, SCHEMAS.model("WireTaskData"), true);
+    let text = crate::json::to_python_json(&dumped, true);
+    sha2::Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// `types.content_text`: a str as-is, text parts joined by newlines, images dropped.
 pub fn content_text(content: &Value) -> String {
     match content {
@@ -911,6 +919,12 @@ impl TraceTask {
             ("key", self.key.clone().into()),
             ("hash", self.hash.clone().into()),
         ])
+    }
+
+    /// `Task.hash` of the data: `sha256(json.dumps(data.model_dump(mode="json",
+    /// exclude_none=True), sort_keys=True))`.
+    pub fn content_hash(&self) -> String {
+        task_hash(&self.data)
     }
 
     /// `task.data.idx`.
