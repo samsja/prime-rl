@@ -68,11 +68,6 @@ pub fn stage(trace: &Value) -> &'static str {
     "pending"
 }
 
-// TODO(wire): switch to prl_wire::ndarray::live_value once exported.
-fn live_value(value: &Value) -> Result<Value> {
-    Ok(value.clone())
-}
-
 fn remove_if_exists(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
@@ -91,7 +86,7 @@ fn live_line(delta: &Map, dispatch: &Value) -> Result<Vec<u8>> {
                 let mut out = Map::new();
                 for (key, value) in node.as_map().into_iter().flatten() {
                     if !LIVE_NODE_EXCLUDE.contains(&key.as_str()) {
-                        out.insert(key.clone(), live_value(value)?);
+                        out.insert(key.clone(), prl_wire::ndarray::live_value(value)?);
                     }
                 }
                 Ok(Value::Map(out))

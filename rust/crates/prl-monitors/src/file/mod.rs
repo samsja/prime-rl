@@ -13,13 +13,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use prl_types::{Kind, Subset};
 use prl_wire::Value;
 use serde::Deserialize;
 
 use crate::pyjson::{dumps_row, sanitize, Row, Scalar};
-use crate::EpisodeRecord;
+use crate::{EpisodeRecord, EpisodeRef, Monitor};
 use chunks::ChunkedJsonl;
 use live::{LiveEvent, LiveWriter};
 
@@ -272,6 +275,15 @@ impl FileMonitor {
         Ok(())
     }
 
+    pub fn flush(&mut self) -> Result<()> {
+        for (stream, index) in self.streams.values_mut() {
+            stream.flush()?;
+            index.flush()?;
+        }
+        self.file.flush()?;
+        Ok(())
+    }
+
     pub fn finalize(&mut self) -> Result<()> {
         for (_, (stream, mut index)) in self.streams.drain() {
             stream.close()?;
@@ -280,5 +292,98 @@ impl FileMonitor {
         self.file.flush()?;
         tracing::info!("Finalized metrics at {}", self.path.display());
         Ok(())
+    }
+}
+
+/// The file monitor on the monitors actor: its blocking writes run on the blocking pool, one
+/// at a time (the state moves into the task and back), so appends never interleave.
+pub struct FileMonitorActor {
+    inner: Option<FileMonitor>,
+}
+
+impl FileMonitorActor {
+    pub async fn init(
+        config: FileMonitorConfig,
+        output_dir: PathBuf,
+        producer: Option<String>,
+    ) -> Result<Self> {
+        let monitor =
+            tokio::task::spawn_blocking(move || FileMonitor::init(config, &output_dir, producer))
+                .await??;
+        Ok(FileMonitorActor {
+            inner: Some(monitor),
+        })
+    }
+
+    async fn blocking<R: Send + 'static>(
+        &mut self,
+        f: impl FnOnce(&mut FileMonitor) -> Result<R> + Send + 'static,
+    ) -> Result<R> {
+        let mut monitor = self
+            .inner
+            .take()
+            .context("file monitor lost after a panic")?;
+        let (monitor, result) = tokio::task::spawn_blocking(move || {
+            let result = f(&mut monitor);
+            (monitor, result)
+        })
+        .await?;
+        self.inner = Some(monitor);
+        result
+    }
+}
+
+#[async_trait]
+impl Monitor for FileMonitorActor {
+    fn name(&self) -> &'static str {
+        "FileMonitor"
+    }
+
+    async fn log_metrics(&mut self, metrics: &Row, step: Option<u64>) -> Result<()> {
+        // a single line write: cheap enough for the actor thread
+        self.inner
+            .as_mut()
+            .context("file monitor lost after a panic")?
+            .log_metrics(metrics, step)
+    }
+
+    async fn log_episodes(
+        &mut self,
+        episodes: &[EpisodeRef],
+        step: u64,
+        kind: Kind,
+        subset: Subset,
+    ) -> Result<()> {
+        if subset == Subset::Effective {
+            return Ok(());
+        }
+        let episodes = episodes.to_vec();
+        self.blocking(move |m| m.log_episodes(&episodes, step, kind, subset))
+            .await
+    }
+
+    async fn log_annotations(&mut self, updates: &Arc<Vec<Value>>) -> Result<()> {
+        let updates = Arc::clone(updates);
+        self.blocking(move |m| m.log_annotations(&updates)).await
+    }
+
+    async fn log_live(&mut self, events: &Arc<Vec<LiveEvent>>) -> Result<()> {
+        let events = Arc::clone(events);
+        self.blocking(move |m| m.log_live(&events)).await
+    }
+
+    async fn log_eval_plan(&mut self, env_name: &str, step: u64, expected: u64) -> Result<()> {
+        let env_name = env_name.to_string();
+        self.blocking(move |m| m.log_eval_plan(&env_name, step, expected))
+            .await
+    }
+
+    async fn finalize(&mut self, _paused: bool) -> Result<()> {
+        self.blocking(|m| m.finalize()).await
+    }
+
+    /// Like an exiting Python process: flush what is open, seal nothing.
+    async fn crash(&mut self) -> Result<()> {
+        self.blocking(|m| m.flush()).await
     }
 }

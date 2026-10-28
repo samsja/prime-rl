@@ -152,9 +152,6 @@ fn file_monitor_matches_python() {
     let names = |t: &[(PathBuf, Vec<u8>)]| t.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
     assert_eq!(names(&got), names(&want));
     for ((path, got), (_, want)) in got.iter().zip(&want) {
-        if path.starts_with("monitors/file/traces/live") && std::env::var("SKIP_LIVE").is_ok() {
-            continue;
-        }
         if path.ends_with("metrics.jsonl") {
             assert_eq!(without_time(got), without_time(want));
         } else {
@@ -195,4 +192,56 @@ fn relaunch_continues_index_numbering() {
         })
         .collect();
     assert_eq!(lines, [1, 2, 3, 4]);
+}
+
+#[test]
+fn stamp_batch_matches_python() {
+    let episodes: Vec<prl_wire::Episode> = json_lines("records.jsonl")
+        .into_iter()
+        .map(|(line, _)| prl_wire::Episode::from_record_json(&line).unwrap())
+        .collect();
+    let want = json_lines("updates.jsonl");
+    let got = prl_monitors::annotations::stamp_batch(&episodes[..3], 2);
+    assert_eq!(got.len(), want.len());
+    for (mut update, (want_line, want_value)) in got.into_iter().zip(want) {
+        // the ship time is wall time: take Python's
+        let time = want_value
+            .get("info")
+            .unwrap()
+            .get("ship")
+            .unwrap()
+            .get("time")
+            .unwrap()
+            .clone();
+        update
+            .get_mut("info")
+            .unwrap()
+            .get_mut("ship")
+            .unwrap()
+            .insert("time", time);
+        assert_eq!(
+            String::from_utf8(prl_wire::json::to_vec(&update)).unwrap(),
+            String::from_utf8(want_line).unwrap()
+        );
+    }
+}
+
+#[test]
+fn stamp_arrival_keeps_key_positions() {
+    let (line, _) = json_lines("records.jsonl").remove(1);
+    let mut episodes = vec![prl_wire::Episode::from_record_json(&line).unwrap()];
+    prl_monitors::annotations::stamp_arrival(&mut episodes, Kind::Eval, 7);
+    let info = &episodes[0].traces[0].info;
+    let keys: Vec<&str> = info.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["advantage", "kind", "dispatch", "arrival"]);
+    assert_eq!(info["kind"].as_str(), Some("eval"));
+    assert_eq!(
+        info["dispatch"].get("step").and_then(Value::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        info["dispatch"].get("time").and_then(Value::as_f64),
+        Some(1001.0)
+    );
+    assert_eq!(info["arrival"].get("step").and_then(Value::as_i64), Some(7));
 }
