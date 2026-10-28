@@ -1,60 +1,62 @@
-# Rust orchestrator (POC) — architecture
+# Rust orchestrator — architecture
 
-Goal: a 1-1 functional rewrite of `src/prime_rl/orchestrator` in Rust. The pydantic
-`OrchestratorConfig` (packages/prime-rl-configs) stays the only config API. Python
-validates the config; Rust consumes `config.model_dump(mode="json")`.
+The prime-rl orchestrator, `uv run eval` and the SFT online eval run in Rust. Behavior matches the former Python
+orchestrator at commit 8acab25e4 (the parity reference). The pydantic `OrchestratorConfig` / `EvalConfig`
+(packages/prime-rl-configs) stay the only config API: Python validates the config, Rust reads the validated
+pydantic object directly through pyo3.
 
-## Hard compatibility contracts (must not change)
+## Compatibility contracts
 
-- Config: same TOML/CLI surface, same pydantic models. Rust mirrors the JSON dump with serde.
+- Config: same TOML/CLI surface, same pydantic models.
 - Env servers: unchanged verifiers v1 env server (`env-server`), ZMQ DEALER + msgpack serve protocol
   (`deps/verifiers/verifiers/v1/serve`). Rust speaks the same protocol.
-- Trainer: unchanged. Micro batches sent through `transports/batch` (filesystem / zmq) must be byte-
-  compatible with what the Python trainer receives today.
+- Trainer: unchanged. Micro batches sent through `transports/batch` (filesystem / zmq) are byte-identical to what
+  the Python orchestrator produced.
 - Inference: same vLLM HTTP endpoints (OpenAI API, admin endpoints, weight updates, /metrics).
-- Outputs: same metric keys, same monitor outputs (wandb, prime platform, file traces), same checkpoint
-  format (a Python run can resume a Rust checkpoint and vice versa), same console log lines where practical.
-- Launcher: `uv run rl ...` keeps working. The `orchestrator @ config.json` entrypoint always runs the Rust
-  orchestrator (no backend switch). The Python orchestrator stays in-tree only as the behavior reference until
-  Rust reaches parity, then it is deleted. The parity baseline for e2e runs is an untouched main checkout.
+- Outputs: same metric keys, same monitor outputs (wandb, prime platform, file traces), same checkpoint format
+  (`progress.pt` stays `torch.load`-able), same console log lines.
+- Launcher: `uv run rl ...` is unchanged; the `orchestrator @ config.json` entrypoint runs the Rust orchestrator.
+  End-to-end parity is checked against a checkout of 8acab25e4 with `rust/tools/e2e_compare.py`.
 
 ## Layout
 
 ```
 rust/
   Cargo.toml                 workspace, members = ["crates/*"]
-  ARCHITECTURE.md            this file
-  docs/specs/<area>.md       behavior inventory of the Python code + Rust design, one per area
+  docs/specs/<area>.md       behavior inventory + Rust design, one per area
   crates/
-    prl-config     serde mirror of OrchestratorConfig JSON              (owner: config)
-    prl-wire       verifiers v1 wire types, msgpack codec, ZMQ EnvClient (owner: wire)
-    prl-types      shared runtime types: Policy, Progress, events,       (owner: core)
-                   DispatchFailure, GroupCancellation, Kind, ...
-    prl-train      train sink, algorithms, routing, trajectories,         (owner: train)
-                   TrainEpisodes metrics, batch packer, batch transport
-    prl-io         inference clients/admin plane, inference metrics,      (owner: io)
-                   weight receivers, control server, heartbeat, ckpt, gc
-    prl-monitors   monitors facade: file (traces + live), prime, wandb    (owner: monitors)
-    prl-core       dispatcher, concurrency, train/eval sources,           (owner: core)
-                   curriculum, watcher, eval sink, periodic logger,
-                   orchestrator supervisor/wiring
-    prl-eval       `uv run eval` on the Rust core (port of src/prime_rl/eval) (owner: eval)
-    prl-py         pyo3 extension module `prime_rl_orch_rs`               (owner: scaffold, then core)
+    prl-config     pyo3 extraction of OrchestratorConfig / EvalConfig / SFTOnlineEvalConfig
+    prl-wire       verifiers v1 wire types, msgpack + orjson-compatible codecs, ZMQ EnvClient, payload refs
+    prl-types      shared runtime types: Policy, Progress, Kind, DispatchFailure, GroupCancellation, Bridge, ...
+    prl-train      train sink, algorithms, trajectories, episode metrics, batch packer, batch transport
+    prl-io         inference clients/admin plane, inference metrics, weight receivers, control API,
+                   heartbeat, checkpoints, logging
+    prl-monitors   monitors actor: file (traces + live), prime, wandb (via Python)
+    prl-core       dispatcher, concurrency, train/eval sources, curriculum, watcher, eval sink,
+                   periodic logger, supervisor (`prl_core::run`)
+    prl-eval       `uv run eval` and online eval on the core actors
+    prl-py         pyo3 extension module `prime_rl_orch_rs`
+  tools/, bench/   e2e parity compare, throughput benchmark
 packages/prime-rl-orch-rs/   maturin python package (uv workspace member) building prl-py
 ```
 
-Dependency direction: `prl-config, prl-wire -> prl-types -> prl-train, prl-io, prl-monitors -> prl-core -> prl-py`.
+Dependency direction: `prl-config, prl-wire -> prl-types -> prl-train, prl-io, prl-monitors -> prl-core ->
+prl-eval -> prl-py`.
 
 ## Python boundary
 
-- `orchestrator @ cfg.toml` (Python) parses `OrchestratorConfig` exactly as today, then calls `prime_rl_orch_rs.run(config_json: str, bridge: PyBridge)` which releases the GIL and runs a
-  tokio runtime until the orchestrator exits.
-- Things with no sane Rust equivalent stay in Python and are reached through the bridge, called from
-  `spawn_blocking` with the GIL: taskset loading (`vf.load_taskset(...).select(...)` -> task data dicts, lazily for
-  unbounded tasksets), the wandb monitor, and anything else a spec proves cannot be ported. Keep the bridge small
-  and explicit: one Python class, a handful of methods, plain JSON-able / bytes arguments.
-- Everything else is native Rust: HF tokenizer via the `tokenizers` crate if needed, HTTP via `reqwest`,
-  ZMQ via the `zeromq` crate (or `zmq` bindings), msgpack via `rmp-serde`/`rmpv`, HTTP server via `axum`.
+- `orchestrator @ cfg.toml` parses `OrchestratorConfig` in Python, then `src/prime_rl/rust_bridge.py` calls
+  `prime_rl_orch_rs.run(config, bridge)`, which releases the GIL and runs a tokio runtime until the orchestrator
+  exits. `uv run eval` and the SFT online eval do the same through `run_eval` / `run_online_eval`.
+- Config: `prl-config` declares only the fields Rust reads, as `#[derive(FromPyObject)]` structs extracted once
+  from the live pydantic object at startup. Derived values (`resolved_name`, `env_addresses`, ...) are read off the
+  Python object; sub-configs Rust only forwards are `model_dump`ed. There is no schema copy and no validation in
+  Rust. A test extracts every config under `configs/` and `examples/`, so a renamed pydantic field fails CI.
+- The bridge (`PyBridge` in `rust_bridge.py`, see `docs/specs/boundary.md`) covers what has no Rust equivalent:
+  taskset loading, the W&B monitor, the NIXL agent, FLOP cost tables, and the opsd/echo renderer hooks. Calls run
+  on `spawn_blocking` with the GIL.
+- Everything else is native Rust: HTTP via `reqwest`, ZMQ via the `zmq` crate (vendored libzmq), HTTP server via
+  `axum`.
 
 ## Runtime design: event-driven actors
 
@@ -85,11 +87,9 @@ plus callbacks (`watcher.on_update`, `concurrency.bind`) and shared mutable obje
   whole tree (same semantics as `_on_component_done`). Draining is an event, not a flag poked from outside.
   Shutdown has the same global timeout semantics as Python (`SHUTDOWN_TIMEOUT_S`).
 
-## Working rules for all agents
+## Working rules
 
-- Python code under `src/prime_rl/orchestrator` and its deps is the source of truth for behavior. Port its unit
-  tests (`tests/unit/orchestrator/*`) as Rust tests where they check real logic.
-- Own your crate. Coordinate a cross-crate interface directly with the owning sibling via `agent_message`.
-- Errors propagate (`anyhow`/`thiserror`), no silent catch-alls. Mirror Python's intentional fault tolerance only.
-- Use your own target dir to avoid lock contention: `CARGO_TARGET_DIR=rust/target/<your-agent-name>`.
-- Keep the Python side untouched except where your task explicitly says so (entrypoint, bridge, config field).
+- Behavior reference: the Python orchestrator at commit 8acab25e4. Byte-level formats (trainer batches, trace
+  files, records, checkpoints) are tested against fixtures generated from that checkout.
+- Errors propagate (`anyhow`/`thiserror`), no silent catch-alls. Mirror intentional fault tolerance only.
+- Use a per-agent target dir to avoid lock contention: `CARGO_TARGET_DIR=rust/target/<name>`.
