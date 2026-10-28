@@ -1,0 +1,18 @@
+[package]
+name = "prl-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+indexmap = { version = "2" }
+pyo3 = { workspace = true, features = ["indexmap"] }
+pythonize = "0.25"
+serde_json = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = "0.25"
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize", "indexmap"] }

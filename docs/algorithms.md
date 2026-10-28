@@ -139,7 +139,7 @@ algo.type = "echo"
 
 ### The Algorithm Classes
 
-At runtime, each env's `TrainEnv` (`prime_rl.orchestrator.envs`) resolves the `sampling.source` model into the inference pool used for train episodes, and its resolved config builds one of the named algorithm classes in `prime_rl.orchestrator.train.algo` (one module per algorithm: `algo/grpo.py`, `algo/opd.py`, …) from the algorithm config. Algorithm dispatch is keyed on `algo.type` — it names the algorithm, and each config class's defaults are its vetted parameterization:
+The orchestrator is written in Rust (`rust/crates`). At runtime, each train env resolves the `sampling.source` model into the inference pool used for train episodes, and its resolved config builds one of the named algorithm types in `prl_train::algo` (`rust/crates/prl-train/src/algo/`) from the algorithm config. Algorithm dispatch is keyed on `algo.type` — it names the algorithm, and each config class's defaults are its vetted parameterization:
 
 | `algo.type` | Class | hook(s) — stage |
 |---|---|---|
@@ -152,14 +152,15 @@ At runtime, each env's `TrainEnv` (`prime_rl.orchestrator.envs`) resolves the `s
 | `opsd` | `OPSDAlgorithm` | `score_episode`: demo-conditioned prefill under the live policy |
 | `sft` | `SFTDistillAlgorithm` | no credit assignment; CE on sampled tokens |
 
-Algorithms operate on native verifier artifacts and annotate their message graphs directly:
+Algorithms operate on native verifier artifacts (`prl_wire::Episode`) and annotate their message graphs directly. They implement the `prl_train::algo::Algorithm` trait:
 
-- `async score_episode(episode)` — rollout-local scoring as one episode arrives.
-- `async score_group(episodes)` — group-relative scoring after the cohort completes.
+- `async fn score_episode(&mut self, episode)` — rollout-local scoring as one episode arrives.
+- `async fn score_group(&mut self, episodes)` — group-relative scoring after the cohort completes.
 
 The pipeline calls `score_group` directly and `score_episode` through `finalize_episode`, which skips episodes with no trainable sampled tokens. Advantages, reference logprobs, and named loss weights stay on verifier nodes through admission. Only admitted traces are flattened into `TrainingSample`s.
 
-The algorithm config states which loss component its action tokens feed (`action_loss_type`, a class variable on each config class). Every class is constructed with its algorithm config plus the one host-owned resource it can't rebuild — the live policy clients (`self.clients`). Everything else an algorithm needs it builds from its own config in `setup()`: `opd` connects its frozen `teacher`; `opsd` builds the renderer for its demonstration hint (tokenizer is always the live policy's — self-distillation has no separate model). Writing your own algorithm is subclassing `Algorithm` and overriding the hooks its signal needs (see [Authoring an Algorithm](#authoring-an-algorithm)). Shared math (efficiency shaping, prefill alignment) lives as plain functions in `prime_rl.orchestrator.train.algo.advantage`.
+The algorithm config states which loss component its action tokens feed (`action_loss_type`, a class variable on each config class). Every algorithm is built by `build_algorithm` from its algorithm config plus the host-owned resources it can't rebuild (`AlgorithmDeps`: prefill scoring against the live policy pool and a way to connect frozen models). Everything else an algorithm needs it builds from its own config in `setup()`: `opd` connects its frozen `teacher`; `opsd` builds the renderer for its demonstration hint (tokenizer is always the live policy's — self-distillation has no separate model). Writing your own algorithm is implementing `Algorithm` with the hooks its signal needs (see [Authoring an Algorithm](#authoring-an-algorithm)). Shared helpers (`assign_advantages`, `assign_reference_logprobs`, `iter_trainable_traces`) live in `prl_train::algo`.
+
 
 ## Async Training & Staleness
 
@@ -472,26 +473,39 @@ Both of `kuhn-poker`'s agents late-bind to the run's own model — shared-policy
 
 ### Authoring an Algorithm
 
-There is no config hook that points at user code — a new credit-assignment scheme is a new named algorithm in the repo. Subclass `Algorithm`, assign credit in the scoring hook whose timing fits your signal, and register the class:
+There is no config hook that points at user code — a new credit-assignment scheme is a new named algorithm in the repo. Implement `Algorithm`, assign credit in the scoring hook whose timing fits your signal, and register it:
 
-```python
-# src/prime_rl/orchestrator/algo/my_algo.py
-import torch
+```rust
+// rust/crates/prl-train/src/algo/my_algo.rs
+use anyhow::Result;
+use async_trait::async_trait;
+use prl_config::ActionLossType;
+use prl_wire::Episode;
 
-from prime_rl.orchestrator.train.algo.base import Algorithm
-from prime_rl.orchestrator.train.algo.routing import assign_advantages
+use super::{assign_advantages, iter_trainable_traces, Advantages, Algorithm};
 
+pub struct MyAlgorithm {
+    pub action_loss_type: ActionLossType,
+}
 
-class MyAlgorithm(Algorithm):
-    async def score_group(self, episodes):
-        traces = [trace for episode in episodes for trace in episode.traces]
-        rewards = torch.tensor([trace.reward for trace in traces], dtype=torch.float32)
-        advantages = ...  # one value per trace
-        for trace, advantage in zip(traces, advantages.tolist(), strict=True):
-            assign_advantages(trace, advantage)
+#[async_trait]
+impl Algorithm for MyAlgorithm {
+    fn action_loss_type(&self) -> ActionLossType {
+        self.action_loss_type
+    }
+
+    async fn score_group(&mut self, episodes: &mut [Episode]) -> Result<()> {
+        for (e, t) in iter_trainable_traces(episodes) {
+            let trace = &mut episodes[e].traces[t];
+            let advantage = trace.reward() as f32; // one value per trace
+            assign_advantages(trace, Advantages::Scalar(advantage))?;
+        }
+        Ok(())
+    }
+}
 ```
 
-Add a typed `MyAlgoConfig` to `prime_rl.configs.algorithm` and its discriminated union, then register `"my_algo": MyAlgorithm` in `ALGORITHM_CLASSES`. Pick `score_episode` for rollout-local work or model calls, and `score_group` for group-relative credit. `assign_advantages` takes a scalar or a list aligned to the trace graph's sampled tokens.
+Add a typed `MyAlgoConfig` to `prime_rl.configs.algorithm` and its discriminated union, mirror it in `prl_config::AlgoParams` (`rust/crates/prl-config/src/algorithm.rs`), then build it in `prl_train::algo::build_algorithm`. Pick `score_episode` for rollout-local work or model calls, and `score_group` for group-relative credit. `assign_advantages` takes a scalar (`Advantages::Scalar`) or values aligned to the trace graph's sampled tokens (`Advantages::PerToken`).
 
 Curriculum admission and metrics can inspect the resulting graph-native streams after group scoring.
 
@@ -516,9 +530,9 @@ The orchestrator filters samples with no training signal. This includes samples 
 
 ## Curricula
 
-Each training source has a `Curriculum` composed from one `TaskSampler` and any number of named `AdmissionGate`s. The sampler chooses tasks and observes every finalized `list[vf.Episode]`; each gate inspects the same native episodes. The group trains only if every gate admits it. Rejected groups remain observable while the orchestrator samples again to fill the batch.
+Each training source has a `Curriculum` composed from one `TaskSampler` and any number of named `AdmissionGate`s. The sampler chooses tasks and observes every finalized group of episodes; each gate inspects the same native episodes. The group trains only if every gate admits it. Rejected groups remain observable while the orchestrator samples again to fill the batch.
 
-Samplers and gates can be stateful. Their `state_dict`, `load_state_dict`, and `metrics` methods are included in orchestrator checkpoints and logged under `curriculum/<env>/`.
+Samplers and gates can be stateful. Their state is included in orchestrator checkpoints and their metrics are logged under `curriculum/<env>/`.
 
 Three small implementations are included:
 

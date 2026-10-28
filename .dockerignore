@@ -10,3 +10,4 @@ outputs
 .claude
 .vscode
 *.ipynb
+rust/target

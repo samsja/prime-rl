@@ -118,6 +118,7 @@ members = [
     "pi-terminalbench2-1",
     "pinchbench",
     "prime-rl",
+    "prime-rl-orch-rs",
     "prolog",
     "proofnet",
     "proposer-solver",
@@ -315,15 +316,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/52/b7/7cd31f29d6055bd711ae6e669367fba6f5ae9de463910a793e30556a8db7/aiohttp-3.14.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:543906c127fb1d929b95076db19b83fa2d46751006ff1e23b093aa5ac4d8db42", size = 1792122, upload-time = "2026-07-23T01:54:15.752Z" },
     { url = "https://files.pythonhosted.org/packages/49/ed/3b203fa6de1b338c14acdc06bf6ca9b043b7944f005966958c2ced932cde/aiohttp-3.14.3-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:041badb8f84396357c4d3ad26de6afd7a32b112f43d3c63045c0c8278cfd2043", size = 1725210, upload-time = "2026-07-23T01:54:24.129Z" },
     { url = "https://files.pythonhosted.org/packages/e0/eb/aad34e897e668424d6e995da5dff8a4a09af93363d3392488772957a63aa/aiohttp-3.14.3-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:d1558173930a5a8d3069cee5c92fc91c87c4dbcb099debbb3622053717145a19", size = 1768629, upload-time = "2026-07-23T01:54:40.103Z" },
-]
-
-[[package]]
-name = "aiolimiter"
-version = "1.2.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f1/23/b52debf471f7a1e42e362d959a3982bdcb4fe13a5d46e63d28868807a79c/aiolimiter-1.2.1.tar.gz", hash = "sha256:e02a37ea1a855d9e832252a105420ad4d15011505512a1a1d814647451b5cca9", size = 7185, upload-time = "2024-12-08T15:31:51.496Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/ba/df6e8e1045aebc4778d19b8a3a9bc1808adb1619ba94ca354d9ba17d86c3/aiolimiter-1.2.1-py3-none-any.whl", hash = "sha256:d3f249e9059a20badcb56b61601a83556133655c11d1eb3dd3e04ff069e5f3c7", size = 6711, upload-time = "2024-12-08T15:31:49.874Z" },
 ]
 
 [[package]]
@@ -5046,7 +5038,6 @@ name = "prime-rl"
 version = "0.10.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiolimiter" },
     { name = "beartype" },
     { name = "datasets" },
     { name = "fastapi" },
@@ -5059,8 +5050,8 @@ dependencies = [
     { name = "prime" },
     { name = "prime-pydantic-config" },
     { name = "prime-rl-configs" },
+    { name = "prime-rl-orch-rs" },
     { name = "prime-runs", extra = ["train"] },
-    { name = "prometheus-client" },
     { name = "psutil" },
     { name = "pybase64" },
     { name = "pyzmq" },
@@ -5068,7 +5059,6 @@ dependencies = [
     { name = "renderers", extra = ["multimodal"] },
     { name = "rich" },
     { name = "setproctitle" },
-    { name = "tenacity" },
     { name = "transformers" },
     { name = "uvicorn" },
     { name = "uvloop" },
@@ -5196,7 +5186,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ai-dynamo", marker = "sys_platform == 'linux' and extra == 'dynamo'", specifier = "==1.4.2" },
-    { name = "aiolimiter", specifier = ">=1.2.1" },
     { name = "beartype", specifier = ">=0.21.0" },
     { name = "datasets", specifier = ">=4.0.0" },
     { name = "deep-ep", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'disagg'", url = "https://github.com/PrimeIntellect-ai/prime-kernels/releases/download/v0.1.1/deep_ep-1.2.1+29d31c0-cp312-cp312-linux_aarch64.whl" },
@@ -5247,8 +5236,8 @@ requires-dist = [
     { name = "prime-rl", extras = ["quack"], marker = "extra == 'all'" },
     { name = "prime-rl", extras = ["sonic-moe"], marker = "extra == 'all'" },
     { name = "prime-rl-configs", editable = "packages/prime-rl-configs" },
+    { name = "prime-rl-orch-rs", editable = "packages/prime-rl-orch-rs" },
     { name = "prime-runs", extras = ["train"], git = "https://github.com/PrimeIntellect-ai/prime?subdirectory=packages%2Fprime-runs&rev=adf8d25c3e34df8e039674fae9e0e4bf9cee27f3" },
-    { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pybase64", specifier = ">=1.4.2" },
     { name = "pyzmq", specifier = ">=27.1.0" },
@@ -5258,7 +5247,6 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "setproctitle", specifier = ">=1.3.0" },
     { name = "sonic-moe", marker = "sys_platform == 'linux' and extra == 'sonic-moe'", git = "https://github.com/S1ro1/sonic-moe?rev=0bf06ac" },
-    { name = "tenacity", specifier = ">=8.2.0" },
     { name = "tilelang", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=0.1.8" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchao", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'gpu'", url = "https://github.com/PrimeIntellect-ai/prime-kernels/releases/download/v0.1.1/torchao-0.18.0+git5f2baf9d5-cp310-abi3-linux_aarch64.whl" },
@@ -5317,6 +5305,11 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.2.0" },
     { name = "verifiers", specifier = ">=0.3.2.dev158" },
 ]
+
+[[package]]
+name = "prime-rl-orch-rs"
+version = "0.1.0"
+source = { editable = "packages/prime-rl-orch-rs" }
 
 [[package]]
 name = "prime-runs"

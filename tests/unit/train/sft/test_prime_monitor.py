@@ -169,17 +169,6 @@ def test_online_eval_config_keeps_prime_monitor():
     assert isinstance(eval_monitors.prime, PrimeEvalMonitorConfig)
     assert eval_monitors.prime.name == "r1"
 
-    # The online-eval process passes the prime monitor to monitors.setup
-    # (src/prime_rl/eval/online.py) — same wiring as the standalone eval
-    # entrypoint. Read the source text (importing the module pulls torch,
-    # which this torch-free test env deliberately lacks).
-    from pathlib import Path
-
-    import prime_rl
-
-    online_src = Path(prime_rl.__path__[0], "eval", "online.py").read_text()
-    assert "prime=config.monitors.prime" in online_src
-
 
 def test_online_eval_shares_trainer_run_dir_and_merges_records(tmp_path):
     """The online-eval process shares the trainer's run dir (the dashboard

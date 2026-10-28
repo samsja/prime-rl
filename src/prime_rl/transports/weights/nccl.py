@@ -14,7 +14,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from prime_rl.configs.shared import NCCLWeightBroadcastConfig
 from prime_rl.trainer.models import PreTrainedModelPrimeRL
 from prime_rl.trainer.utils import get_world
-from prime_rl.transports.weights.base import WeightReceiver, WeightSender
+from prime_rl.transports.weights.base import WeightSender
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.nccl import disable_nccl_p2p_if_unavailable, iter_tensor_buckets
 from prime_rl.utils.vlm import get_layer_prefix
@@ -239,26 +239,3 @@ class NCCLWeightSender(WeightSender):
     @torch.no_grad()
     def _broadcast(self, model: nn.Module, step: int, step_dir: Path) -> None:
         self.nccl_broadcast_sender.send(model)
-
-
-class NCCLWeightReceiver(WeightReceiver):
-    """Joins the trainer's NCCL collective. The receiver pauses the engines,
-    acknowledges, and sends them into the receive RPC — only then does the
-    trainer enter the collective, so the handshake can never race a stale
-    marker."""
-
-    async def initialize(self) -> None:
-        await self.admin_plane.initialize_nccl(
-            host=self.config.host,
-            port=self.config.port,
-            timeout=self.config.timeout,
-            inference_world_size=self.config.inference_world_size,
-        )
-
-    async def receive(self, step: int) -> None:
-        await self.admin_plane.update_weights(
-            self.step_dir(step),
-            transport="nccl",
-            step=step,
-            on_paused=lambda: self._ack(step),
-        )

@@ -1,0 +1,18 @@
+[package]
+name = "prl-wire"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+rmp-serde = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zmq = "0.10"
+indexmap = { version = "2", features = ["serde"] }
+ryu = "1"
+sha2 = "0.10"
+rmp = "0.8"

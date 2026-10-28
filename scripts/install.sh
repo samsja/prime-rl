@@ -134,6 +134,12 @@ main() {
     source $HOME/.local/bin/env
   fi
 
+  if ! command -v cargo &>/dev/null; then
+    log_info "Installing Rust (builds the orchestrator extension)..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    source $HOME/.cargo/env
+  fi
+
   log_info "Syncing virtual environment..."
   uv sync --all-extras
 

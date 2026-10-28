@@ -176,6 +176,24 @@ def setup_logger(
     return logger
 
 
+def intercept_vf_logging(logger: str = "verifiers", level: str = "DEBUG", prefix: str | None = None):
+    """Intercepts verifiers logging and routes through prime-rl logger with optional prefix."""
+    vf_logger = logging.getLogger(logger)
+    vf_logger.handlers.clear()
+    vf_logger.addHandler(InterceptHandler(prefix=prefix))
+    vf_logger.setLevel(level.upper())
+    vf_logger.propagate = False
+
+
+def setup_env_server_logging(log_level: str, json_logging: bool = False) -> None:
+    """Configure logging for an env-server process: prime-rl's logger + routing v1's stdlib
+    logs through it. Passed to verifiers' ``serve_env`` so it runs in the broker and in every
+    spawned worker — fresh ``spawn`` processes that otherwise have no handlers and would drop
+    their per-rollout logs."""
+    setup_logger(log_level, json_logging=json_logging)
+    intercept_vf_logging(logger="verifiers.v1", level=log_level)
+
+
 def get_logger():
     global _LOGGER
     if _LOGGER is None:

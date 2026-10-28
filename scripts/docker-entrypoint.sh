@@ -110,6 +110,16 @@ HEAVY_PINS_PY
     # doesn't declare in place instead of uninstalling them.
     export UV_PROJECT_ENVIRONMENT=/app/.venv
     export VIRTUAL_ENV=/app/.venv
+    # The sync rebuilds the orchestrator extension (packages/prime-rl-orch-rs) from the
+    # checkout's Rust sources. The image ships no Rust toolchain, so fetch a minimal one
+    # under /tmp (the pod's HOME may not be writable).
+    if ! command -v cargo >/dev/null; then
+        export RUSTUP_HOME=/tmp/rustup CARGO_HOME=/tmp/cargo
+        echo "[prime-rl] installing a Rust toolchain to build the orchestrator extension"
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --quiet --profile minimal --no-modify-path
+        export PATH="$CARGO_HOME/bin:$PATH"
+    fi
     echo "[prime-rl] syncing ${DEST} into /app/.venv"
     ( cd "$DEST" && uv sync --inexact --locked --no-dev --all-packages \
         --extra gpu --extra dashboard --extra flash-attn --extra flash-attn-3 \
