@@ -88,6 +88,8 @@ pub struct ConcurrencyController {
     fallback_cost: u64,
     cap: f64,
     pub max_inflight: usize,
+    /// Python keeps the clamped float until the first applied limit (`128.0 -> 49` in logs).
+    limit_applied: bool,
     bootstrapped: bool,
     /// A manual cap that overrides the band and the adaptive loop until cleared.
     pub target: Option<usize>,
@@ -115,6 +117,7 @@ impl ConcurrencyController {
             fallback_cost,
             cap: params.initial_inflight.unwrap_or(floor) as f64,
             max_inflight: 0,
+            limit_applied: false,
             bootstrapped: params.initial_inflight.is_some(),
             target: None,
             engine_max_len: None,
@@ -321,14 +324,16 @@ impl ConcurrencyController {
         }
         if let Some(reason) = reason {
             let verb = if n_max > self.max_inflight { "Increased" } else { "Decreased" };
+            let previous =
+                if self.limit_applied { self.max_inflight.to_string() } else { format!("{}.0", self.max_inflight) };
             info!(
-                "{verb} concurrency {} -> {n_max} ({reason}) - turnover={:.1} signal={}",
-                self.max_inflight,
+                "{verb} concurrency {previous} -> {n_max} ({reason}) - turnover={:.1} signal={}",
                 self.turnover,
                 self.signal.as_str()
             );
         }
         self.max_inflight = n_max;
+        self.limit_applied = true;
         actions.push(Action::SetLimit(n_max));
     }
 

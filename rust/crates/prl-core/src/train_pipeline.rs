@@ -91,6 +91,8 @@ enum Command {
     /// The final checkpoint state (`progress.step - 1`), when anything shipped.
     FinalState { reply: oneshot::Sender<Result<Option<OrchestratorState>>> },
     Stop { ack: oneshot::Sender<()> },
+    /// Answered once everything handed to the pipeline before it was handled.
+    Sync { ack: oneshot::Sender<()> },
 }
 
 #[derive(Clone)]
@@ -103,6 +105,13 @@ impl TrainPipelineHandle {
         let (reply, rx) = oneshot::channel();
         self.tx.send(Command::FinalState { reply }).map_err(|_| anyhow::anyhow!("train pipeline stopped"))?;
         rx.await.map_err(|_| anyhow::anyhow!("train pipeline stopped"))?
+    }
+
+    /// Wait until the pipeline finished handling what it is working on.
+    pub async fn sync(&self) -> Result<()> {
+        let (ack, rx) = oneshot::channel();
+        self.tx.send(Command::Sync { ack }).map_err(|_| anyhow::anyhow!("train pipeline stopped"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("train pipeline stopped"))
     }
 
     /// Close the batch sender and exit.
@@ -220,6 +229,9 @@ impl TrainPipeline {
                         let _ = ack.send(());
                         return Ok(());
                     }
+                    Command::Sync { ack } => {
+                        let _ = ack.send(());
+                    }
                 },
                 _ = async { submitted.as_ref().expect("controller").notified().await }, if submitted.is_some() => {
                     self.apply_control()?;
@@ -231,6 +243,7 @@ impl TrainPipeline {
                             match cmd {
                                 Command::FinalState { reply } => { let _ = reply.send(self.final_state().await); }
                                 Command::Stop { ack } => { self.sender.close().await; let _ = ack.send(()); return Ok(()); }
+                                Command::Sync { ack } => { let _ = ack.send(()); }
                             }
                         }
                         return Ok(());

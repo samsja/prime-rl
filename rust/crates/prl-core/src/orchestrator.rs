@@ -778,6 +778,8 @@ impl Orchestrator {
             }
             _ = shutdown.cancelled() => bail!("interrupted"),
         }
+        // The train pipeline finishes its drain (and its log line) first.
+        self.train.sync().await?;
         // Nothing is in flight and no eval work remains: stop the dispatcher so the sinks see
         // their result channels close, and let the eval pipeline consume what it was handed.
         self.dispatcher.stop().await?;
@@ -812,6 +814,7 @@ impl Orchestrator {
             debug!("Stopping dispatcher");
             let _ = self.dispatcher.stop().await;
             debug!("Stopping weight watcher");
+            debug!("Stopping inference metrics collector");
             self.metrics_cancel.cancel();
             self.cancel.cancel();
             while let Some(joined) = tasks.join_next().await {
