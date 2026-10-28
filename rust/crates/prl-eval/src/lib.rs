@@ -1,10 +1,10 @@
 //! `uv run eval` and the SFT online-eval process on the Rust core (port of `src/prime_rl/eval`).
 
 pub mod control;
-pub mod eval;
-pub mod online;
+mod eval;
+mod online;
 pub mod resume;
-pub mod runner;
+mod runner;
 
 pub use eval::run_eval;
 pub use online::run_online_eval;

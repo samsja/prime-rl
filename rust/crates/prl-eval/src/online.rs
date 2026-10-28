@@ -1,66 +1,6 @@
 //! Online evals (port of `eval/online.py`): evaluate the trainer's weight broadcasts as they appear.
 
 use std::collections::{BTreeSet, HashSet};
-
-/// What one broadcasts-dir scan does with a step, in order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WalkAction {
-    /// An eval-due step that broadcast cleaning removed before it was evaluated.
-    SkipDeleted(u64),
-    /// An unpublished step below a published one: an abandoned partial write.
-    SkipAbandoned(u64),
-    /// Receive the broadcast and run the due evals (`force` on the final step).
-    Evaluate { step: u64, force: bool },
-}
-
-/// Eval-due steps up to the newest published broadcast that are missing from the broadcasts dir.
-pub fn deleted_due_steps(steps: &[u64], newest_published: Option<u64>, intervals: &[u64]) -> BTreeSet<u64> {
-    let Some(newest) = newest_published else { return BTreeSet::new() };
-    let present: HashSet<u64> = steps.iter().copied().collect();
-    intervals
-        .iter()
-        .flat_map(|&interval| (interval..=newest).step_by(interval as usize))
-        .filter(|step| !present.contains(step))
-        .collect()
-}
-
-/// One scan of the broadcasts dir: `steps` are the `step_*` dirs, `published` the ones with a
-/// `.sender_ready` marker. Steps at or below `last_step` were already handled.
-pub fn plan_walk(
-    steps: &[u64],
-    published: &HashSet<u64>,
-    intervals: &[u64],
-    last_step: u64,
-    max_steps: Option<u64>,
-) -> Vec<WalkAction> {
-    let newest_published = steps.iter().copied().filter(|step| published.contains(step)).max();
-    let present: HashSet<u64> = steps.iter().copied().collect();
-    let mut walk: BTreeSet<u64> = steps.iter().copied().collect();
-    walk.extend(deleted_due_steps(steps, newest_published, intervals));
-    let mut actions = Vec::new();
-    for step in walk {
-        if step <= last_step {
-            continue;
-        }
-        if !present.contains(&step) {
-            actions.push(WalkAction::SkipDeleted(step));
-            continue;
-        }
-        if !published.contains(&step) {
-            if newest_published.is_none_or(|newest| newest < step) {
-                break; // still being written — later steps can't be ready either
-            }
-            actions.push(WalkAction::SkipAbandoned(step));
-            continue;
-        }
-        actions.push(WalkAction::Evaluate { step, force: max_steps.is_some_and(|max| step >= max) });
-    }
-    actions
-}
-
-
-// ── driver ──────────────────────────────────────────────────────────────────
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,8 +15,44 @@ use prl_types::Bridge;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::eval::until_shutdown;
-use crate::runner::{EvalRunner, Schedule, POLL_INTERVAL_S};
+use crate::eval::{until_shutdown, EvalMonitors};
+use crate::runner::{EvalRunner, Schedule, Superseding, POLL_INTERVAL};
+
+
+/// What one broadcasts-dir scan does with a step, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WalkAction {
+    /// An eval-due step that broadcast cleaning removed before it was evaluated.
+    SkipDeleted(u64),
+    /// An unpublished step below a published one: an abandoned partial write.
+    SkipAbandoned(u64),
+    /// Receive the broadcast and run the due evals (`force` on the final step).
+    Evaluate { step: u64, force: bool },
+}
+
+/// One scan of the broadcasts dir: `steps` are the `step_*` dirs, `published` the ones with a
+/// `.sender_ready` marker; steps at or below `last_step` were already handled. Eval-due steps up
+/// to the newest published one that are missing were removed by broadcast cleaning.
+fn plan_walk(steps: &[u64], published: &HashSet<u64>, intervals: &[u64], last_step: u64, max_steps: Option<u64>) -> Vec<WalkAction> {
+    let newest_published = steps.iter().copied().filter(|step| published.contains(step)).max();
+    let mut walk: BTreeSet<u64> = steps.iter().copied().collect();
+    if let Some(newest) = newest_published {
+        walk.extend(intervals.iter().flat_map(|&interval| (interval..=newest).step_by(interval as usize)));
+    }
+    let mut actions = Vec::new();
+    for step in walk.into_iter().filter(|&step| step > last_step) {
+        if !steps.contains(&step) {
+            actions.push(WalkAction::SkipDeleted(step));
+        } else if published.contains(&step) {
+            actions.push(WalkAction::Evaluate { step, force: max_steps.is_some_and(|max| step >= max) });
+        } else if newest_published.is_some_and(|newest| newest > step) {
+            actions.push(WalkAction::SkipAbandoned(step));
+        } else {
+            break; // still being written — later steps can't be ready either
+        }
+    }
+    actions
+}
 
 /// Budget for the trainer's startup broadcast: it is always coming, but only after the trainer
 /// has finished loading the model.
@@ -110,34 +86,22 @@ pub async fn run_online_eval(
     shutdown: CancellationToken,
 ) -> Result<()> {
     let model = config.model.clone().context("the sft launcher fills eval.model")?;
-    let cancel = CancellationToken::new();
-    let sources = config
-        .served
-        .source
-        .iter()
-        .map(|s| EvalSourceSpec { resolved_name: s.resolved_name.clone(), taskset_id: s.env_id.clone(), group_size: s.group_size })
-        .collect();
-    let (monitors, monitors_task) = crate::eval::setup_monitors(
-        &config.monitors,
-        monitors_repr,
-        &config.output_dir,
-        "online-eval",
-        "sft",
-        &model,
-        sources,
+    let monitors = EvalMonitors {
+        config: &config.monitors,
+        repr: monitors_repr,
+        output_dir: &config.output_dir,
+        producer: "online-eval",
+        overview_flavor: "sft",
+        model: &model,
+        sources: config
+            .served
+            .source
+            .iter()
+            .map(|s| EvalSourceSpec { resolved_name: s.resolved_name.clone(), taskset_id: s.env_id.clone(), group_size: s.group_size })
+            .collect(),
         wandb,
-        cancel.child_token(),
-    )
-    .await?;
-    let result = run(&config, &model, monitors.clone(), bridge, nixl, &shutdown).await;
-    if result.is_ok() {
-        // Finalize only on a clean exit — a crashed run must not mark the run completed.
-        monitors.finalize(false).await;
-    }
-    drop(monitors);
-    cancel.cancel();
-    let _ = monitors_task.await;
-    result
+    };
+    monitors.run(|monitors| run(&config, &model, monitors, bridge, nixl, &shutdown)).await
 }
 
 async fn run(
@@ -167,8 +131,8 @@ async fn run(
         let mut receiver = WeightReceiver::new(broadcasts_dir.clone(), weight_broadcast, admin, model, nixl)?;
         receiver.initialize().await?;
         runner.start()?;
-        let mut online = OnlineEval { config, runner: &mut runner, receiver, broadcasts_dir, last_step: config.resume_step.unwrap_or(0) };
-        online.watch().await?;
+        let last_step = config.resume_step.unwrap_or(0);
+        OnlineEval { config, runner: &mut runner, receiver, broadcasts_dir, last_step }.watch().await?;
         runner.drain().await;
         prl_io::success!("Online evals finished!");
         Ok(())
@@ -239,7 +203,7 @@ impl OnlineEval<'_> {
                 return Ok(());
             }
             self.runner.check_components()?;
-            tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_S)).await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -275,7 +239,7 @@ impl OnlineEval<'_> {
         let mut next_published = move || -> Option<u64> {
             all_ckpt_steps(broadcasts_dir).ok()?.into_iter().find(|&c| c > step && receiver.is_published(c))
         };
-        let superseding: Option<&mut (dyn FnMut() -> Option<u64> + Send)> =
+        let superseding: Superseding<'_> =
             if self.config.cancel_on_new_checkpoint { Some(&mut next_published) } else { None };
         self.runner.run_epoch(outcome, step, superseding).await
     }
@@ -283,42 +247,21 @@ impl OnlineEval<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::WalkAction::*;
     use super::*;
-    use WalkAction::*;
-
-    fn set(steps: &[u64]) -> HashSet<u64> {
-        steps.iter().copied().collect()
-    }
 
     #[test]
-    fn evaluates_published_steps_in_order_above_last_step() {
-        let actions = plan_walk(&[1, 2, 3, 4], &set(&[1, 2, 3, 4]), &[2], 2, Some(10));
-        assert_eq!(actions, [Evaluate { step: 3, force: false }, Evaluate { step: 4, force: false }]);
-    }
-
-    #[test]
-    fn stops_at_a_step_still_being_written() {
-        let actions = plan_walk(&[1, 2, 3], &set(&[1]), &[1], 0, None);
-        assert_eq!(actions, [Evaluate { step: 1, force: false }]);
-    }
-
-    #[test]
-    fn skips_abandoned_steps_below_a_published_one() {
-        let actions = plan_walk(&[1, 2, 3], &set(&[1, 3]), &[5], 0, None);
-        assert_eq!(actions, [Evaluate { step: 1, force: false }, SkipAbandoned(2), Evaluate { step: 3, force: false }]);
-    }
-
-    #[test]
-    fn reports_due_steps_removed_by_broadcast_cleaning() {
-        // trainer keeps only the newest broadcast: steps 2 and 4 (due every 2) vanished
-        let actions = plan_walk(&[5], &set(&[5]), &[2], 0, None);
-        assert_eq!(actions, [SkipDeleted(2), SkipDeleted(4), Evaluate { step: 5, force: false }]);
-        assert_eq!(deleted_due_steps(&[5], None, &[2]), BTreeSet::new());
-    }
-
-    #[test]
-    fn final_step_forces_every_env() {
-        let actions = plan_walk(&[9, 10], &set(&[9, 10]), &[100], 8, Some(10));
-        assert_eq!(actions, [Evaluate { step: 9, force: false }, Evaluate { step: 10, force: true }]);
+    fn plan_walk_cases() {
+        let set = |steps: &[u64]| steps.iter().copied().collect::<HashSet<u64>>();
+        // published steps above last_step, in order
+        assert_eq!(plan_walk(&[1, 2, 3], &set(&[1, 2, 3]), &[2], 1, Some(10)), [Evaluate { step: 2, force: false }, Evaluate { step: 3, force: false }]);
+        // a step still being written ends the scan
+        assert_eq!(plan_walk(&[1, 2, 3], &set(&[1]), &[1], 0, None), [Evaluate { step: 1, force: false }]);
+        // an unpublished step below a published one is abandoned
+        assert_eq!(plan_walk(&[1, 2, 3], &set(&[1, 3]), &[5], 0, None), [Evaluate { step: 1, force: false }, SkipAbandoned(2), Evaluate { step: 3, force: false }]);
+        // due steps that broadcast cleaning removed are reported
+        assert_eq!(plan_walk(&[5], &set(&[5]), &[2], 0, None), [SkipDeleted(2), SkipDeleted(4), Evaluate { step: 5, force: false }]);
+        // the final step forces every env
+        assert_eq!(plan_walk(&[9, 10], &set(&[9, 10]), &[100], 8, Some(10)), [Evaluate { step: 9, force: false }, Evaluate { step: 10, force: true }]);
     }
 }
