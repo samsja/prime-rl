@@ -47,7 +47,7 @@ type Buf = Vec<u8>;
 
 /// A per-token stream travels as msgpack bin of its raw little-endian bytes.
 fn stream<T: Copy>(buf: &mut Buf, values: &[T], to_le: impl Fn(T) -> Vec<u8>) {
-    write_bin_len(buf, (values.len() * size_of::<T>()) as u32).unwrap();
+    write_bin_len(buf, size_of_val(values) as u32).unwrap();
     for &v in values {
         buf.extend(to_le(v));
     }
@@ -60,11 +60,11 @@ fn opt<T>(buf: &mut Buf, value: &Option<T>, write: impl FnOnce(&mut Buf, &T)) {
     }
 }
 
-fn f32s(buf: &mut Buf, v: &Vec<f32>) {
+fn f32s(buf: &mut Buf, v: &[f32]) {
     stream(buf, v, |x| x.to_le_bytes().to_vec());
 }
 
-fn i32s(buf: &mut Buf, v: &Vec<i32>) {
+fn i32s(buf: &mut Buf, v: &[i32]) {
     stream(buf, v, |x| x.to_le_bytes().to_vec());
 }
 
@@ -82,7 +82,7 @@ fn usizes(buf: &mut Buf, v: &[usize]) {
     }
 }
 
-fn strs(buf: &mut Buf, v: &Vec<String>) {
+fn strs(buf: &mut Buf, v: &[String]) {
     write_array_len(buf, v.len() as u32).unwrap();
     for s in v {
         write_str(buf, s).unwrap();
@@ -121,15 +121,15 @@ fn micro_batch(buf: &mut Buf, mb: &MicroBatch) {
     f32s(buf, &mb.temperatures);
     strs(buf, &mb.env_names);
     usizes(buf, &mb.seq_lens);
-    opt(buf, &mb.ref_logprobs, f32s);
+    opt(buf, &mb.ref_logprobs, |b, v| f32s(b, v));
     write_nil(buf).unwrap(); // routed_experts
     opt(buf, &mb.mm_refs, mm_refs);
-    opt(buf, &mb.mm_token_type_ids, i32s);
-    opt(buf, &mb.rl_weights, f32s);
-    opt(buf, &mb.ce_weights, f32s);
-    opt(buf, &mb.ref_kl_weights, f32s);
+    opt(buf, &mb.mm_token_type_ids, |b, v| i32s(b, v));
+    opt(buf, &mb.rl_weights, |b, v| f32s(b, v));
+    opt(buf, &mb.ce_weights, |b, v| f32s(b, v));
+    opt(buf, &mb.ref_kl_weights, |b, v| f32s(b, v));
     write_nil(buf).unwrap(); // sampling_mask
-    opt(buf, &mb.trace_ids, strs);
+    opt(buf, &mb.trace_ids, |b, v| strs(b, v));
     opt(buf, &mb.branch_indices, |b, v| ints(b, v));
     write_nil(buf).unwrap(); // top_logprobs
     write_sint(buf, mb.padding as i64).unwrap();

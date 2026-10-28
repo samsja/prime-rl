@@ -189,11 +189,14 @@ fn values<'a>(records: &[TraceRecord<'a>], value: impl Fn(&'a Trace) -> f64) -> 
     records.iter().map(|r| value(r.trace)).collect()
 }
 
+type TraceValue = fn(&Trace) -> f64;
+type TraceFlag = fn(&Trace) -> bool;
+
 /// `TraceMetrics.snapshot`: trace-level statistics of one agent's records.
 fn trace_snapshot(records: &[TraceRecord<'_>], prefix: &str, subset: Subset) -> MetricWindow {
     let mut out = MetricWindow::default();
     let n = records.len();
-    let distributions: [(&str, fn(&Trace) -> f64); 6] = [
+    let distributions: [(&str, TraceValue); 6] = [
         ("reward", |t| t.reward()),
         ("num_total_tokens", |t| t.num_total_tokens() as f64),
         ("num_input_tokens", |t| t.num_input_tokens() as f64),
@@ -204,13 +207,13 @@ fn trace_snapshot(records: &[TraceRecord<'_>], prefix: &str, subset: Subset) -> 
     for (name, value) in distributions {
         out.distribution(format!("{prefix}/{name}"), &values(records, value));
     }
-    let rates: [(&str, fn(&Trace) -> bool); 3] =
+    let rates: [(&str, TraceFlag); 3] =
         [("is_truncated", |t| t.is_truncated()), ("is_timeout", |t| t.is_timeout), ("is_completed", |t| t.is_completed)];
     for (name, value) in rates {
         out.rate(format!("{prefix}/{name}"), [("mean", values(records, |t| f(value(t))).iter().sum())], n);
     }
 
-    let phases: [(&str, fn(&Trace) -> f64); 4] = [
+    let phases: [(&str, TraceValue); 4] = [
         ("setup", |t| t.timing.setup.duration()),
         ("agent", |t| t.timing.agent.duration()),
         ("finalize", |t| t.timing.finalize.duration()),
@@ -452,7 +455,7 @@ impl<'a> EpisodeMetrics<'a> {
             return out;
         }
         let metric_prefix = format!("{prefix}/{}", subset.as_str());
-        let episode_stats: [(&str, fn(&Trace) -> f64); 5] = [
+        let episode_stats: [(&str, TraceValue); 5] = [
             ("num_total_tokens", |t| t.num_total_tokens() as f64),
             ("num_input_tokens", |t| t.num_input_tokens() as f64),
             ("num_output_tokens", |t| t.num_output_tokens() as f64),
