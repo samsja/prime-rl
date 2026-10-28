@@ -7,7 +7,7 @@
 use std::fmt;
 
 use indexmap::IndexMap;
-use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 pub type Map = IndexMap<String, Value>;
@@ -487,45 +487,14 @@ impl<'de> Deserialize<'de> for Value {
             }
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
                 let mut map = Map::with_capacity(access.size_hint().unwrap_or(0));
-                while let Some((k, v)) = access.next_entry::<KeyString, Value>()? {
-                    map.insert(k.0, v);
+                while let Some((k, v)) = access.next_entry::<String, Value>()? {
+                    map.insert(k, v);
                 }
                 Ok(Value::Map(map))
             }
         }
 
         deserializer.deserialize_any(ValueVisitor)
-    }
-}
-
-/// A map key: strings as-is, integer keys stringified.
-struct KeyString(String);
-
-impl<'de> Deserialize<'de> for KeyString {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct KeyVisitor;
-        impl<'de> Visitor<'de> for KeyVisitor {
-            type Value = KeyString;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a string or integer map key")
-            }
-            fn visit_str<E>(self, v: &str) -> Result<KeyString, E> {
-                Ok(KeyString(v.to_owned()))
-            }
-            fn visit_string<E>(self, v: String) -> Result<KeyString, E> {
-                Ok(KeyString(v))
-            }
-            fn visit_i64<E>(self, v: i64) -> Result<KeyString, E> {
-                Ok(KeyString(v.to_string()))
-            }
-            fn visit_u64<E>(self, v: u64) -> Result<KeyString, E> {
-                Ok(KeyString(v.to_string()))
-            }
-            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<KeyString, E> {
-                String::from_utf8(v.to_vec()).map(KeyString).map_err(E::custom)
-            }
-        }
-        deserializer.deserialize_any(KeyVisitor)
     }
 }
 

@@ -19,8 +19,8 @@ pub fn write(out: &mut Vec<u8>, value: &Value) {
         Value::Nil => out.extend_from_slice(b"null"),
         Value::Bool(true) => out.extend_from_slice(b"true"),
         Value::Bool(false) => out.extend_from_slice(b"false"),
-        Value::Int(i) => out.extend_from_slice(itoa(*i as i128).as_bytes()),
-        Value::UInt(u) => out.extend_from_slice(itoa(*u as i128).as_bytes()),
+        Value::Int(i) => out.extend_from_slice(i.to_string().as_bytes()),
+        Value::UInt(u) => out.extend_from_slice(u.to_string().as_bytes()),
         Value::F32(f) => write_f32(out, *f),
         Value::F64(f) => write_f64(out, *f),
         Value::Str(s) => write_str(out, s),
@@ -48,10 +48,6 @@ pub fn write(out: &mut Vec<u8>, value: &Value) {
             out.push(b'}');
         }
     }
-}
-
-fn itoa(i: i128) -> String {
-    i.to_string()
 }
 
 pub fn write_f64(out: &mut Vec<u8>, f: f64) {

@@ -645,17 +645,10 @@ impl MessageNode {
             loss_weights,
             routed_experts: f.get("routed_experts").cloned(),
             sampling_mask: f.get("sampling_mask").cloned(),
-            weight_versions: f.opt_of("weight_versions", |v, p| {
-                Fields::of(&Value::map(), p.clone())?; // path only
-                match v {
-                    Value::Array(items) => items
-                        .iter()
-                        .enumerate()
-                        .map(|(i, item)| WeightVersionSpan::from_value(item, format!("{p}[{i}]")))
-                        .collect(),
-                    other => invalid(&p, format!("expected list, got {other:?}")),
-                }
-            })?,
+            weight_versions: f
+                .get("weight_versions")
+                .map(|_| f.list_of("weight_versions", WeightVersionSpan::from_value))
+                .transpose()?,
             top_logprobs: f.get("top_logprobs").cloned(),
         })
     }
