@@ -4,7 +4,7 @@ use super::msgpack::Writer;
 use crate::sample::{MMRefs, PayloadSlice};
 
 /// A packed micro batch. Field order and defaults mirror the Python `msgspec.Struct`
-/// (`array_like=True, omit_defaults=True`). `routed_experts`, `sampling_mask` and `top_logprobs`
+/// (`array_like=True`; msgspec writes every field of array-like structs). `routed_experts`, `sampling_mask` and `top_logprobs`
 /// are filled by the trainer from `payloads` and always travel as nil from the orchestrator.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MicroBatch {
@@ -32,8 +32,6 @@ pub struct MicroBatch {
 
 /// Number of struct fields (positions) in the Python `MicroBatch`.
 const NUM_FIELDS: usize = 23;
-/// Fields 0..=8 have no default and are always written.
-const NUM_REQUIRED: usize = 9;
 
 impl MicroBatch {
     pub fn is_multimodal(&self) -> bool {
@@ -47,31 +45,10 @@ impl MicroBatch {
             .is_some_and(|ps| ps.iter().flatten().any(|p| p.has("routed_experts")))
     }
 
-    fn is_default(&self, field: usize) -> bool {
-        match field {
-            9 => self.ref_logprobs.is_none(),
-            10 | 16 | 19 => true, // routed_experts, sampling_mask, top_logprobs
-            11 => self.mm_refs.is_none(),
-            12 => self.mm_token_type_ids.is_none(),
-            13 => self.rl_weights.is_none(),
-            14 => self.ce_weights.is_none(),
-            15 => self.ref_kl_weights.is_none(),
-            17 => self.trace_ids.is_none(),
-            18 => self.branch_indices.is_none(),
-            20 => self.padding == 0,
-            21 => self.staleness.is_none(),
-            22 => self.payloads.is_none(),
-            _ => false,
-        }
-    }
-
+    /// msgspec ignores `omit_defaults` for `array_like` structs: every field is written.
     pub fn encode_into(&self, w: &mut Writer) {
-        let mut n = NUM_FIELDS;
-        while n > NUM_REQUIRED && self.is_default(n - 1) {
-            n -= 1;
-        }
-        w.array_header(n);
-        for field in 0..n {
+        w.array_header(NUM_FIELDS);
+        for field in 0..NUM_FIELDS {
             self.encode_field(field, w);
         }
     }
