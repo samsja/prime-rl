@@ -1,3 +1,4 @@
+# Imports the removed Python orchestrator: run it from a checkout that still has it (e.g. the baseline worktree at 8acab25e4).
 """Generate prl-io test fixtures from the Python reference implementation.
 
 Run from the repo root: uv run --no-sync python rust/crates/prl-io/tools/gen_fixtures.py
@@ -28,7 +29,9 @@ def state_json(state: dict) -> dict:
 
     p = state["progress"]
     return {
-        "progress": {k: getattr(p, k) for k in ("step", "total_tokens", "total_samples", "total_problems", "rollout_window")},
+        "progress": {
+            k: getattr(p, k) for k in ("step", "total_tokens", "total_samples", "total_problems", "rollout_window")
+        },
         "train_source": {
             "rng": rng(state["train_source"]["rng"]),
             "envs": {
@@ -138,14 +141,23 @@ def inference_metrics() -> None:
         registry = CollectorRegistry()
         running = Gauge("vllm:num_requests_running", "Running", ["engine", "model_name"], registry=registry)
         waiting = Gauge("vllm:num_requests_waiting", "Waiting", ["engine", "model_name"], registry=registry)
-        by_reason = Gauge("vllm:num_requests_waiting_by_reason", "Waiting by reason", ["engine", "reason"], registry=registry)
+        by_reason = Gauge(
+            "vllm:num_requests_waiting_by_reason", "Waiting by reason", ["engine", "reason"], registry=registry
+        )
         kv = Gauge("vllm:kv_cache_usage_perc", "KV \\ usage\nhelp", ["engine"], registry=registry)
-        info = Gauge("vllm:cache_config_info", "cache", ["engine", "num_gpu_blocks", "block_size", "kv_cache_size_tokens"], registry=registry)
+        info = Gauge(
+            "vllm:cache_config_info",
+            "cache",
+            ["engine", "num_gpu_blocks", "block_size", "kv_cache_size_tokens"],
+            registry=registry,
+        )
         hits = Counter("vllm:prefix_cache_hits", "hits", ["engine"], registry=registry)
         queries = Counter("vllm:prefix_cache_queries", "queries", ["engine"], registry=registry)
         preempt = Counter("vllm:num_preemptions", "preemptions", ["engine"], registry=registry)
         finished = Counter("vllm:request_success", "done", ["engine", "finished_reason"], registry=registry)
-        ttft = Histogram("vllm:time_to_first_token_seconds", "ttft", ["engine"], buckets=[0.01, 0.1, 1.0, 10.0], registry=registry)
+        ttft = Histogram(
+            "vllm:time_to_first_token_seconds", "ttft", ["engine"], buckets=[0.01, 0.1, 1.0, 10.0], registry=registry
+        )
         other = Gauge("process_cpu_seconds", "not vllm", registry=registry)
         other.set(3)
         for i, engine in enumerate(engines):
@@ -186,7 +198,9 @@ def client_configs() -> None:
     )
     renderer = Qwen3VLRendererConfig()
     cases = {
-        "renderer": setup_client(config, client_type="renderer", renderer_config=renderer, renderer_model_name="Qwen/Qwen3-VL-4B-Instruct"),
+        "renderer": setup_client(
+            config, client_type="renderer", renderer_config=renderer, renderer_model_name="Qwen/Qwen3-VL-4B-Instruct"
+        ),
         "renderer_auto": setup_client(config, client_type="renderer"),
         "chat": setup_client(config),
     }

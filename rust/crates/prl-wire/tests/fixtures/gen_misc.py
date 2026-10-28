@@ -1,6 +1,6 @@
 """Fixtures for sampling dicts, task hashes and Python-json formatting.
 
-    uv run --no-sync python rust/crates/prl-wire/tests/fixtures/gen_misc.py
+uv run --no-sync python rust/crates/prl-wire/tests/fixtures/gen_misc.py
 """
 
 import json
@@ -49,7 +49,12 @@ class MyTask(vf.TaskData):
 
 tasks = [
     vf.TaskData(idx=0, prompt="hi"),
-    MyTask(idx=7, prompt=[vf.UserMessage(content="what is 2+2? é ✓ 🎉")], answer="4", meta={"x": None, "f": 1e-5, "big": 1e16}),
+    MyTask(
+        idx=7,
+        prompt=[vf.UserMessage(content="what is 2+2? é ✓ 🎉")],
+        answer="4",
+        meta={"x": None, "f": 1e-5, "big": 1e16},
+    ),
 ]
 hashes = [
     {"data": t.model_dump(mode="python"), "hash": task_key(t.model_dump(mode="json", exclude_none=True))} for t in tasks
@@ -57,7 +62,9 @@ hashes = [
 (OUT / "task_hashes.msgpack").write_bytes(msgpack.packb(hashes, use_bin_type=True))
 
 rng = np.random.default_rng(1)
-floats = np.concatenate([rng.standard_normal(500) * 10.0 ** rng.integers(-25, 25, 500), 10.0 ** np.arange(-8, 20), [0.0, -0.0, 1.0, 0.5]]).tolist()
+floats = np.concatenate(
+    [rng.standard_normal(500) * 10.0 ** rng.integers(-25, 25, 500), 10.0 ** np.arange(-8, 20), [0.0, -0.0, 1.0, 0.5]]
+).tolist()
 value = {"floats": floats, "s": "a\nb é ✓ 🎉 \x7f \x01", "b": [True, None], "z": 1, "a": {"k": 2}}
 (OUT / "python_json_input.msgpack").write_bytes(msgpack.packb(value, use_bin_type=True))
 (OUT / "python_json_expected.json").write_text(json.dumps(value, sort_keys=True))

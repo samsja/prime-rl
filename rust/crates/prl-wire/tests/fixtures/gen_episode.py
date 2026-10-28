@@ -76,11 +76,22 @@ async def build() -> tuple[Episode, list[bytes]]:
     await streamer.flush()
 
     # turn 1: system + user(image) -> assistant tool call
-    a.nodes.append(MessageNode(message=SystemMessage(content="be brief"), tools=tools, token_ids=[1, 2], mask=[False, False], is_content=[False, True], timestamp=1.5))
+    a.nodes.append(
+        MessageNode(
+            message=SystemMessage(content="be brief"),
+            tools=tools,
+            token_ids=[1, 2],
+            mask=[False, False],
+            is_content=[False, True],
+            timestamp=1.5,
+        )
+    )
     a.nodes.append(
         MessageNode(
             parent=0,
-            message=UserMessage(content=[TextContentPart(text="look"), ImageUrlContentPart(image_url=ImageUrlSource(url="data:x"))]),
+            message=UserMessage(
+                content=[TextContentPart(text="look"), ImageUrlContentPart(image_url=ImageUrlSource(url="data:x"))]
+            ),
             token_ids=[3, 151655, 151655, 4],
             mask=[False] * 4,
             timestamp=1.5,
@@ -89,7 +100,11 @@ async def build() -> tuple[Episode, list[bytes]]:
     a.nodes.append(
         MessageNode(
             parent=1,
-            message=AssistantMessage(content=None, reasoning_content="think", tool_calls=[ToolCall(id="c1", name="calc", arguments='{"a": 1}')]),
+            message=AssistantMessage(
+                content=None,
+                reasoning_content="think",
+                tool_calls=[ToolCall(id="c1", name="calc", arguments='{"a": 1}')],
+            ),
             sampled=True,
             token_ids=[5, 6, 7, 8],
             mask=[False, True, True, True],
@@ -120,7 +135,15 @@ async def build() -> tuple[Episode, list[bytes]]:
     # the retried attempt goes away; turn 2 commits a tool result and the final answer
     traces.remove(discarded)
     a._pending.clear()
-    a.nodes.append(MessageNode(parent=2, message=ToolMessage(content="2", tool_call_id="c1", name="calc"), token_ids=[9], mask=[False], timestamp=3.0))
+    a.nodes.append(
+        MessageNode(
+            parent=2,
+            message=ToolMessage(content="2", tool_call_id="c1", name="calc"),
+            token_ids=[9],
+            mask=[False],
+            timestamp=3.0,
+        )
+    )
     a.nodes.append(
         MessageNode(
             parent=3,
@@ -132,7 +155,14 @@ async def build() -> tuple[Episode, list[bytes]]:
             timestamp=3.5,
         )
     )
-    a.calls.append(ModelCall(node=4, finish_reason="length", usage=Usage(prompt_tokens=8, completion_tokens=2), time=TimeSpan(start=3.0, end=3.5)))
+    a.calls.append(
+        ModelCall(
+            node=4,
+            finish_reason="length",
+            usage=Usage(prompt_tokens=8, completion_tokens=2),
+            time=TimeSpan(start=3.0, end=3.5),
+        )
+    )
     # a compaction attempt branching off the user turn, resumed from later
     a.nodes.append(
         MessageNode(
@@ -146,7 +176,13 @@ async def build() -> tuple[Episode, list[bytes]]:
             timestamp=4.0,
         )
     )
-    a.calls.append(ModelCall(node=5, usage=Usage(prompt_tokens=6, completion_tokens=1), error=vf.Error(type="ProviderError", message="boom", status_code=500)))
+    a.calls.append(
+        ModelCall(
+            node=5,
+            usage=Usage(prompt_tokens=6, completion_tokens=1),
+            error=vf.Error(type="ProviderError", message="boom", status_code=500),
+        )
+    )
     await streamer.flush()
     a.nodes[4].semantic_parents.append(ParentLink(node=5, type="compaction"))
     a.extra_usage.append(Usage(prompt_tokens=10, completion_tokens=1, reasoning_tokens=1))

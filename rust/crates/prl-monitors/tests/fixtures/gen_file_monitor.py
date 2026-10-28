@@ -1,3 +1,4 @@
+# Imports the removed Python orchestrator: run it from a checkout that still has it (e.g. the baseline worktree at 8acab25e4).
 """Generate file-monitor fixtures: run the Python FileMonitor over wire-received episodes and
 keep both its inputs (records, updates, live events) and its outputs.
 
@@ -54,7 +55,11 @@ def rich_trace(i):
     t.rewards = {"correct": vf.Reward(score=float(i % 2)), "style": vf.Reward(score=0.5, weight=0.2)}
     t.metrics = {"len": 3.0 + i, "count": float(i)}
     t.calls = [
-        ModelCall(node=2, usage=Usage(prompt_tokens=2, completion_tokens=2, cost=0.001 * (i + 1)), finish_reason="length" if i == 1 else "stop")
+        ModelCall(
+            node=2,
+            usage=Usage(prompt_tokens=2, completion_tokens=2, cost=0.001 * (i + 1)),
+            finish_reason="length" if i == 1 else "stop",
+        )
     ]
     t.stop_condition = "max_turns" if i == 4 else None
     t.is_timeout = i == 5
@@ -76,7 +81,16 @@ def main():
         ep.id = f"episode{i:02d}"
         got, deltas = over_the_wire(ep)
         received.append(got)
-        dispatch = {"id": f"d{i}", "kind": "train", "env": "test", "group": f"g{i // 2}", "task": "idx=0", "policy_version": 0, "step": 1, "started": 1000.0 + i}
+        dispatch = {
+            "id": f"d{i}",
+            "kind": "train",
+            "env": "test",
+            "group": f"g{i // 2}",
+            "task": "idx=0",
+            "policy_version": 0,
+            "step": 1,
+            "started": 1000.0 + i,
+        }
         live_events.append({"pending": f"d{i}", "dispatch": dispatch})
         live_events.append({"dispatched": f"d{i}"})
         live_events.extend({"delta": delta, "dispatch": dispatch} for delta in deltas)
@@ -100,12 +114,28 @@ def main():
     asyncio.run(monitor.log_eval_plan("gsm8k", 2, 64))
     asyncio.run(monitor.log_eval_plan("gsm8k", 4, 64))
     asyncio.run(monitor.log_eval_plan("aime", 4, 30))
-    asyncio.run(monitor.log_metrics({"loss/mean": 0.5, "progress/total_tokens": 1234, "tiny": 1e-05, "big": 1e16, "nan": math.nan, "inf/x": math.inf, "flag": True, "name": "é😀"}, step=2))
+    asyncio.run(
+        monitor.log_metrics(
+            {
+                "loss/mean": 0.5,
+                "progress/total_tokens": 1234,
+                "tiny": 1e-05,
+                "big": 1e16,
+                "nan": math.nan,
+                "inf/x": math.inf,
+                "flag": True,
+                "name": "é😀",
+            },
+            step=2,
+        )
+    )
     asyncio.run(monitor.log_metrics({"inference/agg/x": 3.0}, step=None))
     asyncio.run(monitor.finalize())
 
     (OUT / "records.jsonl").write_bytes(b"".join(r + b"\n" for r in records))
-    (OUT / "updates.jsonl").write_bytes(b"".join(orjson.dumps(u, option=orjson.OPT_SERIALIZE_NUMPY) + b"\n" for u in updates))
+    (OUT / "updates.jsonl").write_bytes(
+        b"".join(orjson.dumps(u, option=orjson.OPT_SERIALIZE_NUMPY) + b"\n" for u in updates)
+    )
     (OUT / "live_events.msgpack").write_bytes(msgpack.packb(live_events, use_bin_type=True))
 
 

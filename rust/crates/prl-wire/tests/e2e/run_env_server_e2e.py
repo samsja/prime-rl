@@ -65,7 +65,17 @@ def main() -> None:
             time.sleep(0.5)
         env = {**os.environ, "PRL_WIRE_E2E_DIR": str(work), "CARGO_TARGET_DIR": str(ROOT / "rust/target/wire")}
         subprocess.run(
-            [os.path.expanduser("~/.cargo/bin/cargo"), "test", "-p", "prl-wire", "--test", "env_server", "--", "--ignored", "--nocapture"],
+            [
+                os.path.expanduser("~/.cargo/bin/cargo"),
+                "test",
+                "-p",
+                "prl-wire",
+                "--test",
+                "env_server",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ],
             cwd=ROOT / "rust",
             env=env,
             check=True,

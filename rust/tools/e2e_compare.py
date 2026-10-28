@@ -92,7 +92,11 @@ def layout(run: Path) -> dict[str, int]:
         rel = path.relative_to(run).as_posix()
         # Trainer-owned payloads (weights, trainer checkpoints) are unchanged by the orchestrator and
         # are pruned after runs to save disk.
-        if rel in ("weights", "broadcasts") or rel.startswith(("weights/", "broadcasts/")) or re.match(r"checkpoints/step_\d+/trainer", rel):
+        if (
+            rel in ("weights", "broadcasts")
+            or rel.startswith(("weights/", "broadcasts/"))
+            or re.match(r"checkpoints/step_\d+/trainer", rel)
+        ):
             continue
         counts[normalize_path(rel) + ("/" if path.is_dir() else "")] += 1
     return counts
@@ -142,7 +146,9 @@ def compare_metrics(a: Path, b: Path, steps: int | None, threshold: float) -> in
         print(f"\n--- producer {producer}")
         sa = {s: r for s, r in pa[producer].items() if s is not None and (steps is None or s <= steps)}
         sb = {s: r for s, r in pb[producer].items() if s is not None and (steps is None or s <= steps)}
-        print(f"steps: A {sorted(sa)[:3]}..{max(sa, default=None)} ({len(sa)})  B {sorted(sb)[:3]}..{max(sb, default=None)} ({len(sb)})")
+        print(
+            f"steps: A {sorted(sa)[:3]}..{max(sa, default=None)} ({len(sa)})  B {sorted(sb)[:3]}..{max(sb, default=None)} ({len(sb)})"
+        )
         keys_a = set().union(*(r.keys() for r in sa.values())) if sa else set()
         keys_b = set().union(*(r.keys() for r in sb.values())) if sb else set()
         issues += show_set_diff("step-keyed metric keys (union over steps)", keys_a, keys_b)
@@ -150,6 +156,7 @@ def compare_metrics(a: Path, b: Path, steps: int | None, threshold: float) -> in
         tb = set().union(*(r.keys() for s, r in pb[producer].items() if s is None)) if None in pb[producer] else set()
         if ta or tb:
             issues += show_set_diff("time-keyed metric keys", ta, tb)
+
         def value_types(rows: dict) -> dict[str, set]:
             types: dict[str, set] = defaultdict(set)
             for row in rows.values():
@@ -158,7 +165,11 @@ def compare_metrics(a: Path, b: Path, steps: int | None, threshold: float) -> in
             return types
 
         types_a, types_b = value_types(pa[producer]), value_types(pb[producer])
-        type_diffs = [(k, sorted(types_a[k]), sorted(types_b[k])) for k in sorted(set(types_a) & set(types_b)) if types_a[k] != types_b[k]]
+        type_diffs = [
+            (k, sorted(types_a[k]), sorted(types_b[k]))
+            for k in sorted(set(types_a) & set(types_b))
+            if types_a[k] != types_b[k]
+        ]
         if type_diffs:
             print(f"JSON value types differ ({len(type_diffs)}; e.g. int vs float):")
             for key, ta, tb in type_diffs[:30]:
@@ -172,7 +183,9 @@ def compare_metrics(a: Path, b: Path, steps: int | None, threshold: float) -> in
         if per_step:
             print(f"steps whose key sets differ ({len(per_step)}):")
             for step, only_a, only_b in per_step[:10]:
-                print(f"  step {step}: only A {only_a[:6]}{'...' if len(only_a) > 6 else ''} | only B {only_b[:6]}{'...' if len(only_b) > 6 else ''}")
+                print(
+                    f"  step {step}: only A {only_a[:6]}{'...' if len(only_a) > 6 else ''} | only B {only_b[:6]}{'...' if len(only_b) > 6 else ''}"
+                )
         shared = sorted(keys_a & keys_b)
         common_steps = sorted(set(sa) & set(sb))
         key_metrics = [k for k in shared if any(re.search(p, k) for p in KEY_METRICS)]
@@ -188,7 +201,9 @@ def compare_metrics(a: Path, b: Path, steps: int | None, threshold: float) -> in
                 ma, mb = sum(va) / len(va), sum(vb) / len(vb)
                 rel = abs(ma - mb) / max(abs(ma), abs(mb), 1e-12)
                 flag = "  <-- differs" if rel > threshold else ""
-                print(f"  {key:70s} {ma:12.4g} {va[0]:10.4g} {va[-1]:10.4g} | {mb:12.4g} {vb[0]:10.4g} {vb[-1]:10.4g}{flag}")
+                print(
+                    f"  {key:70s} {ma:12.4g} {va[0]:10.4g} {va[-1]:10.4g} | {mb:12.4g} {vb[0]:10.4g} {vb[-1]:10.4g}{flag}"
+                )
         deviations = []
         for key in shared:
             va = [numeric(sa[s].get(key)) for s in common_steps]
@@ -206,7 +221,9 @@ def compare_metrics(a: Path, b: Path, steps: int | None, threshold: float) -> in
                 deviations.append((rel, key, ma, mb))
         deviations.sort(reverse=True)
         if deviations:
-            print(f"\nmetrics whose step-mean differs by > {threshold:.0%} ({len(deviations)}; time/* are expected to):")
+            print(
+                f"\nmetrics whose step-mean differs by > {threshold:.0%} ({len(deviations)}; time/* are expected to):"
+            )
             for rel, key, ma, mb in deviations[:40]:
                 print(f"  {key:70s} A {ma:12.4g}  B {mb:12.4g}  ({rel:.0%})")
     return issues
@@ -261,7 +278,11 @@ def merged_schema(records: list[dict]) -> dict[str, set]:
 def compare_schemas(name: str, ra: list[dict], rb: list[dict]) -> int:
     sa, sb = merged_schema(ra), merged_schema(rb)
     issues = show_set_diff(f"{name} key paths", set(sa), set(sb))
-    type_diffs = [(k, sorted(sa[k]), sorted(sb[k])) for k in sorted(set(sa) & set(sb)) if sa[k] - {"NoneType"} != sb[k] - {"NoneType"}]
+    type_diffs = [
+        (k, sorted(sa[k]), sorted(sb[k]))
+        for k in sorted(set(sa) & set(sb))
+        if sa[k] - {"NoneType"} != sb[k] - {"NoneType"}
+    ]
     if type_diffs:
         print(f"  {name} value types differ ({len(type_diffs)}):")
         for key, ta, tb in type_diffs[:30]:
@@ -388,6 +409,7 @@ def ckpt_summary(run: Path) -> dict:
 def compare_ckpt(a: Path, b: Path) -> int:
     section("CHECKPOINTS (checkpoints/step_*/)")
     issues = 0
+
     def ckpt_files(run: Path) -> set[str]:
         root = run / "checkpoints"
         if not root.is_dir():
@@ -404,8 +426,12 @@ def compare_ckpt(a: Path, b: Path) -> int:
             print(f"  {step}: only in {'A' if vb is None else 'B'}")
             issues += 1
             continue
-        structure_same = {k: v for k, v in va.items() if k != "progress"} == {k: v for k, v in vb.items() if k != "progress"}
-        print(f"  {step}: structure {'same' if structure_same else 'DIFFERS'}; progress A {va.get('progress')}  B {vb.get('progress')}")
+        structure_same = {k: v for k, v in va.items() if k != "progress"} == {
+            k: v for k, v in vb.items() if k != "progress"
+        }
+        print(
+            f"  {step}: structure {'same' if structure_same else 'DIFFERS'}; progress A {va.get('progress')}  B {vb.get('progress')}"
+        )
         if not structure_same:
             print(f"    A {va}\n    B {vb}")
             issues += 1

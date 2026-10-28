@@ -1,3 +1,4 @@
+# Imports the removed Python orchestrator: run it from a checkout that still has it (e.g. the baseline worktree at 8acab25e4).
 """Generate prl-train sink fixtures: random native episodes replayed through the Python TrainSink.
 
 Run: uv run --no-sync python rust/crates/prl-train/tests/fixtures/gen_sink.py
@@ -79,8 +80,14 @@ class Builder:
         nodes: list[MessageNode] = []
         calls: list[ModelCall] = []
         n = rng.randint(1, 3)
-        nodes.append(MessageNode(message=UserMessage(content="q"), token_ids=self.tokens(n), mask=[False] * n,
-                                 is_content=[True] * n if rng.random() < 0.5 else []))
+        nodes.append(
+            MessageNode(
+                message=UserMessage(content="q"),
+                token_ids=self.tokens(n),
+                mask=[False] * n,
+                is_content=[True] * n if rng.random() < 0.5 else [],
+            )
+        )
         parent = 0
         total = n
         turns = rng.randint(0, 3) if rng.random() < 0.1 else rng.randint(1, 3)
@@ -92,8 +99,10 @@ class Builder:
             wv = None
             if not frozen and rng.random() < 0.4:
                 cut = rng.randint(0, sampled)
-                wv = [WeightVersionSpan(version=rng.choice(["default", "1", "2", "3", "5"]), start=0, end=cut),
-                      WeightVersionSpan(version=rng.choice(["2", "4", "6"]), start=cut, end=sampled)]
+                wv = [
+                    WeightVersionSpan(version=rng.choice(["default", "1", "2", "3", "5"]), start=0, end=cut),
+                    WeightVersionSpan(version=rng.choice(["2", "4", "6"]), start=cut, end=sampled),
+                ]
             node = MessageNode(
                 parent=parent,
                 message=AssistantMessage(content="a"),
@@ -106,26 +115,48 @@ class Builder:
             nodes.append(node)
             parent = len(nodes) - 1
             assistant_ids.append(parent)
-            calls.append(ModelCall(node=parent, usage=Usage(prompt_tokens=total, completion_tokens=sampled),
-                                   finish_reason=rng.choice(["stop", "length", "tool_calls"])))
+            calls.append(
+                ModelCall(
+                    node=parent,
+                    usage=Usage(prompt_tokens=total, completion_tokens=sampled),
+                    finish_reason=rng.choice(["stop", "length", "tool_calls"]),
+                )
+            )
             total += scaffold + sampled
             if turn < turns - 1 or rng.random() < 0.3:
                 k = rng.randint(1, 4)
                 role = rng.choice(["tool", "user"])
                 message = ToolMessage(content="r", tool_call_id="c") if role == "tool" else UserMessage(content="u")
-                nodes.append(MessageNode(parent=parent, message=message, token_ids=self.tokens(k), mask=[False] * k,
-                                         is_content=([False] + [True] * (k - 1)) if rng.random() < 0.5 else []))
+                nodes.append(
+                    MessageNode(
+                        parent=parent,
+                        message=message,
+                        token_ids=self.tokens(k),
+                        mask=[False] * k,
+                        is_content=([False] + [True] * (k - 1)) if rng.random() < 0.5 else [],
+                    )
+                )
                 parent = len(nodes) - 1
                 total += k
         # A fork: a second response from an earlier node (a second branch sharing the prefix).
         if assistant_ids and rng.random() < 0.3:
             fork_parent = rng.choice([0, *assistant_ids[:-1]]) if len(assistant_ids) > 1 else 0
             sampled = rng.randint(1, 4)
-            nodes.append(MessageNode(parent=fork_parent, message=AssistantMessage(content="f"), sampled=True,
-                                     token_ids=self.tokens(sampled), mask=[True] * sampled,
-                                     logprobs=[q(-rng.random()) for _ in range(sampled)],
-                                     semantic_parents=[ParentLink(node=fork_parent, type=rng.choice(
-                                         ["compaction_attempt", "subagent_call", "continuation"]))]))
+            nodes.append(
+                MessageNode(
+                    parent=fork_parent,
+                    message=AssistantMessage(content="f"),
+                    sampled=True,
+                    token_ids=self.tokens(sampled),
+                    mask=[True] * sampled,
+                    logprobs=[q(-rng.random()) for _ in range(sampled)],
+                    semantic_parents=[
+                        ParentLink(
+                            node=fork_parent, type=rng.choice(["compaction_attempt", "subagent_call", "continuation"])
+                        )
+                    ],
+                )
+            )
             calls.append(ModelCall(node=len(nodes) - 1, usage=Usage(prompt_tokens=3, completion_tokens=sampled)))
         ok = rng.random() > 0.1
         trace = vf.Trace(
@@ -137,8 +168,10 @@ class Builder:
             is_completed=True,
             is_timeout=rng.random() < 0.1,
             stop_condition=rng.choice([None, "agent_completed", "max_turns", "prompt_too_long"]),
-            rewards={"correct": vf.Reward(score=rng.choice([0.0, 1.0, 1.0, 0.5])),
-                     **({"style": vf.Reward(score=0.25, weight=2.0)} if rng.random() < 0.3 else {})},
+            rewards={
+                "correct": vf.Reward(score=rng.choice([0.0, 1.0, 1.0, 0.5])),
+                **({"style": vf.Reward(score=0.25, weight=2.0)} if rng.random() < 0.3 else {}),
+            },
             metrics={"m": q(rng.random())} if rng.random() < 0.5 else {"m": None},
             errors=[] if ok else [vf.Error(type=rng.choice(["ProviderError", "TimeoutError"]), message="x")],
             dropped="filtered" if rng.random() < 0.05 else None,
@@ -159,7 +192,9 @@ class Builder:
     def episode(self, env_name, group_id, step, version, hierarchical=False, frozen=False):
         rng = self.rng
         if hierarchical:
-            traces = [self.trace(agent_name="proposer")] + [self.trace(agent_name="solver") for _ in range(rng.randint(1, 3))]
+            traces = [self.trace(agent_name="proposer")] + [
+                self.trace(agent_name="solver") for _ in range(rng.randint(1, 3))
+            ]
         else:
             traces = [self.trace(frozen=frozen) for _ in range(rng.choice([1, 1, 1, 2]))]
             if rng.random() < 0.1:
@@ -202,8 +237,16 @@ def window_json(window):
         return None
     return {
         "metrics": window.metrics.to_dict(),
-        "counters": [window.tokens, window.traces, window.groups, window.attempts, window.discarded, window.stale,
-                     window.errored, window.cancelled],
+        "counters": [
+            window.tokens,
+            window.traces,
+            window.groups,
+            window.attempts,
+            window.discarded,
+            window.stale,
+            window.errored,
+            window.cancelled,
+        ],
     }
 
 
@@ -224,8 +267,14 @@ def batch_json(batch, step):
         "effective_metrics": metrics,
         "staleness": sorted([s.rollout, s.in_flight, s.in_queue, s.token_sum, s.token_count] for s in staleness),
         "advantages": advantages,
-        "means": [eff.reward.mean(), eff.num_turns.mean(), eff.num_branches.mean(), eff.is_truncated.mean(),
-                  eff.is_timeout.mean(), eff.has_error.mean()],
+        "means": [
+            eff.reward.mean(),
+            eff.num_turns.mean(),
+            eff.num_branches.mean(),
+            eff.is_truncated.mean(),
+            eff.is_timeout.mean(),
+            eff.has_error.mean(),
+        ],
     }
 
 
@@ -236,7 +285,9 @@ async def run_scenario(seed: int):
     batch_size = rng.choice([2, 3, 5, 8])
     constant = rng.random() < 0.5
     max_staleness = rng.choice([0, 1, 2, 4])
-    config = OrchestratorConfig(batch_size=batch_size, constant_trainer_batch_size=constant, max_staleness=max_staleness)
+    config = OrchestratorConfig(
+        batch_size=batch_size, constant_trainer_batch_size=constant, max_staleness=max_staleness
+    )
     envs = {}
     env_specs = {}
     for i, algo_name in enumerate(algo_names):
@@ -260,8 +311,12 @@ async def run_scenario(seed: int):
 
     progress = Progress()
     sink = train_sink_module.TrainSink(
-        config, tokenizer=None, train_envs=SimpleNamespace(get=lambda name: envs[name]), progress=progress,
-        batch_size=batch_size, on_result=on_result,
+        config,
+        tokenizer=None,
+        train_envs=SimpleNamespace(get=lambda name: envs[name]),
+        progress=progress,
+        batch_size=batch_size,
+        on_result=on_result,
     )
     # Build the event stream: groups interleaved, with failures and cancellations.
     pending = []
@@ -297,25 +352,53 @@ async def run_scenario(seed: int):
             batch = await sink.add(episode)
         elif item[0] == "fail":
             _, env_name, gid = item
-            failure = DispatchFailure("train", env_name, gid, step, 0, "Task", "k", "h",
-                                      vf.Error(type=rng.choice(["TransportError", "ProviderError"]), message="boom"))
-            events.append({"type": "fail", "env_name": env_name, "group_id": gid, "step": step, "error_type": failure.error.type})
+            failure = DispatchFailure(
+                "train",
+                env_name,
+                gid,
+                step,
+                0,
+                "Task",
+                "k",
+                "h",
+                vf.Error(type=rng.choice(["TransportError", "ProviderError"]), message="boom"),
+            )
+            events.append(
+                {"type": "fail", "env_name": env_name, "group_id": gid, "step": step, "error_type": failure.error.type}
+            )
             batch = await sink.fail(failure)
         else:
             _, env_name, gid, count, reason = item
-            events.append({"type": "cancel", "env_name": env_name, "group_id": gid, "step": step, "count": count, "reason": reason})
+            events.append(
+                {
+                    "type": "cancel",
+                    "env_name": env_name,
+                    "group_id": gid,
+                    "step": step,
+                    "count": count,
+                    "reason": reason,
+                }
+            )
             batch = await sink.cancel(GroupCancellation("train", env_name, gid, step, count, reason))
         batches = []
         while batch is not None:
             window = sink.take_rollout_window(force=True)
-            batches.append({"step": progress.step, "batch": batch_json(batch, progress.step), "window": window_json(window)})
+            batches.append(
+                {"step": progress.step, "batch": batch_json(batch, progress.step), "window": window_json(window)}
+            )
             progress.step += 1
             batch = await sink.take_batch()
         if rng.random() < 0.2:
             progress.step += 1  # a step shipped elsewhere: queued traces age
             events[-1]["advance_after"] = True
-        out_events.append({"batches": batches, "released": sorted(RELEASED), "progress": list(sink.batch_progress()),
-                           "buffered": sink.buffered_count()})
+        out_events.append(
+            {
+                "batches": batches,
+                "released": sorted(RELEASED),
+                "progress": list(sink.batch_progress()),
+                "buffered": sink.buffered_count(),
+            }
+        )
     RELEASED.clear()
     sink.discard_queued()
     final = {"released": sorted(RELEASED), "window": window_json(sink.take_rollout_window(force=True))}
@@ -335,8 +418,7 @@ async def run_scenario(seed: int):
 async def main():
     scenarios = [await run_scenario(seed) for seed in range(30)]
     failures = [
-        DispatchFailure("eval", "e", "g", 1, 0, "T", "k", "h", vf.Error(type=t, message="m"))
-        for t in ["B", "A", "B"]
+        DispatchFailure("eval", "e", "g", 1, 0, "T", "k", "h", vf.Error(type=t, message="m")) for t in ["B", "A", "B"]
     ]
     extra = {"dispatch_failure_metrics": dispatch_failure_metrics(failures, prefix="eval/e/all", total_attempts=7)}
     out = Path(__file__).parent / "sink_cases.json.gz"

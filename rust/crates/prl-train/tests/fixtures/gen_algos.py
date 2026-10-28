@@ -1,3 +1,4 @@
+# Imports the removed Python orchestrator: run it from a checkout that still has it (e.g. the baseline worktree at 8acab25e4).
 """Generate prl-train algorithm fixtures for the algorithms that call out (opd, opsd, echo with a
 user filter): episodes before/after scoring with deterministic fake teachers, renderer and filter.
 
@@ -75,7 +76,10 @@ async def main():
         def echo_filter(trace, keep_every=2):
             from prime_rl.orchestrator.trajectories import iter_trainable_branches
 
-            masks = [[(j % keep_every) == 0 for j in range(len(branch.token_ids))] for branch, _ in iter_trainable_branches(trace)]
+            masks = [
+                [(j % keep_every) == 0 for j in range(len(branch.token_ids))]
+                for branch, _ in iter_trainable_branches(trace)
+            ]
             masks_by_trace[trace.id] = masks
             return masks
 

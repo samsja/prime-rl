@@ -18,13 +18,30 @@ f64 = np.concatenate(
         -(10.0 ** np.arange(-25, 25)),
     ]
 )
-f32 = np.concatenate([rng.standard_normal(2000).astype(np.float32) * np.float32(10.0) ** rng.integers(-20, 20, 2000).astype(np.float32), (10.0 ** np.arange(-20, 20)).astype(np.float32)])
-strings = ["plain", "é\u2028<\x7f", "a\nb\tc\x08\x0c\r\"\\ \x00 \x1b \x1f", "日本語", "emoji 🎉", "/slash"]
+f32 = np.concatenate(
+    [
+        rng.standard_normal(2000).astype(np.float32)
+        * np.float32(10.0) ** rng.integers(-20, 20, 2000).astype(np.float32),
+        (10.0 ** np.arange(-20, 20)).astype(np.float32),
+    ]
+)
+strings = ["plain", "é\u2028<\x7f", 'a\nb\tc\x08\x0c\r"\\ \x00 \x1b \x1f', "日本語", "emoji 🎉", "/slash"]
 ints = [0, 1, -1, 2**31, -(2**63), 2**63 - 1, 2**64 - 1]
 
 (OUT / "json_input.msgpack").write_bytes(
-    msgpack.packb({"f64": f64.tolist(), "f32": [float(x) for x in f32], "strings": strings, "ints": ints, "nested": {"a": [None, True, False, {"b": []}], "c": {}}}, use_bin_type=True)
+    msgpack.packb(
+        {
+            "f64": f64.tolist(),
+            "f32": [float(x) for x in f32],
+            "strings": strings,
+            "ints": ints,
+            "nested": {"a": [None, True, False, {"b": []}], "c": {}},
+        },
+        use_bin_type=True,
+    )
 )
 (OUT / "json_expected_f64.json").write_bytes(orjson.dumps(f64.tolist()))
 (OUT / "json_expected_f32.json").write_bytes(orjson.dumps(f32, option=orjson.OPT_SERIALIZE_NUMPY))
-(OUT / "json_expected_rest.json").write_bytes(orjson.dumps({"strings": strings, "ints": ints, "nested": {"a": [None, True, False, {"b": []}], "c": {}}}))
+(OUT / "json_expected_rest.json").write_bytes(
+    orjson.dumps({"strings": strings, "ints": ints, "nested": {"a": [None, True, False, {"b": []}], "c": {}}})
+)

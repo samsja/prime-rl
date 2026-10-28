@@ -27,19 +27,36 @@ def trace():
     if rng.random() < 0.9:
         t["id"] = rng.choice(["t" + str(rng.randint(0, 99)), ""])
     if rng.random() < 0.7:
-        t["rewards"] = {f"r{i}": rng.choice([{"score": num(), "weight": maybe(num)}, {"score": num()}, {"score": None}, None]) for i in range(rng.randint(0, 3))}
+        t["rewards"] = {
+            f"r{i}": rng.choice([{"score": num(), "weight": maybe(num)}, {"score": num()}, {"score": None}, None])
+            for i in range(rng.randint(0, 3))
+        }
     if rng.random() < 0.6:
         t["metrics"] = {f"m{i}": rng.choice([num(), None, "x"]) for i in range(rng.randint(0, 3))}
     if rng.random() < 0.7:
-        t["calls"] = [{"usage": rng.choice([{"cost": num()}, {}, None, {"cost": None}]), "finish_reason": rng.choice(["stop", "length", None]), **({"error": {"t": 1}} if rng.random() < 0.2 else {})} for _ in range(rng.randint(0, 3))]
+        t["calls"] = [
+            {
+                "usage": rng.choice([{"cost": num()}, {}, None, {"cost": None}]),
+                "finish_reason": rng.choice(["stop", "length", None]),
+                **({"error": {"t": 1}} if rng.random() < 0.2 else {}),
+            }
+            for _ in range(rng.randint(0, 3))
+        ]
     if rng.random() < 0.8:
         n = rng.randint(0, 4)
-        t["nodes"] = [{**({"parent": rng.randint(0, i - 1)} if i and rng.random() < 0.8 else {}), "sampled": rng.random() < 0.5} for i in range(n)]
+        t["nodes"] = [
+            {**({"parent": rng.randint(0, i - 1)} if i and rng.random() < 0.8 else {}), "sampled": rng.random() < 0.5}
+            for i in range(n)
+        ]
     if rng.random() < 0.7:
         timing = {"start": 100.0 + num()}
         for span in ["boot", "setup", "agent", "scoring"]:
             if rng.random() < 0.6:
-                timing[span] = {"start": num(), "end": num() + 5, **({"model": {"duration": num()}} if rng.random() < 0.3 else {})}
+                timing[span] = {
+                    "start": num(),
+                    "end": num() + 5,
+                    **({"model": {"duration": num()}} if rng.random() < 0.3 else {}),
+                }
         if rng.random() < 0.2:
             timing["duration"] = num()
         t["timing"] = timing

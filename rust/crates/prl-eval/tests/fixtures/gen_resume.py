@@ -1,3 +1,4 @@
+# Imports the removed Python orchestrator: run it from a checkout that still has it (e.g. the baseline worktree at 8acab25e4).
 """Generate prl-eval resume fixtures from the Python implementation.
 
 Run from the repo root: uv run --no-sync python rust/crates/prl-eval/tests/fixtures/gen_resume.py
@@ -60,7 +61,12 @@ def config_cases() -> list[dict]:
     )
     reordered = two.model_dump(mode="json")
     reordered["source"].reverse()
-    cases.append({"saved": two.model_dump(mode="json"), "current": EvalConfig.model_validate(reordered | {"resume": {}}).model_dump(mode="json")})
+    cases.append(
+        {
+            "saved": two.model_dump(mode="json"),
+            "current": EvalConfig.model_validate(reordered | {"resume": {}}).model_dump(mode="json"),
+        }
+    )
     for case in cases:
         tmp = Path(tempfile.mkdtemp())
         resume.stamp_config(tmp, case["saved"])
@@ -131,7 +137,9 @@ def validation_cases() -> None:
                 landed = None
             cases.append({"lines": [line.decode() for line in lines], "landed": landed})
             shutil.rmtree(tmp)
-    (OUT / "resume_validation_cases.json").write_text(json.dumps({"config": config.model_dump(mode="json"), "cases": cases}, indent=1))
+    (OUT / "resume_validation_cases.json").write_text(
+        json.dumps({"config": config.model_dump(mode="json"), "cases": cases}, indent=1)
+    )
 
 
 record_ = record

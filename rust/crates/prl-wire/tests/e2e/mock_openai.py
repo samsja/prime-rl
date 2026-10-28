@@ -17,8 +17,12 @@ class Handler(BaseHTTPRequestHandler):
         base = {"id": "cmpl-1", "created": int(time.time()), "model": body.get("model", "m")}
         if not body.get("stream"):
             message = {"role": "assistant", "content": CONTENT}
-            reply = {**base, "object": "chat.completion", "usage": USAGE,
-                     "choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}
+            reply = {
+                **base,
+                "object": "chat.completion",
+                "usage": USAGE,
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            }
             data = json.dumps(reply).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -28,7 +32,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         chunk = {**base, "object": "chat.completion.chunk"}
         events = [
-            {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": CONTENT[:10]}, "finish_reason": None}]},
+            {
+                **chunk,
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant", "content": CONTENT[:10]}, "finish_reason": None}
+                ],
+            },
             {**chunk, "choices": [{"index": 0, "delta": {"content": CONTENT[10:]}, "finish_reason": None}]},
             {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
             {**chunk, "choices": [], "usage": USAGE},

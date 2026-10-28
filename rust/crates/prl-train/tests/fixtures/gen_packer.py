@@ -1,3 +1,4 @@
+# Imports the removed Python orchestrator: run it from a checkout that still has it (e.g. the baseline worktree at 8acab25e4).
 """Generate prl-train packer/encoder fixtures: random TrainingSamples, the Python packer's
 per-rank encoded bytes. Run: uv run --no-sync python rust/crates/prl-train/tests/fixtures/gen_packer.py"""
 
@@ -134,7 +135,9 @@ def main():
         cost = ["sum", "flop", "big"][case % 3]
         samples = [random_sample(rng, seq_len, case) for _ in range(int(rng.integers(1, 20)))]
         inputs = [to_json(s) for s in samples]
-        grid = prepare_batch(samples, seq_len=seq_len, num_train_workers=workers, bin_cost=COSTS[cost], pad_to_multiple_of=pad)
+        grid = prepare_batch(
+            samples, seq_len=seq_len, num_train_workers=workers, bin_cost=COSTS[cost], pad_to_multiple_of=pad
+        )
         cases.append(
             {
                 "seq_len": seq_len,

@@ -1,4 +1,3 @@
-
 """Generate the record schema of `verifiers.v1.WireEpisode` for prl-wire.
 
 Walks the pydantic models a `WireEpisode` is made of and writes, per model, its fields
@@ -109,9 +108,7 @@ def describe_model(cls: type[BaseModel]) -> dict:
     # A plain field serializer returns a plain value (dict, list, ...), which a dump
     # writes as-is: no `exclude_none` inside it.
     serialized = {
-        name
-        for decorator in cls.__pydantic_decorators__.field_serializers.values()
-        for name in decorator.info.fields
+        name for decorator in cls.__pydantic_decorators__.field_serializers.values() for name in decorator.info.fields
     }
     fields = []
     for name, field in cls.model_fields.items():
