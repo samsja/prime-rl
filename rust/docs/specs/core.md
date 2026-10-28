@@ -133,7 +133,7 @@ Every component is an actor (one tokio task owning its state; `mpsc` inbox; requ
 | `orchestrator` | `Orchestrator` | `run(config, bridge, wandb, nixl, shutdown)`: setup order and log lines of 1.1, `start` (spawn, drain barrier, final broadcast, final ckpt, finalize), bounded teardown (`SHUTDOWN_TIMEOUT` = 300 s, `process::exit(0/1)` on expiry). `shutdown` (cancelled by prl-py on SIGINT) = the main task being cancelled. |
 | `dispatcher` | `Dispatcher` | Actor. Owns groups, in-flight episodes (a `JoinSet` of env runs), permits, admission window, rate limiter, mode, `EvalSource`. Train tasks come from the `TrainSource` actor. Results go to per-kind outboxes drained into bounded sink channels inside the select loop. |
 | `train_source`, `curriculum` | `TrainSource`, `curriculum/*` | `TrainSource` is pure + an actor wrapper (`TrainSourceHandle`: `next_task`, `on_result`, `metrics`, `state`). CPython-exact `random.Random` via `prl_io::ckpt::PyRandom`; state types are prl-io's `TrainSourceState` (torch.save-compatible). |
-| `train_pipeline` | `main_loop` train branch, `handle_train_result`, `finalize_train_batch`, `start_draining`, `apply_control`, `maybe_save_ckpt` | Actor wrapping `prl_train::TrainSink`; writer of `progress_step`; ship flow inline (serial with ingestion, as in Python); control submissions applied while a send blocks. |
+| `train_pipeline` | `main_loop` train branch, `handle_train_result`, `finalize_train_batch`, `start_draining`, `apply_control`, `maybe_save_ckpt` | Actor wrapping `prl_train::TrainSink`; writer of `progress_step`. Pack + send run in a ship task; results arriving meanwhile are ingested with `progress.step + 1` (the window Python consumed them in after the send) and completed batches queue; post-send work runs in order when the send completes. |
 | `eval_pipeline` | `main_loop` eval branch, `trigger_eval`, `finalize_eval_batch` | Actor; the watcher's first update hook. |
 | `eval_source`, `eval_sink` | `EvalSource`, `EvalSink` | Pure; generic over the episode type (shared with prl-eval). |
 | `watcher` | `WeightWatcher` | Actor; writer of `policy`; `PolicyReceiver` trait implemented over `prl_io::weights::WeightReceiver`. Gauges published on a `watch`. |
@@ -151,8 +151,9 @@ Ordering and semantics notes:
   `policy` watch -> hooks in order: eval pipeline (`trigger_eval`, may switch to PREFER_EVAL) ->
   dispatcher `version_applied`. So nothing is scheduled on a new policy before an eval trigger
   switched the mode (Python got the same result by running both synchronously).
-- **Eval runs in its own actor**: eval episodes are consumed while a train send blocks (Python
-  stalled them behind the send). Same records and metrics; only timing differs.
+- **No stall behind a send**: train results (stamped with the next step) and eval results keep being
+  consumed while a batch is sent; Python stopped consuming until the send returned, so its bounded
+  `out_q` backpressured the dispatcher. Same records and metrics; only timing differs.
 - **Drain**: the train pipeline calls `dispatcher.drain()` (disable train, cancel train groups and
   in-flight train episodes, return the markers directly). The dispatcher sets `idle` once draining
   with nothing in flight, no eval work and empty outboxes; the supervisor then stops the
