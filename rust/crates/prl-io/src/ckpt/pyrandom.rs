@@ -17,7 +17,7 @@ pub struct PyRandomState {
 }
 
 impl PyRandomState {
-    pub fn to_py(&self) -> PyValue {
+    pub(crate) fn to_py(&self) -> PyValue {
         let mut words: Vec<PyValue> = self.key.iter().map(|&w| PyValue::Int(w as i64)).collect();
         words.push(PyValue::Int(self.pos as i64));
         PyValue::Tuple(vec![
@@ -27,7 +27,7 @@ impl PyRandomState {
         ])
     }
 
-    pub fn from_py(value: &PyValue) -> Result<Self> {
+    pub(crate) fn from_py(value: &PyValue) -> Result<Self> {
         let parts = value.as_tuple()?;
         ensure!(parts.len() == 3, "random state must be a 3-tuple");
         let version = parts[0].as_int()?;
@@ -59,12 +59,6 @@ impl PyRandom {
     /// `random.Random(seed)` for a non-negative int seed (`init_by_array` over its 32-bit words).
     pub fn new(seed: u64) -> Self {
         let key: Vec<u32> = if seed >> 32 == 0 { vec![seed as u32] } else { vec![seed as u32, (seed >> 32) as u32] };
-        Self::from_key(&key)
-    }
-
-    /// `random.Random()` (seeded from OS entropy).
-    pub fn new_from_entropy() -> Self {
-        let key: Vec<u32> = (0..N).map(|_| rand::random::<u32>()).collect();
         Self::from_key(&key)
     }
 
@@ -174,11 +168,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seed_42_matches_cpython() {
-        // python: r = random.Random(42); [r.random() for _ in range(3)]
+    fn matches_cpython() {
+        // r = random.Random(42); [r.random() for _ in range(3)]
         let mut rng = PyRandom::new(42);
-        assert_eq!(rng.random(), 0.6394267984578837);
-        assert_eq!(rng.random(), 0.025010755222666936);
-        assert_eq!(rng.random(), 0.27502931836911926);
+        assert_eq!([rng.random(), rng.random(), rng.random()], [0.6394267984578837, 0.025010755222666936, 0.27502931836911926]);
+        // r = random.Random(42); [r.choices(range(4), weights=[1.0, 0.0, 2.5, 0.5])[0] for _ in range(10)]
+        let mut rng = PyRandom::new(42);
+        let picks: Vec<usize> = (0..10).map(|_| rng.choices_index(&[1.0, 0.0, 2.5, 0.5]).unwrap()).collect();
+        assert_eq!(picks, [2, 0, 2, 0, 2, 2, 3, 0, 2, 0]);
+        // A seed wider than 32 bits: random.Random(2**40 + 7).random()
+        assert_eq!(PyRandom::new((1 << 40) + 7).random(), 0.6137037779936511);
+        assert!(PyRandom::new(1).choices_index(&[0.0, 0.0]).is_err());
     }
 }

@@ -1,10 +1,10 @@
 //! Orchestrator checkpoints (`orchestrator/ckpt.py`): `<output_dir>/checkpoints/step_N/orchestrator/progress.pt`,
 //! written in `torch.save`'s zip format so Python and Rust runs resume each other.
 
-pub mod pickle;
-pub mod pyrandom;
-pub mod torchzip;
+mod pickle;
+mod pyrandom;
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -75,19 +75,18 @@ fn expect_fields(value: &PyValue, expected: &[&str], what: &str) -> Result<()> {
 }
 
 impl OrchestratorState {
-    pub fn to_py(&self) -> PyValue {
+    fn to_py(&self) -> PyValue {
         let p = &self.progress;
         let progress = PyValue::Object {
             module: PROGRESS_MODULE.into(),
             name: PROGRESS_CLASS.into(),
-            args: Vec::new(),
-            state: Some(Box::new(PyValue::dict([
+            state: Box::new(PyValue::dict([
                 ("step", PyValue::Int(p.step as i64)),
                 ("total_tokens", PyValue::Int(p.total_tokens as i64)),
                 ("total_samples", PyValue::Int(p.total_samples as i64)),
                 ("total_problems", PyValue::Int(p.total_problems as i64)),
                 ("rollout_window", PyValue::Int(p.rollout_window as i64)),
-            ]))),
+            ])),
         };
         let envs = self.train_source.envs.iter().map(|(name, curriculum)| {
             let sampler = match &curriculum.sampler {
@@ -112,10 +111,9 @@ impl OrchestratorState {
         ])
     }
 
-    pub fn from_py(value: &PyValue) -> Result<Self> {
-        let progress = match value.get("progress")? {
-            PyValue::Object { state: Some(state), .. } => state,
-            other => bail!("checkpoint progress must be a Progress object, got {}", other.type_name()),
+    fn from_py(value: &PyValue) -> Result<Self> {
+        let PyValue::Object { state: progress, .. } = value.get("progress")? else {
+            bail!("checkpoint progress must be a Progress object");
         };
         let mut p = Progress::default();
         for (key, field) in progress.as_dict()? {
@@ -165,11 +163,10 @@ impl OrchestratorState {
     }
 }
 
-/// Saves and loads orchestrator checkpoints. Always exists: `resume` decides whether it loads,
-/// `ckpt` whether it saves.
+/// Saves and loads orchestrator checkpoints.
 #[derive(Debug, Clone)]
 pub struct CheckpointManager {
-    pub ckpt_dir: PathBuf,
+    ckpt_dir: PathBuf,
 }
 
 impl CheckpointManager {
@@ -177,7 +174,7 @@ impl CheckpointManager {
         Self { ckpt_dir: ckpt_dir(output_dir) }
     }
 
-    pub fn ckpt_path(&self, step: u64) -> PathBuf {
+    fn ckpt_path(&self, step: u64) -> PathBuf {
         step_path(&self.ckpt_dir, step).join("orchestrator")
     }
 
@@ -187,7 +184,7 @@ impl CheckpointManager {
         std::fs::create_dir_all(&ckpt_path)?;
         let start = Instant::now();
         let tmp = ckpt_path.join(format!("progress.pt.{}.tmp", uuid::Uuid::new_v4().simple()));
-        let written = torchzip::write(&tmp, &pickle::dumps(&state.to_py()))
+        let written = write_torch_zip(&tmp, &pickle::dumps(&state.to_py()))
             .and_then(|()| std::fs::rename(&tmp, ckpt_path.join("progress.pt")).map_err(Into::into));
         if let Err(error) = written {
             let _ = std::fs::remove_file(&tmp);
@@ -211,7 +208,7 @@ impl CheckpointManager {
         }
         tracing::debug!("Loading checkpoint from {}", state_file.display());
         let start = Instant::now();
-        let data = torchzip::read(&state_file)?;
+        let data = read_torch_zip(&state_file)?;
         let state = OrchestratorState::from_py(&pickle::loads(&data)?)
             .with_context(|| format!("invalid orchestrator checkpoint {}", state_file.display()))?;
         for name in state.train_source.envs.keys() {
@@ -220,4 +217,42 @@ impl CheckpointManager {
         tracing::debug!("Orchestrator checkpoint loaded in {}", format_time(start.elapsed().as_secs_f64()));
         Ok(state)
     }
+}
+
+/// Lay `pickle` out as `torch.save(obj, f)` does (no tensors): stored, 64-byte aligned entries
+/// under `archive/`.
+fn write_torch_zip(path: &Path, pickle: &[u8]) -> Result<()> {
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(path)?);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .with_alignment(64);
+    let serialization_id = format!("{:020}{:020}", rand::random::<u64>() % 10u64.pow(19), rand::random::<u64>() % 10u64.pow(19));
+    let records: [(&str, &[u8]); 6] = [
+        ("data.pkl", pickle),
+        (".format_version", b"1"),
+        (".storage_alignment", b"64"),
+        ("byteorder", b"little"),
+        ("version", b"3\n"),
+        (".data/serialization_id", serialization_id.as_bytes()),
+    ];
+    for (name, data) in records {
+        zip.start_file(format!("archive/{name}"), options)?;
+        zip.write_all(data)?;
+    }
+    zip.finish()?;
+    Ok(())
+}
+
+/// The `data.pkl` record of a `torch.save` zip (any archive prefix).
+fn read_torch_zip(path: &Path) -> Result<Vec<u8>> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)
+        .with_context(|| format!("{} is not a torch zip checkpoint", path.display()))?;
+    let name = zip
+        .file_names()
+        .find(|name| name.ends_with("/data.pkl"))
+        .map(str::to_owned)
+        .with_context(|| format!("{} has no data.pkl record", path.display()))?;
+    let mut data = Vec::new();
+    zip.by_name(&name)?.read_to_end(&mut data)?;
+    Ok(data)
 }

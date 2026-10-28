@@ -1,6 +1,5 @@
 //! Inference clients and admin plane, inference metrics, weight receivers, run control,
 //! heartbeat, orchestrator checkpoints, gc gauges and loguru-compatible logging.
-//! See `rust/docs/specs/io.md`.
 
 pub mod ckpt;
 pub mod clients;
