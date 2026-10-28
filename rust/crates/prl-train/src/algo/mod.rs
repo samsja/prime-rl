@@ -15,11 +15,9 @@ use prl_config::{ActionLossType, AlgoConfig, AlgoParams, FrozenModelConfig};
 use prl_types::{Bridge, Scorer};
 use prl_wire::Episode;
 
-pub use distill::{format_template, OpdAlgorithm, OpsdAlgorithm};
-pub use grpo::{
-    DebugAlgorithm, EchoAlgorithm, GrpoAlgorithm, HierarchicalGrpoAlgorithm, MaxRlAlgorithm, RaeAlgorithm, SftAlgorithm,
-};
-pub use routing::{assign_advantages, assign_reference_logprobs, is_trainable, scalar_advantage, stamp_loss_routing, Advantages};
+use distill::{OpdAlgorithm, OpsdAlgorithm};
+use grpo::{DebugAlgorithm, EchoAlgorithm, GrpoAlgorithm, HierarchicalGrpoAlgorithm, MaxRlAlgorithm, RaeAlgorithm, SftAlgorithm};
+pub use routing::{is_trainable, scalar_advantage, stamp_loss_routing};
 
 /// `(episode index, trace index)` of every clean, kept, trainable trace with sampled tokens.
 pub fn iter_trainable_traces(episodes: &[Episode]) -> Vec<(usize, usize)> {
@@ -83,11 +81,16 @@ pub struct AlgorithmDeps {
 pub fn build_algorithm(config: &AlgoConfig, deps: &AlgorithmDeps) -> Result<Box<dyn Algorithm>> {
     let action_loss_type = config.action_loss_type;
     Ok(match &config.params {
-        AlgoParams::Grpo(c) => Box::new(GrpoAlgorithm::new(action_loss_type, c.length_penalty.clone(), c.length_weighted_baseline, c.loss_aggregation)),
+        AlgoParams::Grpo(c) => Box::new(GrpoAlgorithm {
+            action_loss_type,
+            length_penalty: c.length_penalty.clone(),
+            length_weighted_baseline: c.length_weighted_baseline,
+            loss_aggregation: c.loss_aggregation,
+        }),
         AlgoParams::Echo(c) => Box::new(EchoAlgorithm::new(action_loss_type, c, deps.bridge.clone())?),
         AlgoParams::MaxRl => Box::new(MaxRlAlgorithm { action_loss_type }),
-        AlgoParams::Rae(c) => Box::new(RaeAlgorithm::new(action_loss_type, c.decay)),
-        AlgoParams::HierarchicalGrpo(c) => Box::new(HierarchicalGrpoAlgorithm::new(action_loss_type, &c.episode_agents)),
+        AlgoParams::Rae(c) => Box::new(RaeAlgorithm { action_loss_type, decay: c.decay, baselines: Default::default() }),
+        AlgoParams::HierarchicalGrpo(c) => Box::new(HierarchicalGrpoAlgorithm { action_loss_type, episode_agents: c.episode_agents.iter().cloned().collect() }),
         AlgoParams::Opd(c) => Box::new(OpdAlgorithm::new(action_loss_type, c.teacher.clone(), deps.connect_frozen.clone())),
         AlgoParams::Opsd(c) => Box::new(OpsdAlgorithm::new(action_loss_type, c, deps)?),
         AlgoParams::Sft => Box::new(SftAlgorithm { action_loss_type }),

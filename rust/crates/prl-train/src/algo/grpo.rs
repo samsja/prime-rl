@@ -62,22 +62,13 @@ fn max_clamp1(values: &[f32]) -> f32 {
 /// Group Relative Policy Optimization: credit = reward minus the group mean (optionally
 /// length-shaped); action tokens feed the `rl` loss.
 pub struct GrpoAlgorithm {
-    action_loss_type: ActionLossType,
-    length_penalty: Option<LengthPenaltyConfig>,
-    length_weighted_baseline: bool,
-    loss_aggregation: LossAggregation,
+    pub(super) action_loss_type: ActionLossType,
+    pub(super) length_penalty: Option<LengthPenaltyConfig>,
+    pub(super) length_weighted_baseline: bool,
+    pub(super) loss_aggregation: LossAggregation,
 }
 
 impl GrpoAlgorithm {
-    pub fn new(
-        action_loss_type: ActionLossType,
-        length_penalty: Option<LengthPenaltyConfig>,
-        length_weighted_baseline: bool,
-        loss_aggregation: LossAggregation,
-    ) -> Self {
-        Self { action_loss_type, length_penalty, length_weighted_baseline, loss_aggregation }
-    }
-
     fn score(&self, episodes: &mut [Episode]) -> Result<()> {
         let ids = iter_trainable_traces(episodes);
         let traces: Vec<&Trace> = ids.iter().map(|&(e, t)| &episodes[e].traces[t]).collect();
@@ -190,7 +181,12 @@ impl EchoAlgorithm {
             }
         };
         Ok(Self {
-            grpo: GrpoAlgorithm::new(action_loss_type, config.length_penalty.clone(), config.length_weighted_baseline, config.loss_aggregation),
+            grpo: GrpoAlgorithm {
+                action_loss_type,
+                length_penalty: config.length_penalty.clone(),
+                length_weighted_baseline: config.length_weighted_baseline,
+                loss_aggregation: config.loss_aggregation,
+            },
             role_weights,
             filter,
         })
@@ -319,15 +315,9 @@ impl Algorithm for MaxRlAlgorithm {
 
 /// RAE: reward minus a per-agent EMA baseline, scored before the baseline update.
 pub struct RaeAlgorithm {
-    action_loss_type: ActionLossType,
-    decay: f64,
-    baselines: HashMap<String, f64>,
-}
-
-impl RaeAlgorithm {
-    pub fn new(action_loss_type: ActionLossType, decay: f64) -> Self {
-        Self { action_loss_type, decay, baselines: HashMap::new() }
-    }
+    pub(super) action_loss_type: ActionLossType,
+    pub(super) decay: f64,
+    pub(super) baselines: HashMap<String, f64>,
 }
 
 #[async_trait]
@@ -350,14 +340,8 @@ impl Algorithm for RaeAlgorithm {
 
 /// GRPO for proposer-solver envs: episode-scoped peers for `episode_agents`, group-scoped otherwise.
 pub struct HierarchicalGrpoAlgorithm {
-    action_loss_type: ActionLossType,
-    episode_agents: HashSet<String>,
-}
-
-impl HierarchicalGrpoAlgorithm {
-    pub fn new(action_loss_type: ActionLossType, episode_agents: &[String]) -> Self {
-        Self { action_loss_type, episode_agents: episode_agents.iter().cloned().collect() }
-    }
+    pub(super) action_loss_type: ActionLossType,
+    pub(super) episode_agents: HashSet<String>,
 }
 
 #[async_trait]

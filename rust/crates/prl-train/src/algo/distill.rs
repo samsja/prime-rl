@@ -31,12 +31,6 @@ impl OpdAlgorithm {
     pub fn new(action_loss_type: ActionLossType, teacher: FrozenModelConfig, connect_frozen: ConnectFrozen) -> Self {
         Self { action_loss_type, teacher, connect_frozen, teacher_client: None }
     }
-
-    /// Score with an already-connected teacher (tests, shared pools).
-    pub fn with_teacher(action_loss_type: ActionLossType, teacher: FrozenModelConfig, client: Arc<dyn Scorer>) -> Self {
-        let connect_frozen: ConnectFrozen = Arc::new(|_| Box::pin(async { Err(anyhow!("teacher already connected")) }));
-        Self { action_loss_type, teacher, connect_frozen, teacher_client: Some(client) }
-    }
 }
 
 #[async_trait]
@@ -119,7 +113,7 @@ fn python_str(value: &Value) -> String {
 }
 
 /// `template.format(demonstration=...)`: `{demonstration}` substituted, `{{`/`}}` unescaped.
-pub fn format_template(template: &str, demonstration: &str) -> Result<String> {
+fn format_template(template: &str, demonstration: &str) -> Result<String> {
     let mut out = String::with_capacity(template.len() + demonstration.len());
     let mut rest = template;
     while let Some(i) = rest.find(['{', '}']) {
@@ -165,5 +159,14 @@ impl Algorithm for OpsdAlgorithm {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn template_formats_like_str_format() {
+        assert_eq!(super::format_template("A {demonstration} {{x}} }}", "d").unwrap(), "A d {x} }");
+        assert!(super::format_template("{other}", "d").is_err());
     }
 }

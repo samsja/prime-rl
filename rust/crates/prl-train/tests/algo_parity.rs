@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use prl_config::*;
-use prl_train::algo::{build_algorithm, format_template, stamp_loss_routing, AlgorithmDeps};
+use prl_train::algo::{build_algorithm, stamp_loss_routing, AlgorithmDeps};
 use prl_train::sink::{has_loss, prune_zero_advantages};
 use prl_train::TrainingSample;
 use prl_types::{Bridge, Kind, LoadedTasks, Scorer, TaskRecord};
@@ -164,12 +164,6 @@ async fn opd_opsd_echo_match_python() {
         echo.score_group(&mut eps).await.unwrap();
         check_episodes(&format!("case {i} echo"), &eps, &case["echo"]);
     }
-}
-
-#[test]
-fn opsd_template_formats_like_str_format() {
-    assert_eq!(format_template("A {demonstration} {{x}} }}", "d").unwrap(), "A d {x} }");
-    assert!(format_template("{other}", "d").is_err());
 }
 
 fn sample(ce: Option<Vec<f32>>, rl: Option<Vec<f32>>) -> TrainingSample {
