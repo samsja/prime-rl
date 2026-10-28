@@ -62,6 +62,7 @@ mod tests {
     /// The Rust wrapper drives a Python receiver bridge with the right methods and arguments.
     #[tokio::test]
     async fn drives_python_bridge() {
+        crate::init_test_python();
         let (bridge, calls) = Python::with_gil(|py| {
             let code = CString::new(
                 r#"
@@ -96,6 +97,7 @@ bridge = Bridge()
             eprintln!("skipped: set PRL_NIXL_LIVE=1");
             return;
         }
+        crate::init_test_python();
         let (bridge, trainer) = Python::with_gil(|py| {
             let code = CString::new(
                 r#"

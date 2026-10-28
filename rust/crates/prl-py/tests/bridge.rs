@@ -51,12 +51,7 @@ class FakeBridge:
 "#;
 
 fn fake_bridge_object(wandb: bool) -> Py<PyAny> {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        // SAFETY: set once, before the interpreter starts and before other threads read the env.
-        unsafe { std::env::set_var("PYTHONHOME", env!("PRL_TEST_PYTHONHOME")) };
-        pyo3::prepare_freethreaded_python();
-    });
+    prime_rl_orch_rs::init_test_python();
     Python::with_gil(|py| {
         let code = CString::new(FAKE_BRIDGE).unwrap();
         let module = PyModule::from_code(py, &code, c"fake_bridge.py", c"fake_bridge").unwrap();
