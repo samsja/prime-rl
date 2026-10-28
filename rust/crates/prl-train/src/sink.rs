@@ -1,8 +1,8 @@
 //! Training-side group finalization, scalar accounting and batch assembly (`train_sink.py`).
 //!
 //! `add` takes one completed episode, `fail` a request that produced no episode, and `cancel` a
-//! dropped group's `GroupCancellation`. Before every readiness check the sink sweeps the queued
-//! traces for tokens past `max_staleness` — this sweep is what guarantees no stale token trains.
+//! dropped group's `GroupCancellation`; `take_batch` cuts a batch. Before every readiness check it
+//! sweeps the queued traces for tokens past `max_staleness` — this sweep is what guarantees no stale token trains.
 //! The consumer drains `take_rollout_window` before shipping a batch.
 
 use std::collections::{HashMap, HashSet};
@@ -177,8 +177,9 @@ impl TrainSink {
         counts
     }
 
-    /// Process one completed episode; returns a batch when ready.
-    pub async fn add(&mut self, mut episode: Episode, step: u64, admission: &mut dyn Admission) -> Result<Option<TrainBatch>> {
+    /// Process one completed episode. Batches are cut by `take_batch` (Python's `add` is this plus
+    /// `take_batch`).
+    pub async fn add(&mut self, mut episode: Episode, step: u64, admission: &mut dyn Admission) -> Result<()> {
         let env_name = episode_env_name(&episode)?.to_owned();
         let group_id = episode_group_id(&episode)?.to_owned();
         let env = self.envs.get_mut(&env_name).ok_or_else(|| anyhow!("unknown train env {env_name:?}"))?;
@@ -188,14 +189,14 @@ impl TrainSink {
     }
 
     /// A dropped group's terminal marker; a `shutdown` drop voids the group's arrived episodes.
-    pub async fn cancel(&mut self, cancellation: GroupCancellation, step: u64, admission: &mut dyn Admission) -> Result<Option<TrainBatch>> {
+    pub async fn cancel(&mut self, cancellation: GroupCancellation, step: u64, admission: &mut dyn Admission) -> Result<()> {
         let (group_id, env_name) = (cancellation.group_id.clone(), cancellation.env_name.clone());
         self.pending_group_cancellations.insert(group_id.clone(), cancellation);
         self.finish_if_complete(&group_id, &env_name, step, admission).await
     }
 
     /// Count a request failure toward its group without presenting it as an episode.
-    pub async fn fail(&mut self, failure: DispatchFailure, step: u64, admission: &mut dyn Admission) -> Result<Option<TrainBatch>> {
+    pub async fn fail(&mut self, failure: DispatchFailure, step: u64, admission: &mut dyn Admission) -> Result<()> {
         if failure.kind != Kind::Train {
             bail!("TrainSink cannot process a {} dispatch failure", failure.kind);
         }
@@ -204,17 +205,15 @@ impl TrainSink {
         self.finish_if_complete(&group_id, &env_name, step, admission).await
     }
 
-    /// Once arrivals + failures + cancelled cover the env's group size, finalize the group and
-    /// try to cut a batch.
-    async fn finish_if_complete(&mut self, group_id: &str, env_name: &str, step: u64, admission: &mut dyn Admission) -> Result<Option<TrainBatch>> {
+    /// Once arrivals + failures + cancelled cover the env's group size, finalize the group.
+    async fn finish_if_complete(&mut self, group_id: &str, env_name: &str, step: u64, admission: &mut dyn Admission) -> Result<()> {
         let cancelled = self.pending_group_cancellations.get(group_id).map_or(0, |c| c.count);
         let failed = self.pending_group_failures.get(group_id).map_or(0, Vec::len);
         let arrived = self.pending_groups.get(group_id).map_or(0, Vec::len);
         if arrived + failed + cancelled < self.env(env_name)?.group_size {
-            return Ok(None);
+            return Ok(());
         }
-        self.process_group(group_id, step, admission).await?;
-        self.take_batch(step).await
+        self.process_group(group_id, step, admission).await
     }
 
     /// Sweep stale queued traces, then cut a batch if the survivors still meet the threshold.

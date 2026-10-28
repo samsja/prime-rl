@@ -359,7 +359,8 @@ async fn partially_stale_trace_ships_fresh_tokens() {
         WeightVersionSpan { version: "default".into(), start: 0, end: 1 },
         WeightVersionSpan { version: "3".into(), start: 1, end: 2 },
     ]);
-    let batch = s.add(episode("g", vec![t], 1), 4, &mut AdmitAll).await.unwrap().unwrap();
+    s.add(episode("g", vec![t], 1), 4, &mut AdmitAll).await.unwrap();
+    let batch = s.take_batch(4).await.unwrap().unwrap();
     assert_eq!(batch.samples[0].mask, [false, false, false, true]);
     // Batch 4 trains on v3; the unlabelled token took the dispatch version v1.
     assert_eq!(batch.samples[0].staleness, Some(vec![-1, -1, 2, 0]));
@@ -384,7 +385,8 @@ async fn discarded_siblings_are_counted_and_their_payloads_freed() {
     let failed = Trace { ok: false, errors: vec![Error { type_: "ProviderError".into(), message: "x".into(), status_code: None, traceback: None }], ..trace("failed", Some(1.0), 1.0) };
     let untrainable = { let mut t = trace("judge", Some(1.0), 1.0); t.agent.trainable = false; t };
     let ep = episode("g", vec![trace("kept", Some(1.0), 1.0), zero, failed, untrainable], 0);
-    assert!(s.add(ep, 1, &mut AdmitAll).await.unwrap().is_none());
+    s.add(ep, 1, &mut AdmitAll).await.unwrap();
+    assert!(s.take_batch(1).await.unwrap().is_none());
     assert_eq!(s.batch_progress(), (1, 100));
     assert_eq!(*released.lock().unwrap(), ["http://env:9/zero-0"]);
     let window = s.take_rollout_window().unwrap();
@@ -409,7 +411,8 @@ async fn stale_queue_drops_traces_without_recounting_arrivals() {
 async fn deferred_pruning_keeps_episode_boundaries() {
     let mut s = sink(2, false, Arc::default());
     let traces = vec![trace("zero", Some(0.0), 0.0), trace("kept", Some(1.0), 1.0), trace("sibling", Some(1.0), 1.0), trace("another", Some(1.0), 1.0)];
-    let batch = s.add(episode("g", traces, 0), 1, &mut AdmitAll).await.unwrap().unwrap();
+    s.add(episode("g", traces, 0), 1, &mut AdmitAll).await.unwrap();
+    let batch = s.take_batch(1).await.unwrap().unwrap();
     assert_eq!(batch.samples.iter().map(|s| s.trace_id.clone().unwrap()).collect::<Vec<_>>(), ["kept"]);
     assert_eq!((batch.cohort.len(), batch.cohort.num_traces()), (1, 1));
     let batch = s.take_batch(2).await.unwrap().unwrap();
@@ -433,7 +436,8 @@ async fn failures_and_cancellations_accumulate() {
             task_hash: "h".into(),
             error: ErrorInfo { type_: "TransportError".into(), message: "boom".into(), traceback: None, status_code: None },
         };
-        assert!(s.fail(failure, 1, &mut AdmitAll).await.unwrap().is_none());
+        s.fail(failure, 1, &mut AdmitAll).await.unwrap();
+        assert!(s.take_batch(1).await.unwrap().is_none());
     }
     for i in 0..4 {
         let cancellation = GroupCancellation { kind: Kind::Train, env_name: "test".into(), group_id: format!("c{i}"), step: 1, count: 1, reason: CancelReason::Overload };
