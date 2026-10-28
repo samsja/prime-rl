@@ -122,59 +122,49 @@ Poll every 0.1 s: `next = receiver.next_version(ckpt_step)` (newest published, v
 - `src/prime_rl/orchestrator/rust.py` (new PyBridge) imports `orchestrator.utils.intercept_vf_logging`.
 - `transports/weights/*`, `inference/dynamo.py`: `orchestrator.clients` (io's area).
 
-## 2. Rust design (prl-core)
+## 2. Rust design (prl-core) — as implemented
 
-Every component is an actor (one tokio task owning its state, inbox `mpsc`, request/response via `oneshot`).
-Shared values are `watch` channels with one writer. The supervisor owns a `CancellationToken` + `JoinSet`;
-any actor error cancels the tree and is returned from `run`.
+Every component is an actor (one tokio task owning its state; `mpsc` inbox; request/response via
+`oneshot`). Shared values are `watch` channels with one writer. The supervisor owns a
+`CancellationToken` and a `JoinSet` of named components; any early exit fails the run.
 
-```
-                 policy: watch<Policy> (Watcher)      progress_step: watch<u64> (TrainPipeline)
-                          \                          /
-                           GateActor -> dispatch_gate: watch<bool>
-TrainSource actor <-next_task/on_result-> Dispatcher <- concurrency_limit: watch<usize> (Concurrency actor)
-                                             |  \-- record_episode / inflight watch --> Concurrency actor
-             DispatchResult (train) ---------+------- DispatchResult (eval)
-                    v                                       v
-            TrainPipeline actor                        EvalPipeline actor  <-- PolicyApplied (Watcher, awaited)
-  (TrainSink + ship flow + ckpt + control)    (EvalSink + trigger_eval + finalize_eval_batch)
-                    \_____________ Monitors (single ordered consumer) ___________/
-PeriodicLogger --(oneshot gauges)--> Dispatcher, Watcher, TrainPipeline, EvalPipeline, Concurrency, LagMonitor, GC
-InferenceMetricsCollector (io) --Vec<EngineLoadSample>--> Concurrency actor --Overload(n)--> Dispatcher
-```
+| Module | Python | Notes |
+|---|---|---|
+| `orchestrator` | `Orchestrator` | `run(config, bridge, wandb, nixl, shutdown)`: setup order and log lines of 1.1, `start` (spawn, drain barrier, final broadcast, final ckpt, finalize), bounded teardown (`SHUTDOWN_TIMEOUT` = 300 s, `process::exit(0/1)` on expiry). `shutdown` (cancelled by prl-py on SIGINT) = the main task being cancelled. |
+| `dispatcher` | `Dispatcher` | Actor. Owns groups, in-flight episodes (a `JoinSet` of env runs), permits, admission window, rate limiter, mode, `EvalSource`. Train tasks come from the `TrainSource` actor. Results go to per-kind outboxes drained into bounded sink channels inside the select loop. |
+| `train_source`, `curriculum` | `TrainSource`, `curriculum/*` | `TrainSource` is pure + an actor wrapper (`TrainSourceHandle`: `next_task`, `on_result`, `metrics`, `state`). CPython-exact `random.Random` via `prl_io::ckpt::PyRandom`; state types are prl-io's `TrainSourceState` (torch.save-compatible). |
+| `train_pipeline` | `main_loop` train branch, `handle_train_result`, `finalize_train_batch`, `start_draining`, `apply_control`, `maybe_save_ckpt` | Actor wrapping `prl_train::TrainSink`; writer of `progress_step`; ship flow inline (serial with ingestion, as in Python); control submissions applied while a send blocks. |
+| `eval_pipeline` | `main_loop` eval branch, `trigger_eval`, `finalize_eval_batch` | Actor; the watcher's first update hook. |
+| `eval_source`, `eval_sink` | `EvalSource`, `EvalSink` | Pure; generic over the episode type (shared with prl-eval). |
+| `watcher` | `WeightWatcher` | Actor; writer of `policy`; `PolicyReceiver` trait implemented over `prl_io::weights::WeightReceiver`. Gauges published on a `watch`. |
+| `concurrency` | `ConcurrencyController` | Pure state machine returning `Action`s + actor (`ConcurrencyHandle`: `record_episode`, `get`, `set_target`, `gauges`); writer of `limit`. |
+| `envs` | `Env`, `Envs` | `start_env` (address files, health, taskset via bridge), `ReplicaRouter` (least-loaded routing) implementing the dispatcher's `EnvRunner`. |
+| `live`, `periodic`, `lag` | `live.py`, `PeriodicLogger`, `EventLoopLagMonitor` | |
 
-Key semantic mappings:
-- **Ordering 'all' before sink**: the sink actors stamp + send `log_episodes(All)` to the Monitors channel before processing the episode; later `Effective` logs come causally after on the same channel.
-- **Ingestion serial with shipping** (as Python): TrainPipeline handles `finalize_train_batch` inline, so it does not consume new results while a send blocks; the dispatcher keeps running until its outbox fills (backpressure = Python's bounded out_q).
-- **Eval runs in its own actor**: eval episodes are consumed while a train send blocks (Python stalled them behind the send). Same records/metrics; only timing improves.
-- **Dispatcher outbox**: results go to an internal `VecDeque` drained into the sink channels inside `select!`, so the dispatcher keeps answering commands (e.g. the drain's `CancelTrainInflight`) while a sink is busy — no deadlock where Python returned markers directly. Scheduling stops while `outbox.len() >= out_q bound` (same backpressure).
-- **Gate**: `GateActor` recomputes from `policy` + `progress_step` watches (replaces the two `update_dispatch_gate` call sites), logs transitions.
-- **Policy update barrier**: Watcher sends `VersionPending{ack}` to the dispatcher (sets pending; the actor never schedules concurrently, so the ack is immediate, except an admission waiting on the rate limiter completes first), then `receive`, then writes `policy` watch, then `VersionApplied{version, ack}` to the dispatcher, then `PolicyApplied{version, ack}` to EvalPipeline (trigger_eval). Hooks are awaited in Python's order.
-- **wait_for_version**: `policy.wait_for(|p| p.version >= v)` under `timeout(weight_broadcast.timeout)`; the supervisor cancels on component death, so no polling.
-- **Drain**: TrainPipeline enters drain (final batch shipped / step past budget): discard queued, `Dispatcher::CancelTrainInflight{reply}` -> cancellations through the sink, broadcast `Draining`. Dispatcher on `Draining` disables train. Completion: dispatcher reports `Idle` once draining with no inflight, no eval work and an empty outbox; the supervisor then closes the sink inboxes (they finish queued messages first) — equals Python's `draining && is_idle` with empty out_q.
-- **Final broadcast + final ckpt**: supervisor after drain: `wait_for_version(max_steps)`, then final checkpoint from TrainPipeline state (`progress.step - 1`), finalize, teardown under 300 s timeout (`std::process::exit(0|1)` on expiry).
-- **Overload**: Concurrency actor sends `Overload{excess}` -> dispatcher `cancel_inflight(n)`; limit changes via `concurrency_limit` watch. Inflight count published on `inflight: watch<usize>` for the controller's binding check.
-- **Live deltas**: each episode task forwards deltas tagged with its dispatch id on an unbounded channel to the dispatcher actor (state lives there); a 0.5 s interval flushes to `Monitors::log_live`.
-- **Episode tasks**: a `JoinSet`/`FuturesUnordered` of run futures keyed by dispatch id; cancellation = drop/abort (wire's run future sends `cancel` on drop); `finish_sessions` runs as a detached task.
-- **CPU work**: packing, effective episode extraction, metric aggregation on `spawn_blocking`.
-
-### Public API (prl-core)
-```rust
-pub async fn run(config: prl_config::OrchestratorConfig, bridge: Arc<dyn prl_types::Bridge>) -> anyhow::Result<()>;
-pub mod concurrency { pub struct ConcurrencyController; /* pure, + actor wrapper */ }
-pub mod curriculum  { pub struct Curriculum; StandardSampler; DifficultyPoolSampler; AdvRangeGate; }
-pub mod train_source { pub struct TrainSource; }   pub mod eval_source { pub struct EvalSource; }
-pub mod eval_sink   { pub struct EvalSink; }       pub mod dispatcher { pub struct Dispatcher; DispatcherHandle; }
-pub mod watcher; pub mod gate; pub mod periodic; pub mod lag; pub mod live; pub mod envs; pub mod orchestrator;
-```
-
-### Needs from siblings (agreed)
-- prl-types (mine): Policy, Progress, Kind, Subset, CancelReason, GroupCancellation, DispatchFailure, ErrorInfo, DispatchResult<E>, PipelineEvent, RunIdentity, Metrics, Bridge, TaskRecord, LoadedTasks.
-- wire: Episode/Trace/Task types, `EnvClient::{connect, wait_for_server_startup, run(task_data, client, model, sampling, on_delta)}`, RunError `type_name()`.
-- train: TrainSink (explicit step), Admission trait, TrainEpisodes/EvalEpisodes/RolloutWindow metrics, BatchPacker, BatchSender, staleness helpers, stamp_arrival/stamp_batch, build_algorithm, PayloadReleaser.
-- io: logging (`success!`, `format_time`), InferenceClient/AdminPlane (clients, finish_sessions, wait_for_ready), InferenceMetricsCollector (sends `Vec<EngineLoadSample>`), WeightReceiver, CheckpointManager + `OrchestratorState`/`TrainSourceState`/`PyRandom`, Controller + ControlServer, Heartbeat, GarbageCollector.
-- monitors: `Monitors` handle (`log_metrics`, `log_episodes`, `log_annotations`, `log_eval_plan`, `log_live`, `finalize`) + setup.
-- scaffold: prl-py calls `prl_core::run`; implements `Bridge`.
+Ordering and semantics notes:
+- **'all' before sink**: the pipelines stamp arrival and send `log_episodes(All)` before handing the
+  episode to their sink; later effective logs follow on the same monitors channel.
+- **Gate**: no separate actor. The dispatcher evaluates `(progress_step - 1) - policy.version <= 1`
+  from the two watches whenever it schedules train work (always current), and logs the
+  pause/resume transitions when either watch changes.
+- **Policy update order**: watcher -> `version_pending` (dispatcher stops scheduling) -> receive ->
+  `policy` watch -> hooks in order: eval pipeline (`trigger_eval`, may switch to PREFER_EVAL) ->
+  dispatcher `version_applied`. So nothing is scheduled on a new policy before an eval trigger
+  switched the mode (Python got the same result by running both synchronously).
+- **Eval runs in its own actor**: eval episodes are consumed while a train send blocks (Python
+  stalled them behind the send). Same records and metrics; only timing differs.
+- **Drain**: the train pipeline calls `dispatcher.drain()` (disable train, cancel train groups and
+  in-flight train episodes, return the markers directly). The dispatcher sets `idle` once draining
+  with nothing in flight, no eval work and empty outboxes; the supervisor then stops the
+  dispatcher, waits until the eval pipeline consumed its closed channel (`Pipeline drained, exiting
+  main loop`), waits for the final broadcast, saves the final checkpoint, finalizes.
+- **Rate limiter**: aiolimiter leaky-bucket math, but non-blocking: a limited admission arms a
+  wake-up timer instead of blocking the actor.
+- **Deltas**: run tasks relay deltas to the dispatcher on a channel; a per-episode latch stops
+  relaying once the episode is claimed (dropped/cancelled), and pending deltas are drained before
+  any completion or claim, so no live trace is left without its `done` event.
+- **Not ported**: `gc.run`/`malloc_trim` (no Python GC; gc gauges are kept), `set_default_executor`,
+  `intercept_vf_logging` (stays in Python), the tokenizer load (unused by the Rust sink).
 
 ## 3. Rust tests (port of Python tests)
 - `test_curriculum.py` -> curriculum/train_source tests (resume finite/infinite, unique keys, composition + state + metrics, difficulty pools + gate + resume, adv range gate), with Python-generated RNG fixtures for exact sampling sequences.
