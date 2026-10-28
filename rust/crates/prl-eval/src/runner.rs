@@ -14,6 +14,7 @@ use prl_core::dispatcher::{
     TriggerOutcome,
 };
 use prl_core::envs::{replica_address_files, start_env, ReplicaRouter};
+use prl_core::eval_pipeline::eval_step;
 use prl_core::eval_sink::{EvalEpoch, EvalSink};
 use prl_core::eval_source::{EvalEnvTasks, EvalSource};
 use prl_core::fmt::pct;
@@ -27,7 +28,7 @@ use prl_monitors::Monitors;
 use prl_train::episodes::episode_env_name;
 use prl_train::metrics::{dispatch_failure_metrics, EvalEpisodes};
 use prl_types::{Bridge, DispatchResult, Kind, Metrics, Policy, RunIdentity, Subset};
-use prl_wire::{Episode, RunInfo};
+use prl_wire::Episode;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -73,11 +74,6 @@ type Progress = Vec<(String, u64, usize, usize)>;
 
 /// A superseding-checkpoint probe: the newest published step after the epoch's, if any.
 pub type Superseding<'a> = Option<&'a mut (dyn FnMut() -> Option<u64> + Send)>;
-
-fn eval_step(episode: &Episode) -> Result<u64> {
-    let Some(RunInfo::Train(run)) = &episode.run else { bail!("Dispatched episode is missing run identity") };
-    Ok(run.work.step() as u64)
-}
 
 /// An eval-only dispatcher under the adaptive concurrency controller, fed by the inference
 /// metrics collector. Eval episodes are version-pinned measurements and are never cancelled on
