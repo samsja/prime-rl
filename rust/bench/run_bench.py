@@ -194,7 +194,7 @@ def metrics_summary(path: Path, start: float, end: float) -> dict:
         if not start <= row.get("time", 0) <= end:
             continue
         for key, value in row.items():
-            if isinstance(value, (int, float)) and (key.startswith("time/") or key.startswith("event_loop_lag/") or key.startswith("perf/")):
+            if isinstance(value, (int, float)) and (key.startswith(("time/", "event_loop_lag/", "perf/", "dispatcher/inflight/"))):
                 sums.setdefault(key, []).append(float(value))
     return {key: sum(values) / len(values) for key, values in sorted(sums.items())}
 
@@ -226,6 +226,8 @@ def spawn(cmd: list, log: Path, cwd: Path, env: dict | None = None) -> subproces
 
 
 def main() -> None:
+    # a SIGTERM (e.g. from `timeout`) unwinds through the cleanup below
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("impl", choices=["python", "rust", "env-load"])
     parser.add_argument("max_inflight", type=int)
@@ -357,7 +359,7 @@ def main() -> None:
                 "orchestrator": sampler.window("orchestrator", first["time"], last["time"]),
                 "mock": sampler.window("mock", first["time"], last["time"]),
                 "env_servers_cpu_pct": sum(sampler.window(k, first["time"], last["time"]).get("cpu_pct", 0) for k in procs if k.startswith("env")),
-                "metrics": metrics_summary(run_dir / "metrics.jsonl", first["time"], last["time"]),
+                "metrics": metrics_summary(run_dir / "monitors" / "file" / "metrics.jsonl", first["time"], last["time"]),
             }
             del mock_generated
         sampler.stopped.set()
@@ -372,6 +374,7 @@ def main() -> None:
             stop(proc)
         # benchmark runs keep logs and metrics only
         shutil.rmtree(run_dir / "broadcasts", ignore_errors=True)
+        shutil.rmtree(run_dir / "monitors" / "file" / "traces", ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,9 @@
 //! the env server dumped them (python mode), so records re-dump them like pydantic does.
 //! Field order everywhere is the pydantic declaration order.
 
+use std::cell::RefCell;
+use std::sync::Arc;
+
 use indexmap::IndexMap;
 
 use crate::ndarray::{self, NdError};
@@ -171,6 +174,30 @@ fn map_value(entries: Vec<(&str, Value)>) -> Value {
 
 fn list_value<T>(items: &[T], f: impl Fn(&T) -> Value) -> Value {
     Value::Array(items.iter().map(f).collect())
+}
+
+// ── shared values ──────────────────────────────────────────────────────────
+
+thread_local! {
+    static LAST_AGENT_CONFIG: RefCell<Option<Arc<Value>>> = const { RefCell::new(None) };
+    static LAST_TASK_DATA: RefCell<Option<Arc<Map>>> = const { RefCell::new(None) };
+}
+
+/// `value` behind an `Arc`, reusing this thread's previous one when equal: the agent config
+/// of every episode of an env, and the task data of a group's rollouts, are then stored once
+/// instead of per episode (as Python's shallow `model_copy`s share them).
+fn shared<T: PartialEq>(last: &'static std::thread::LocalKey<RefCell<Option<Arc<T>>>>, value: T) -> Arc<T> {
+    last.with(|last| {
+        let mut last = last.borrow_mut();
+        match last.as_ref() {
+            Some(previous) if **previous == value => previous.clone(),
+            _ => {
+                let value = Arc::new(value);
+                *last = Some(value.clone());
+                value
+            }
+        }
+    })
 }
 
 // ── small models ───────────────────────────────────────────────────────────
@@ -896,8 +923,9 @@ impl<'a> Branch<'a> {
 pub struct TraceTask {
     /// The Task class name.
     pub type_: String,
-    /// `WireTaskData` (declared fields + task-specific extras), as dumped.
-    pub data: Map,
+    /// `WireTaskData` (declared fields + task-specific extras), as dumped. Shared: the
+    /// rollouts of a group carry the same data.
+    pub data: Arc<Map>,
     pub key: Option<String>,
     pub hash: Option<String>,
 }
@@ -909,13 +937,14 @@ impl TraceTask {
             Value::Map(_) => {}
             other => return invalid(&f.path("data"), format!("expected dict, got {other:?}")),
         }
-        Ok(TraceTask { type_: f.string("type")?, data: f.dict("data")?, key: f.opt_string("key")?, hash: f.opt_string("hash")? })
+        let data = shared(&LAST_TASK_DATA, f.dict("data")?);
+        Ok(TraceTask { type_: f.string("type")?, data, key: f.opt_string("key")?, hash: f.opt_string("hash")? })
     }
 
     pub fn to_python(&self) -> Value {
         map_value(vec![
             ("type", self.type_.as_str().into()),
-            ("data", Value::Map(self.data.clone())),
+            ("data", Value::Map((*self.data).clone())),
             ("key", self.key.clone().into()),
             ("hash", self.hash.clone().into()),
         ])
@@ -935,8 +964,8 @@ impl TraceTask {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentInfo {
-    /// `WireAgentConfig`, as dumped.
-    pub config: Value,
+    /// `WireAgentConfig`, as dumped. Shared: every episode of an env carries the same config.
+    pub config: Arc<Value>,
     /// `RuntimeInfo | None`, as dumped.
     pub runtime: Value,
     pub name: String,
@@ -947,7 +976,7 @@ impl AgentInfo {
     pub fn from_value(value: &Value, path: String) -> VResult<AgentInfo> {
         let f = Fields::of(value, path)?;
         Ok(AgentInfo {
-            config: f.req("config")?.clone(),
+            config: shared(&LAST_AGENT_CONFIG, f.req("config")?.clone()),
             runtime: f.raw("runtime"),
             name: f.string_or("name", "agent")?,
             trainable: f.boolean_or("trainable", true)?,
@@ -956,7 +985,7 @@ impl AgentInfo {
 
     pub fn to_python(&self) -> Value {
         map_value(vec![
-            ("config", self.config.clone()),
+            ("config", (*self.config).clone()),
             ("runtime", self.runtime.clone()),
             ("name", self.name.as_str().into()),
             ("trainable", self.trainable.into()),
