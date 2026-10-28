@@ -453,21 +453,28 @@ impl Orchestrator {
         // The dispatcher reads `progress_step`, written by the train pipeline.
         let (step_tx, step_rx) = progress_step_placeholder;
         {
-            let eval_side = (!eval_envs.is_empty()).then(|| {
-                let intervals = config.eval.as_ref().map(|e| e.intervals.clone()).unwrap_or_default();
+            let eval_side = if eval_envs.is_empty() {
+                None
+            } else {
+                let eval_config = config.eval.as_ref().expect("eval envs imply eval config");
                 let tasks = eval_sources
                     .iter()
                     .zip(eval_examples.iter())
-                    .map(|(s, examples)| EvalEnvTasks {
-                        name: s.resolved_name.clone(),
-                        tasks: examples.clone(),
-                        group_size: s.group_size as usize,
-                        interval: intervals.get(&s.resolved_name).copied().unwrap_or(s.interval),
+                    .map(|(s, examples)| {
+                        let interval = *eval_config
+                            .intervals
+                            .get(&s.resolved_name)
+                            .ok_or_else(|| anyhow!("No eval interval configured for env {:?}", s.resolved_name))?;
+                        Ok(EvalEnvTasks {
+                            name: s.resolved_name.clone(),
+                            tasks: examples.clone(),
+                            group_size: s.group_size as usize,
+                            interval,
+                        })
                     })
-                    .collect();
-                let skip_first = config.eval.as_ref().is_some_and(|e| e.skip_first_step);
-                (tasks, skip_first)
-            });
+                    .collect::<Result<Vec<_>>>()?;
+                Some((tasks, eval_config.skip_first_step))
+            };
             let eval_side = match eval_side {
                 None => None,
                 Some((tasks, skip_first)) => {
