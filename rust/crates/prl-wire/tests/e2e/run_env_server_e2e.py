@@ -1,10 +1,13 @@
 """End-to-end check of prl-wire against a real env server.
 
-Starts a mock OpenAI endpoint and `uv run env-server` for gsm8k (null harness), runs the
-ignored Rust test `env_server` against it, then validates every episode the Rust client
-received with Python's `WireEpisode` and checks the records match byte for byte.
+Starts `uv run env-server` for gsm8k (null harness) and either a mock OpenAI endpoint
+(default, eval client) or uses a running vLLM (`--train URL MODEL`: token-in/out train
+client, sampling logprobs, payload hook arrays), runs the ignored Rust test `env_server`
+against it, then validates every episode the Rust client received with Python's
+`WireEpisode` and checks the records match byte for byte.
 
     uv run --no-sync python rust/crates/prl-wire/tests/e2e/run_env_server_e2e.py
+    uv run --no-sync python rust/crates/prl-wire/tests/e2e/run_env_server_e2e.py --train http://127.0.0.1:8000/v1 Qwen/Qwen3-0.6B
 """
 
 import json
@@ -27,16 +30,16 @@ HERE = Path(__file__).parent
 
 
 def main() -> None:
+    train = sys.argv[1:2] == ["--train"]
     work = Path(tempfile.mkdtemp(prefix="prl-wire-e2e-"))
     port = 18900 + os.getpid() % 90
     (work / "env.toml").write_text(
         f'address_file = "{work}/addr"\noutput_dir = "{work}/out"\n\n[env]\ntaskset.id = "gsm8k"\n'
         'agent.harness.id = "null"\nagent.runtime.type = "subprocess"\n'
     )
-    procs = [
-        subprocess.Popen([sys.executable, HERE / "mock_openai.py", str(port)]),
-        subprocess.Popen(["uv", "run", "--no-sync", "env-server", "@", str(work / "env.toml")], cwd=ROOT),
-    ]
+    procs = [subprocess.Popen(["uv", "run", "--no-sync", "env-server", "@", str(work / "env.toml")], cwd=ROOT)]
+    if not train:
+        procs.append(subprocess.Popen([sys.executable, HERE / "mock_openai.py", str(port)]))
     try:
         config = EnvServerConfig.model_validate(tomllib.loads((work / "env.toml").read_text()))
         tasks = []
@@ -45,9 +48,16 @@ def main() -> None:
             if len(tasks) == 4:
                 break
         (work / "tasks.json").write_text(json.dumps(tasks))
-        client = vf.EvalClientConfig(base_url=f"http://127.0.0.1:{port}/v1", api_key_var="PRL_WIRE_E2E_KEY")
+        if train:
+            base_url, model = sys.argv[2], sys.argv[3]
+            client = vf.TrainClientConfig(base_url=base_url, api_key_var="PRL_WIRE_E2E_KEY", renderer_model_name=model)
+            sampling = vf.SamplingConfig(temperature=1.0, max_tokens=64, logprobs=5)
+        else:
+            model = "m"
+            client = vf.EvalClientConfig(base_url=f"http://127.0.0.1:{port}/v1", api_key_var="PRL_WIRE_E2E_KEY")
+            sampling = vf.SamplingConfig(temperature=1.0, max_tokens=64)
+        (work / "model").write_text(model)
         (work / "client.json").write_text(json.dumps(client.model_dump(mode="json")))
-        sampling = vf.SamplingConfig(temperature=1.0, max_tokens=64)
         (work / "sampling.json").write_text(json.dumps(sampling.model_dump(mode="json")))
         deadline = time.monotonic() + 300
         while not (work / "addr").exists():

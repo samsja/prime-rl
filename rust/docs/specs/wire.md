@@ -141,7 +141,7 @@ pydantic semantics that matter for byte identity (verified):
 
 ### 1.6 Payload references (payload.py, orchestrator side only)
 
-`PAYLOAD_INFO_KEY = "payload"` (from `transports/batch/types.py`): `trace.info["payload"] =
+`PAYLOAD_INFO_KEY = "prime_rl_payload"` (from `transports/batch/types.py`): `trace.info["prime_rl_payload"] =
 {"url": str, "branches": {str(branch_index): {"id", "fields", "routed_shape"?,
 "routed_dtype"?}}}`. Orchestrator uses `trace_payload_urls(trace)` (`f"{url}/{id}"` per branch)
 and `delete_payloads(urls)` (fire-and-forget HTTP `DELETE` from 8 daemon threads, no proxy,

@@ -1,6 +1,6 @@
 //! The orchestrator side of `prime_rl/transports/payload.py`: env servers keep each train
 //! episode's per-token training arrays and serve them over HTTP; a trace carries only
-//! references in `trace.info["payload"]`. Whoever holds a blob last deletes it; the
+//! references in `trace.info["prime_rl_payload"]`. Whoever holds a blob last deletes it; the
 //! orchestrator deletes the blobs of traces it drops without shipping.
 
 use std::io::{Read, Write};
@@ -13,7 +13,7 @@ use crate::model::Trace;
 use crate::value::Value;
 
 /// `prime_rl.transports.batch.types.PAYLOAD_INFO_KEY`.
-pub const PAYLOAD_INFO_KEY: &str = "payload";
+pub const PAYLOAD_INFO_KEY: &str = "prime_rl_payload";
 
 const DELETE_THREADS: usize = 8;
 const DELETE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,7 +37,7 @@ pub fn trace_payload_urls(trace: &Trace) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The payload reference of one branch: `trace.info["payload"]["branches"][str(index)]`
+/// The payload reference of one branch: `trace.info["prime_rl_payload"]["branches"][str(index)]`
 /// and the server URL.
 pub fn branch_payload(trace: &Trace, branch_index: usize) -> Option<(&str, &Value)> {
     let payload = trace.info.get(PAYLOAD_INFO_KEY)?;
