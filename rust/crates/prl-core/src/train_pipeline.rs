@@ -178,6 +178,7 @@ impl TrainPipeline {
             last_batch_at: Instant::now(),
             draining: false,
         };
+        this.publish_view();
         (this, TrainPipelineHandle { tx }, TrainPipelineInbox { cmd_rx }, view_rx)
     }
 
