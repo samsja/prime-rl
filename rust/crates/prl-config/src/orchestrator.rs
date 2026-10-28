@@ -228,13 +228,6 @@ pub struct ConfigReprs {
     pub weight_broadcast: String,
 }
 
-impl OrchestratorConfig {
-    /// Extract from a validated `prime_rl.configs.orchestrator.OrchestratorConfig`.
-    pub fn extract(config: &Bound<'_, PyAny>) -> PyResult<Self> {
-        config.extract()
-    }
-}
-
 impl<'py> FromPyObject<'py> for OrchestratorConfig {
     fn extract_bound(obj: &Bound<'py, PyAny>) -> PyResult<Self> {
         let attr = |name: &str| obj.getattr(name);
