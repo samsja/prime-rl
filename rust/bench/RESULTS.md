@@ -71,7 +71,7 @@ measurements). Each row is a single run, so expect ±10-20 % noise.
   reaches 4.3k rollouts/s at 16k, 7.4x Python (575/s, which is still CPU-bound at 102 %).
   - It uses 1.8-3.6 cores, and no single thread is saturated (the busiest is about 30 % at 16k).
   - Runtime lag p99 stays at 2-14 ms, and packing a 16k batch takes 0.05 s.
-- **Memory at 16k is about the same**: Rust 4.5 GB, Python 4.2 GB. It was 8-9.5 GB before
+- **Memory at 16k is close**: Rust 4.2-5.9 GB, Python 3.8-4.4 GB. It was 8-9.5 GB before
   `d2991ab7e` (see below).
 - **With real env servers** (8 replicas x 2 workers, 2048 in flight), Rust delivers 540
   rollouts/s against Python's 374 (+45 %).
@@ -108,8 +108,8 @@ How the monitor caps throughput:
 The dispatcher fixes `0b9b9704f` (ship batches in a task) and `7b25613dd` (results handed
 over before scheduling) remove real stalls but don't change this ceiling. Making the
 record write parallel or batched is the next step (monitors).
-`prl_wire::Episode::to_json` costs 46 us per reverse-text episode (`d2991ab7e`+), so it is
-a small part of that writer.
+`prl_wire::Episode::to_json` costs 46 us per reverse-text episode, down from 60 us now that
+shared subtrees are dumped once, so it is a small part of that writer.
 
 ## Env server capacity (no orchestrator: `env-load` drives the replicas directly)
 
