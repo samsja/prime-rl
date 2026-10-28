@@ -381,6 +381,8 @@ pub struct Dispatcher {
     gate_open: bool,
     counters: DrainCounters,
     live_events: Vec<LiveEvent>,
+    /// Deltas among `live_events`.
+    live_deltas: usize,
     live_dropped: bool,
     wake_at: Option<Instant>,
     delta_tx: mpsc::UnboundedSender<(u64, Value)>,
@@ -456,6 +458,7 @@ impl Dispatcher {
             gate_open: true,
             counters: DrainCounters::default(),
             live_events: Vec::new(),
+            live_deltas: 0,
             live_dropped: false,
             wake_at: None,
             delta_tx,
@@ -733,14 +736,20 @@ impl Dispatcher {
         }
     }
 
+    /// Buffer a delta for the next flush. Past the cap the oldest deltas go (never the
+    /// bookkeeping events that create or remove files). Trimming waits until the deltas alone
+    /// exceed the cap, so it stays amortized O(1) per delta even when bookkeeping events of
+    /// many in-flight episodes fill the buffer.
     fn queue_live(&mut self, event: LiveEvent) {
         self.live_events.push(event);
-        if self.live_events.len() > LIVE_EVENT_CAP {
+        self.live_deltas += 1;
+        if self.live_events.len() > LIVE_EVENT_CAP && self.live_deltas > LIVE_EVENT_CAP {
             let (deltas, mut kept): (Vec<_>, Vec<_>) =
                 std::mem::take(&mut self.live_events).into_iter().partition(|e| matches!(e, LiveEvent::Delta { .. }));
             let dropped = deltas.len().saturating_sub(LIVE_EVENT_CAP / 2);
             kept.extend(deltas.into_iter().skip(dropped));
             self.live_events = kept;
+            self.live_deltas = LIVE_EVENT_CAP / 2;
             if !self.live_dropped {
                 self.live_dropped = true;
                 warn!("Live trace buffer over {LIVE_EVENT_CAP} events - dropping the oldest deltas");
@@ -753,6 +762,7 @@ impl Dispatcher {
             return;
         }
         let events = std::mem::take(&mut self.live_events);
+        self.live_deltas = 0;
         self.live_sink.log_live(events).await;
     }
 
