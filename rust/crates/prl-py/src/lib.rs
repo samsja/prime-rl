@@ -14,8 +14,8 @@ fn init_tracing() {
 }
 
 // Stub until prl-core lands: `prl_core::run(config, Arc::new(bridge))`.
-async fn run_orchestrator(config_type: String, bridge: PyBridge) -> anyhow::Result<()> {
-    tracing::info!(config_type, "rust orchestrator started (stub)");
+async fn run_orchestrator(config: prl_config::OrchestratorConfig, bridge: PyBridge) -> anyhow::Result<()> {
+    tracing::info!(batch_size = config.batch_size, "rust orchestrator started (stub)");
     let _ = bridge;
     Ok(())
 }
@@ -26,13 +26,13 @@ async fn run_orchestrator(config_type: String, bridge: PyBridge) -> anyhow::Resu
 #[pyfunction]
 fn run(py: Python<'_>, config: &Bound<'_, PyAny>, bridge: Py<PyAny>) -> PyResult<()> {
     init_tracing();
-    let config_type = config.get_type().name()?.to_string();
+    let config: prl_config::OrchestratorConfig = config.extract()?;
     py.allow_threads(|| {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("prl-orch")
             .build()?;
-        runtime.block_on(run_orchestrator(config_type, PyBridge::new(bridge)))
+        runtime.block_on(run_orchestrator(config, PyBridge::new(bridge)))
     })
     .map_err(|e| PyRuntimeError::new_err(format!("{e:#}")))
 }

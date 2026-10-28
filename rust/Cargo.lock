@@ -1098,6 +1098,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "prl-config",
  "prl-types",
  "pyo3",
  "pyo3-build-config",
