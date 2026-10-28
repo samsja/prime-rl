@@ -11,12 +11,10 @@ pub mod train_source;
 pub mod live;
 pub mod dispatcher;
 pub mod envs;
-pub mod glue;
 pub mod periodic;
 pub mod fmt;
 pub mod eval_pipeline;
 pub mod train_pipeline;
-pub mod train_glue;
 pub mod orchestrator;
 
 pub use orchestrator::run;

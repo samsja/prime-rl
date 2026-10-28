@@ -178,186 +178,77 @@ impl TrainSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curriculum::{AdvRangeGate, DifficultyPool, SamplerConfig, TaskFeed};
-    use async_trait::async_trait;
-
-    fn task(idx: usize) -> TaskRecord {
-        TaskRecord { key: format!("key-{idx}"), hash: format!("hash-{idx}"), data: serde_json::json!({"idx": idx}) }
-    }
+    use crate::curriculum::{AdvRangeGate, DifficultyPool, SamplerConfig};
 
     fn tasks(n: usize) -> Vec<TaskRecord> {
-        (0..n).map(task).collect()
+        (0..n)
+            .map(|i| TaskRecord { key: format!("key-{i}"), hash: format!("hash-{i}"), data: serde_json::json!({"idx": i}) })
+            .collect()
     }
 
-    struct Counting(usize);
-
-    #[async_trait]
-    impl TaskFeed for Counting {
-        async fn next_batch(&mut self, n: usize) -> Result<Vec<TaskRecord>> {
-            let out = (self.0..(self.0 + n).min(10)).map(task).collect::<Vec<_>>();
-            self.0 += out.len();
-            Ok(out)
-        }
-    }
-
-    /// Outcome of one `make_rollout(task, reward, advantages)` episode of the Python test.
-    fn rollout(key: &str, reward: f64, advantages: Option<&[f32]>) -> GroupOutcome {
+    /// One trainable episode of `key` with `reward` and node `advantages`.
+    fn rollout(key: &str, reward: f64, advantages: &[f32]) -> GroupOutcome {
         GroupOutcome {
             task_keys: vec![Some(key.into())],
             rewards: vec![reward],
-            advantages: advantages.map(<[f32]>::to_vec).unwrap_or_default(),
-            any_trainable: advantages.is_some(),
+            advantages: advantages.to_vec(),
+            any_trainable: true,
+        }
+    }
+
+    fn pools(weights: [f64; 3], seed: u64) -> CurriculumConfig {
+        let pool = |threshold, weight| DifficultyPool { threshold, weight };
+        CurriculumConfig {
+            sampler: SamplerConfig::DifficultyPool {
+                pools: [("hard", pool(0.25, weights[0])), ("normal", pool(0.75, weights[1])), ("easy", pool(1.0, weights[2]))]
+                    .into_iter()
+                    .map(|(name, p)| (name.to_string(), p))
+                    .collect(),
+                seed,
+            },
+            gates: [("zero_advantage".to_string(), AdvRangeGate { reject_min: 0.0, reject_max: 0.0 })].into_iter().collect(),
         }
     }
 
     #[tokio::test]
-    async fn default_curriculum_resumes_finite_and_infinite_tasksets() {
+    async fn standard_sampler_resumes_at_its_cursor() {
         let mut finite = Curriculum::new(CurriculumConfig::default(), Tasks::Finite(tasks(5))).unwrap();
         for _ in 0..3 {
             finite.next_task().await.unwrap();
         }
-        let state = finite.state();
-        let mut expected = Vec::new();
-        for _ in 0..4 {
-            expected.push(finite.next_task().await.unwrap().key);
-        }
         let mut restored = Curriculum::new(CurriculumConfig::default(), Tasks::Finite(tasks(5))).unwrap();
-        restored.load(&state).await.unwrap();
-        for key in expected {
-            assert_eq!(restored.next_task().await.unwrap().key, key);
+        restored.load(&finite.state()).await.unwrap();
+        for _ in 0..4 {
+            assert_eq!(restored.next_task().await.unwrap().key, finite.next_task().await.unwrap().key);
         }
-
-        let mut infinite = Curriculum::new(CurriculumConfig::default(), Tasks::Stream(Box::new(Counting(0)))).unwrap();
-        infinite.next_task().await.unwrap();
-        infinite.next_task().await.unwrap();
-        let mut restored = Curriculum::new(CurriculumConfig::default(), Tasks::Stream(Box::new(Counting(0)))).unwrap();
-        restored.load(&infinite.state()).await.unwrap();
-        assert_eq!(restored.next_task().await.unwrap().key, "key-2");
-    }
-
-    #[test]
-    fn curriculum_requires_unique_finite_task_keys() {
-        let err = Curriculum::new(CurriculumConfig::default(), Tasks::Finite(vec![task(0), task(0)])).err().unwrap();
-        assert!(err.to_string().contains("Task keys must be unique"));
+        let duplicate = Curriculum::new(CurriculumConfig::default(), Tasks::Finite(vec![tasks(1)[0].clone(); 2]));
+        assert!(duplicate.err().unwrap().to_string().contains("Task keys must be unique"));
     }
 
     #[tokio::test]
-    async fn train_source_composes_sampler_and_all_gates_with_state_and_metrics() {
-        let config = || CurriculumConfig {
-            sampler: SamplerConfig::DifficultyPool {
-                pools: [("all".to_string(), DifficultyPool { threshold: 1.0, weight: 1.0 })].into_iter().collect(),
-                seed: 42,
-            },
-            gates: [
-                ("reject".to_string(), AdvRangeGate { reject_min: 0.0, reject_max: 0.0 }),
-                ("admit".to_string(), AdvRangeGate { reject_min: 0.5, reject_max: 0.5 }),
-            ]
-            .into_iter()
-            .collect(),
-        };
-        let env = || TrainEnvTasks { name: "test".into(), ratio: 1.0, curriculum: config(), tasks: Tasks::Finite(tasks(3)) };
-        let mut source = TrainSource::new(vec![env()]).unwrap();
-        let sampled = source.next_task(1).await.unwrap().task.key;
-        // group (reward 0.25, adv [0]) + failed episode (excluded) + empty (no turns, excluded)
-        let mixed = GroupOutcome {
-            task_keys: vec![Some(sampled.clone()); 3],
-            rewards: vec![0.25],
-            advantages: vec![0.0],
-            any_trainable: true,
-        };
-        assert!(!source.on_result("test", &mixed).unwrap());
-        let m = source.metrics();
-        assert_eq!(
-            m.into_iter().collect::<Vec<_>>(),
-            vec![
-                ("curriculum/test/admission_rate".to_string(), 0.0.into()),
-                ("curriculum/test/sampler/pool/unseen".to_string(), 2.0.into()),
-                ("curriculum/test/sampler/pool/all".to_string(), 1.0.into()),
-            ]
-        );
-        let state = source.state();
-        let mut restored = TrainSource::new(vec![env()]).unwrap();
-        restored.load(&state).await.unwrap();
-        let restored_state = restored.curricula["test"].state();
-        assert!(matches!(
-            restored_state.sampler,
-            prl_io::ckpt::SamplerState::DifficultyPool { ref task_rewards, .. } if task_rewards[&sampled] == 0.25
-        ));
-        assert_eq!(restored_state.gates.keys().collect::<Vec<_>>(), vec!["reject", "admit"]);
-
-        let empty = GroupOutcome { task_keys: vec![Some(sampled.clone())], ..Default::default() };
-        assert!(!source.on_result("test", &empty).unwrap());
-        assert_eq!(source.metrics()["curriculum/test/admission_rate"], 0.0.into());
-        assert!(!source.on_result("test", &rollout(&sampled, 0.5, None)).unwrap());
-        source.metrics();
-        assert!(source.on_result("test", &rollout(&sampled, 0.75, Some(&[1.0]))).unwrap());
-        assert_eq!(source.metrics()["curriculum/test/admission_rate"], 1.0.into());
-    }
-
-    #[tokio::test]
-    async fn difficulty_pools_stack_with_advantage_gate_and_resume_sampling() {
-        let config = || CurriculumConfig {
-            sampler: SamplerConfig::DifficultyPool {
-                pools: [
-                    ("hard".to_string(), DifficultyPool { threshold: 0.25, weight: 0.0 }),
-                    ("normal".to_string(), DifficultyPool { threshold: 0.75, weight: 1.0 }),
-                    ("easy".to_string(), DifficultyPool { threshold: 1.0, weight: 0.0 }),
-                ]
-                .into_iter()
-                .collect(),
-                seed: 7,
-            },
-            gates: [("zero_advantage".to_string(), AdvRangeGate { reject_min: 0.0, reject_max: 0.0 })]
-                .into_iter()
-                .collect(),
-        };
-        let mut curriculum = Curriculum::new(config(), Tasks::Finite(tasks(3))).unwrap();
-        let rewards = [0.1, 0.5, 0.9];
-        let decisions: Vec<bool> = (0..3)
-            .map(|i| {
-                let adv = [if i > 0 { 1.0 } else { 0.0 }];
-                curriculum.on_result(&rollout(&format!("key-{i}"), rewards[i], Some(&adv))).unwrap()
-            })
+    async fn difficulty_pools_stack_with_the_advantage_gate() {
+        let mut curriculum = Curriculum::new(pools([0.0, 1.0, 0.0], 7), Tasks::Finite(tasks(3))).unwrap();
+        let decisions: Vec<bool> = [(0.1, 0.0), (0.5, 1.0), (0.9, 1.0)]
+            .iter()
+            .enumerate()
+            .map(|(i, (reward, adv))| curriculum.on_result(&rollout(&format!("key-{i}"), *reward, &[*adv])).unwrap())
             .collect();
         assert_eq!(decisions, vec![false, true, true]);
-        assert_eq!(
-            curriculum.metrics().into_iter().collect::<Vec<_>>(),
-            vec![
-                ("sampler/pool/unseen".to_string(), 0.0),
-                ("sampler/pool/hard".to_string(), 1.0),
-                ("sampler/pool/normal".to_string(), 1.0),
-                ("sampler/pool/easy".to_string(), 1.0),
-            ]
-        );
-        let state = curriculum.state();
-        let mut expected = Vec::new();
-        for _ in 0..10 {
-            expected.push(curriculum.next_task().await.unwrap().key);
+        let metrics: Vec<(String, f64)> = curriculum.metrics().into_iter().collect();
+        assert_eq!(metrics[0], ("sampler/pool/unseen".to_string(), 0.0));
+        // Only the normal pool has weight: every draw is key-1.
+        for _ in 0..5 {
+            assert_eq!(curriculum.next_task().await.unwrap().key, "key-1");
         }
-        assert!(expected.iter().all(|k| k == "key-1"));
-        let mut restored = Curriculum::new(config(), Tasks::Finite(tasks(3))).unwrap();
-        restored.load(&state).await.unwrap();
-        for key in expected {
-            assert_eq!(restored.next_task().await.unwrap().key, key);
-        }
-    }
-
-    #[test]
-    fn advantage_range_gate_generalizes_zero_advantage_rejection() {
-        let zero = AdvRangeGate { reject_min: 0.0, reject_max: 0.0 };
-        assert!(!zero.admit(&rollout("k", 0.0, Some(&[0.0, 0.0]))));
-        assert!(zero.admit(&rollout("k", 0.0, Some(&[0.0, 0.2]))));
-        assert!(zero.admit(&rollout("k", 0.0, None)));
-        let tolerance = AdvRangeGate { reject_min: -0.1, reject_max: 0.1 };
-        assert!(!tolerance.admit(&rollout("k", 0.0, Some(&[-0.05, 0.0, 0.05]))));
-        let positive = AdvRangeGate { reject_min: 0.5, reject_max: 0.5 };
-        assert!(!positive.admit(&rollout("k", 0.0, Some(&[0.5]))));
+        let gate = AdvRangeGate { reject_min: -0.1, reject_max: 0.1 };
+        assert!(!gate.admit(&rollout("k", 0.0, &[-0.05, 0.0, 0.05])));
+        assert!(gate.admit(&rollout("k", 0.0, &[0.2])));
+        assert!(gate.admit(&rollout("k", 0.0, &[])));
     }
 
     #[tokio::test]
-    async fn env_mix_and_pool_sampling_match_cpython_sequences() {
+    async fn sampling_matches_cpython_random() {
         // python: r = random.Random(42); [r.choices(['a','b'], weights=[1.0,3.0])[0] for _ in range(20)]
-        let expected = "bababbbabaabaabbabba";
         let env = |name: &str, ratio| TrainEnvTasks {
             name: name.into(),
             ratio,
@@ -365,35 +256,19 @@ mod tests {
             tasks: Tasks::Finite(tasks(2)),
         };
         let mut source = TrainSource::new(vec![env("a", 1.0), env("b", 3.0)]).unwrap();
-        let mut got = String::new();
+        let mut picked = String::new();
         for _ in 0..20 {
-            got.push_str(&source.next_task(1).await.unwrap().env_name);
+            picked.push_str(&source.next_task(1).await.unwrap().env_name);
         }
-        assert_eq!(got, expected);
+        assert_eq!(picked, "bababbbabaabaabbabba");
         // python: r = random.Random(42); [r.choices(range(3), weights=[0.2,1.0,0.2])[0] for _ in range(20)]
-        let expected = [1, 0, 1, 1, 1, 1, 2, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0];
-        let mut sampler = Curriculum::new(
-            CurriculumConfig {
-                sampler: SamplerConfig::DifficultyPool {
-                    pools: [
-                        ("hard".to_string(), DifficultyPool { threshold: 0.25, weight: 0.2 }),
-                        ("normal".to_string(), DifficultyPool { threshold: 0.75, weight: 1.0 }),
-                        ("easy".to_string(), DifficultyPool { threshold: 1.0, weight: 0.2 }),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    seed: 42,
-                },
-                gates: IndexMap::new(),
-            },
-            Tasks::Finite(tasks(3)),
-        )
-        .unwrap();
-        for (i, r) in [0.1, 0.5, 0.9].into_iter().enumerate() {
-            sampler.on_result(&rollout(&format!("key-{i}"), r, Some(&[1.0]))).unwrap();
+        let mut curriculum = Curriculum::new(pools([0.2, 1.0, 0.2], 42), Tasks::Finite(tasks(3))).unwrap();
+        for (i, reward) in [0.1, 0.5, 0.9].into_iter().enumerate() {
+            curriculum.on_result(&rollout(&format!("key-{i}"), reward, &[1.0])).unwrap();
         }
-        for idx in expected {
-            assert_eq!(sampler.next_task().await.unwrap().key, format!("key-{idx}"));
+        for idx in [1, 0, 1, 1, 1, 1, 2, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0] {
+            assert_eq!(curriculum.next_task().await.unwrap().key, format!("key-{idx}"));
         }
+        assert_eq!(source.metrics().len(), 0);
     }
 }

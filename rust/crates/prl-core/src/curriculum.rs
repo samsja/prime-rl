@@ -4,7 +4,6 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{bail, ensure, Result};
-use async_trait::async_trait;
 use indexmap::IndexMap;
 use prl_io::ckpt::{CurriculumState, PyRandom, PyValue, SamplerState};
 use prl_types::{Bridge, Kind, TaskRecord};
@@ -22,25 +21,11 @@ pub struct GroupOutcome {
     pub any_trainable: bool,
 }
 
-/// Pulls more tasks of an unbounded taskset.
-#[async_trait]
-pub trait TaskFeed: Send {
-    /// Up to `n` more tasks; fewer means the stream ended.
-    async fn next_batch(&mut self, n: usize) -> Result<Vec<TaskRecord>>;
-}
-
-/// Feed over the Python bridge's `next_tasks`.
+/// The rest of an unbounded taskset, pulled through the Python bridge.
 pub struct BridgeFeed {
     pub bridge: Arc<dyn Bridge>,
     pub kind: Kind,
     pub env_name: String,
-}
-
-#[async_trait]
-impl TaskFeed for BridgeFeed {
-    async fn next_batch(&mut self, n: usize) -> Result<Vec<TaskRecord>> {
-        self.bridge.next_tasks(self.kind, &self.env_name, n).await
-    }
 }
 
 const FEED_BATCH: usize = 64;
@@ -48,23 +33,21 @@ const FEED_BATCH: usize = 64;
 /// An env's selected tasks: materialized (bounded) or streamed (unbounded).
 pub enum Tasks {
     Finite(Vec<TaskRecord>),
-    Stream(Box<dyn TaskFeed>),
+    Stream(BridgeFeed),
 }
 
 struct Stream {
-    feed: Box<dyn TaskFeed>,
+    feed: BridgeFeed,
     buffer: VecDeque<TaskRecord>,
 }
 
 impl Stream {
     async fn next(&mut self) -> Result<TaskRecord> {
         if self.buffer.is_empty() {
-            self.buffer.extend(self.feed.next_batch(FEED_BATCH).await?);
+            let feed = &self.feed;
+            self.buffer.extend(feed.bridge.next_tasks(feed.kind, &feed.env_name, FEED_BATCH).await?);
         }
-        match self.buffer.pop_front() {
-            Some(task) => Ok(task),
-            None => bail!("The task stream ended"),
-        }
+        self.buffer.pop_front().ok_or_else(|| anyhow::anyhow!("The task stream ended"))
     }
 }
 
@@ -192,7 +175,7 @@ impl DifficultyPoolSampler {
 
 pub enum Sampler {
     Standard(StandardSampler),
-    DifficultyPool(DifficultyPoolSampler),
+    DifficultyPool(Box<DifficultyPoolSampler>),
 }
 
 /// `AdvRangeGate`: reject groups whose trainable advantages all fall inside a range.
@@ -243,7 +226,7 @@ impl Curriculum {
         let sampler = match config.sampler {
             SamplerConfig::Standard => Sampler::Standard(StandardSampler::new(tasks)?),
             SamplerConfig::DifficultyPool { pools, seed } => {
-                Sampler::DifficultyPool(DifficultyPoolSampler::new(pools, seed, tasks)?)
+                Sampler::DifficultyPool(Box::new(DifficultyPoolSampler::new(pools, seed, tasks)?))
             }
         };
         Ok(Self { sampler, gates: config.gates })
@@ -269,7 +252,7 @@ impl Curriculum {
         if let Sampler::DifficultyPool(s) = &mut self.sampler {
             s.observe(outcome)?;
         }
-        let all_admit = self.gates.values().map(|g| g.admit(outcome)).fold(true, |acc, d| acc && d);
+        let all_admit = self.gates.values().all(|g| g.admit(outcome));
         Ok(all_admit && outcome.any_trainable)
     }
 

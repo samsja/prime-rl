@@ -22,6 +22,7 @@ use prl_io::logging::format_time;
 use prl_monitors::annotations::{stamp_arrival, stamp_batch};
 use prl_monitors::Monitors;
 use prl_train::algo::routing::is_trainable;
+use prl_train::algo::iter_trainable_traces;
 use prl_train::sink::{Admission, TrainBatch, TrainSink};
 use prl_train::staleness::{rollout_staleness, Staleness};
 use prl_train::{BatchPacker, BatchSender, TrainEpisodes};
@@ -63,11 +64,9 @@ pub fn group_outcome(group: &[Episode]) -> GroupOutcome {
                     outcome.advantages.extend_from_slice(advantages);
                 }
             }
-            if !trace.is_dropped() && trace.num_turns() > 0 && trace.nodes.iter().any(|n| n.mask.iter().any(|m| *m)) {
-                outcome.any_trainable = true;
-            }
         }
     }
+    outcome.any_trainable = !iter_trainable_traces(group).is_empty();
     outcome
 }
 
@@ -132,23 +131,23 @@ pub struct TrainPipelineInbox {
 }
 
 pub struct TrainPipeline {
-    pub config: TrainPipelineConfig,
-    pub sink: TrainSink,
-    pub admission: SourceAdmission,
-    pub source: TrainSourceHandle,
-    pub progress: Progress,
-    pub step_tx: watch::Sender<u64>,
+    config: TrainPipelineConfig,
+    sink: TrainSink,
+    admission: SourceAdmission,
+    source: TrainSourceHandle,
+    progress: Progress,
+    step_tx: watch::Sender<u64>,
     /// The last policy version whose update hooks all ran.
-    pub applied: watch::Receiver<u64>,
-    pub dispatcher: DispatcherHandle,
-    pub packer: Arc<BatchPacker>,
+    applied: watch::Receiver<u64>,
+    dispatcher: DispatcherHandle,
+    packer: Arc<BatchPacker>,
     /// None while a batch is being shipped (the ship task owns it).
     sender: Option<BatchSender>,
-    pub ckpt: CheckpointManager,
-    pub controller: Option<Controller>,
-    pub monitors: Monitors,
-    pub heartbeat: Option<Arc<Heartbeat>>,
-    pub view: watch::Sender<TrainView>,
+    ckpt: CheckpointManager,
+    controller: Option<Controller>,
+    monitors: Monitors,
+    heartbeat: Option<Arc<Heartbeat>>,
+    view: watch::Sender<TrainView>,
     shipped_state: Option<(u64, OrchestratorState)>,
     last_batch_at: Instant,
     draining: bool,
@@ -533,7 +532,7 @@ impl TrainPipeline {
         let Some(interval) = self.config.ckpt_interval.filter(|i| *i > 0 && self.config.ckpt_enabled) else {
             return Ok(0.0);
         };
-        if self.config.max_steps.is_some_and(|max| step >= max) || step % interval != 0 {
+        if self.config.max_steps.is_some_and(|max| step >= max) || !step.is_multiple_of(interval) {
             return Ok(0.0);
         }
         info!("Saving checkpoint at step {step}");

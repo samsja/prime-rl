@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Result};
-use async_trait::async_trait;
 use indexmap::IndexMap;
 use prl_io::logging::format_time;
 use prl_monitors::annotations::{stamp_arrival, stamp_batch};
@@ -19,9 +18,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::dispatcher::DispatcherHandle;
+use crate::dispatcher::{release_episode, DispatcherHandle};
 use crate::eval_sink::{EvalEpoch, EvalSink};
-use crate::watcher::UpdateHook;
 
 /// Per eval env: group size and number of examples.
 #[derive(Debug, Clone)]
@@ -49,9 +47,9 @@ pub struct EvalPipelineHandle {
     tx: mpsc::UnboundedSender<Command>,
 }
 
-#[async_trait]
-impl UpdateHook for EvalPipelineHandle {
-    async fn on_update(&self, step: u64) -> Result<()> {
+impl EvalPipelineHandle {
+    /// Run the eval trigger of an applied policy and wait for it.
+    pub async fn policy_applied(&self, step: u64) -> Result<()> {
         let (ack, rx) = oneshot::channel();
         self.tx.send(Command::PolicyApplied { step, ack }).map_err(|_| anyhow::anyhow!("eval pipeline stopped"))?;
         rx.await.map_err(|_| anyhow::anyhow!("eval pipeline stopped"))?
@@ -66,11 +64,6 @@ pub struct EvalPipeline {
     triggered_steps: HashSet<u64>,
     triggered_at: HashMap<(String, u64), Instant>,
     progress: watch::Sender<EvalProgress>,
-}
-
-/// Delete the env-server arrays of an episode (eval never trains on them).
-pub fn release_episode(episode: &Episode) {
-    prl_wire::payload::delete_payloads(episode.traces.iter().flat_map(prl_wire::payload::trace_payload_urls));
 }
 
 fn eval_step(episode: &Episode) -> Result<u64> {

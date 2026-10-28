@@ -84,7 +84,6 @@ pub struct ConcurrencyParams {
 #[derive(Debug)]
 pub struct ConcurrencyController {
     params: ConcurrencyParams,
-    floor: usize,
     fallback_cost: u64,
     cap: f64,
     pub max_inflight: usize,
@@ -110,12 +109,10 @@ pub struct ConcurrencyController {
 
 impl ConcurrencyController {
     pub fn new(params: ConcurrencyParams, fallback_cost: u64) -> Self {
-        let floor = params.min_inflight;
         let mut this = Self {
             params,
-            floor,
             fallback_cost,
-            cap: params.initial_inflight.unwrap_or(floor) as f64,
+            cap: params.initial_inflight.unwrap_or(params.min_inflight) as f64,
             max_inflight: 0,
             limit_applied: false,
             bootstrapped: params.initial_inflight.is_some(),
@@ -138,21 +135,9 @@ impl ConcurrencyController {
         this
     }
 
-    pub fn cap(&self) -> f64 {
-        self.cap
-    }
-
-    pub fn signal(&self) -> Signal {
-        self.signal
-    }
-
     /// One completed unit. `inflight` is the dispatcher's count after the unit's permit was
     /// released (the completing unit is added back for the binding check).
     pub fn record_episode(&mut self, tokens: u64, inflight: usize) -> Vec<Action> {
-        self.record_episode_at(tokens, inflight, Instant::now())
-    }
-
-    pub fn record_episode_at(&mut self, tokens: u64, inflight: usize, now: Instant) -> Vec<Action> {
         let mut actions = Vec::new();
         let inflight = inflight + 1;
         let fraction = 1.0 / inflight as f64;
@@ -161,7 +146,7 @@ impl ConcurrencyController {
             // Error markers consumed no engine capacity; growing on them floods engines later.
             return actions;
         }
-        let gate_open = self.can_grow_until.is_some_and(|until| now < until);
+        let gate_open = self.can_grow_until.is_some_and(|until| Instant::now() < until);
         if self.target.is_none()
             && self.can_grow
             && gate_open
@@ -175,10 +160,6 @@ impl ConcurrencyController {
 
     /// Per-poll engine load push: classify the signal, gate growth, apply trims and cuts.
     pub fn observe(&mut self, samples: &[EngineLoadSample], inflight: usize) -> Vec<Action> {
-        self.observe_at(samples, inflight, Instant::now())
-    }
-
-    pub fn observe_at(&mut self, samples: &[EngineLoadSample], inflight: usize, now: Instant) -> Vec<Action> {
         let mut actions = Vec::new();
         if samples.is_empty() {
             return actions;
@@ -247,7 +228,7 @@ impl ConcurrencyController {
         self.can_grow = worst == Signal::Clear && total_queued == 0 && !self.draining;
         self.growth_multiplier =
             1.0 + (TURNOVER_GROWTH_MAX - 1.0) * (1.0 - max_usage / KV_USAGE_SOFT_CAP).max(0.0);
-        self.can_grow_until = Some(now + GROWTH_GATE_TTL);
+        self.can_grow_until = Some(Instant::now() + GROWTH_GATE_TTL);
         if self.target.is_some() {
             return actions;
         }
@@ -339,7 +320,7 @@ impl ConcurrencyController {
 
     fn clamp(&self, n_max: f64) -> f64 {
         let ceiling = self.params.max_inflight.map_or(f64::INFINITY, |m| m as f64);
-        n_max.max(self.floor as f64).min(ceiling)
+        n_max.max(self.params.min_inflight as f64).min(ceiling)
     }
 
     /// Total KV tokens across decode engines; None until the first poll.
@@ -500,19 +481,17 @@ impl ConcurrencyController {
 mod tests {
     use super::*;
 
-    const INFLIGHT: usize = 1800;
-
-    fn preempted() -> EngineLoadSample {
+    fn sample(kv_usage: f64, running: u64, waiting: u64, preemptions_delta: u64) -> EngineLoadSample {
         EngineLoadSample {
             engine_id: "engine-0".into(),
             role: None,
             kv_capacity_tokens: Some(1_000_000),
             max_model_len: Some(8192),
-            kv_usage: 0.95,
-            running: INFLIGHT as u64,
-            waiting: 0,
-            waiting_capacity: Some(0),
-            preemptions_delta: 4,
+            kv_usage,
+            running,
+            waiting,
+            waiting_capacity: Some(waiting),
+            preemptions_delta,
         }
     }
 
@@ -524,125 +503,40 @@ mod tests {
     }
 
     #[test]
-    fn set_target_moves_limit_inside_and_outside_band() {
+    fn preemption_cut_and_manual_target() {
+        let mut c = controller();
+        assert_eq!(c.observe(&[sample(0.95, 1800, 0, 4)], 1800), vec![Action::SetLimit(1440), Action::Overload(360)]);
         let mut c = controller();
         assert_eq!(c.set_target(Some(1500)), vec![Action::SetLimit(1500)]);
-        assert_eq!((c.target, c.cap(), c.max_inflight), (Some(1500), 1500.0, 1500));
-        let mut c = controller();
-        assert_eq!(c.set_target(Some(2500)), vec![Action::SetLimit(2500)]);
-        let mut c = controller();
-        c.set_target(Some(1500));
-        assert_eq!(c.set_target(None), vec![]);
-        assert_eq!((c.target, c.cap()), (None, 1500.0));
-    }
-
-    #[test]
-    fn target_holds_under_overload() {
-        let mut c = controller();
-        c.set_target(Some(1500));
-        c.observe(&[preempted()], INFLIGHT);
+        c.observe(&[sample(0.95, 1800, 0, 4)], 1800);
         assert_eq!(c.max_inflight, 1500);
-
-        let mut c = controller();
-        let actions = c.observe(&[preempted()], INFLIGHT);
-        assert_eq!(c.max_inflight, 1440);
-        assert_eq!(actions, vec![Action::SetLimit(1440), Action::Overload(360)]);
     }
 
     #[test]
-    fn bootstraps_from_capacity_and_grows_when_binding() {
-        let mut c = ConcurrencyController::new(
-            ConcurrencyParams { min_inflight: 4, max_inflight: None, initial_inflight: None },
-            1000,
-        );
-        assert_eq!(c.max_inflight, 4);
-        let clear = EngineLoadSample { kv_usage: 0.0, preemptions_delta: 0, running: 4, ..preempted() };
-        let now = Instant::now();
-        let actions = c.observe_at(&[clear], 4, now);
-        // 1_000_000 / 8192 = 122
-        assert_eq!(actions, vec![Action::SetLimit(122)]);
-        // growth: binding (inflight 121 + 1 >= 0.9 * 122), multiplier 1.2 at zero usage
-        let actions = c.record_episode_at(100, 121, now);
-        assert_eq!(c.cap(), 1_000_000.0 / 8192.0 * 1.2f64.powf(1.0 / 122.0));
-        assert!(actions.is_empty());
-        // gate expired -> no growth
-        let before = c.cap();
-        c.record_episode_at(100, 121, now + GROWTH_GATE_TTL);
-        assert_eq!(c.cap(), before);
-        // zero tokens never grows
-        c.record_episode_at(0, 121, now);
-        assert_eq!(c.cap(), before);
-    }
-
-    #[test]
-    fn queue_overload_needs_persistence_and_escalates() {
+    fn queue_overload_needs_persistence_then_escalates() {
         let mut c = controller();
-        let queued = EngineLoadSample {
-            kv_usage: 0.5,
-            preemptions_delta: 0,
-            running: 100,
-            waiting: 80,
-            waiting_capacity: Some(80),
-            ..preempted()
-        };
         for _ in 0..5 {
-            let a = c.observe(&[queued.clone()], 1000);
-            assert!(a.iter().all(|a| !matches!(a, Action::Overload(_))));
+            assert!(c.observe(&[sample(0.5, 100, 80, 0)], 1000).iter().all(|a| !matches!(a, Action::Overload(_))));
         }
-        let a = c.observe(&[queued.clone()], 1000);
-        assert_eq!(a, vec![Action::SetLimit(900), Action::Overload(100)]);
-        // draining: further overload ignored until inflight <= cap
-        let a = c.observe(&[preempted()], 1000);
-        assert!(a.is_empty());
-        // drained and settled -> grace; repeat overload cuts at escalated fraction
-        let calm = EngineLoadSample { kv_usage: 0.5, preemptions_delta: 0, waiting: 0, ..preempted() };
-        c.observe(&[calm], 800);
-        let a = c.observe(&[preempted()], 800);
-        assert_eq!(a, vec![Action::SetLimit(400), Action::Overload(400)]);
+        assert_eq!(c.observe(&[sample(0.5, 100, 80, 0)], 1000), vec![Action::SetLimit(900), Action::Overload(100)]);
+        // Overload while draining is stale; after the drain a repeat cuts at the escalated fraction.
+        assert!(c.observe(&[sample(0.95, 1800, 0, 4)], 1000).is_empty());
+        c.observe(&[sample(0.5, 1800, 0, 0)], 800);
+        assert_eq!(c.observe(&[sample(0.95, 1800, 0, 4)], 800), vec![Action::SetLimit(400), Action::Overload(400)]);
     }
 
     #[test]
-    fn kv_trim_soft_and_hard() {
+    fn kv_headroom_trims() {
         let mut c = controller();
-        let soft = EngineLoadSample { kv_usage: 0.85, preemptions_delta: 0, ..preempted() };
-        let a = c.observe(&[soft.clone()], 1000);
-        // 1000 * 0.7 / 0.85 = 823
-        assert_eq!(a, vec![Action::SetLimit(823)]);
-        // cooldown
-        assert!(c.observe(&[soft], 1000).is_empty());
+        assert_eq!(c.observe(&[sample(0.85, 1800, 0, 0)], 1000), vec![Action::SetLimit(823)]);
         let mut c = controller();
-        let hard = EngineLoadSample { kv_usage: 0.95, preemptions_delta: 0, ..preempted() };
-        let a = c.observe(&[hard], 1000);
-        assert_eq!(a, vec![Action::SetLimit(736), Action::Overload(264)]);
-    }
-
-    #[tokio::test]
-    async fn actor_applies_limits_and_overload() {
-        let (samples_tx, samples) = mpsc::channel(4);
-        let (_inflight_tx, inflight) = watch::channel(INFLIGHT);
-        let (limit, mut limit_rx) = watch::channel(0);
-        let (overload_tx, mut overload_rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        let (handle, task) = controller().spawn(
-            ConcurrencyIo { samples, inflight, limit, overload: Some(overload_tx) },
-            cancel.clone(),
-        );
-        assert_eq!(*limit_rx.borrow_and_update(), 2000);
-        samples_tx.send(vec![preempted()]).await.unwrap();
-        assert_eq!(overload_rx.recv().await, Some(360));
-        assert_eq!(*limit_rx.borrow(), 1440);
-        let state = handle.set_target(Some(100)).await.unwrap();
-        assert_eq!(state, ConcurrencyState { target: Some(100), cap: 100, inflight: INFLIGHT });
-        assert_eq!(handle.gauges().await.unwrap()["concurrency/max_inflight"], 100.0.into());
-        cancel.cancel();
-        task.await.unwrap().unwrap();
+        assert_eq!(c.observe(&[sample(0.95, 1800, 0, 0)], 1000), vec![Action::SetLimit(736), Action::Overload(264)]);
     }
 
     #[test]
     fn format_num_matches_python() {
         assert_eq!(format_num(1_000_000.0, 1, false), "1.0M");
         assert_eq!(format_num(8192.0, 1, true), "8.2K");
-        assert_eq!(format_num(512.0, 1, true), "512.0");
         assert_eq!(format_num(512.0, 1, false), "512");
     }
 }

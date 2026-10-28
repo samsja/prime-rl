@@ -1,5 +1,5 @@
-//! Shared orchestrator runtime types (port of `orchestrator/types.py` plus the
-//! event vocabulary of the actor design).
+//! Shared orchestrator runtime types (port of `orchestrator/types.py`) and the traits the
+//! Python bridge and inference clients implement.
 
 use std::fmt;
 

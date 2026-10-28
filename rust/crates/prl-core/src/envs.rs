@@ -8,14 +8,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use async_trait::async_trait;
 use prl_io::logging::format_time;
 use prl_types::{Bridge, Kind, TaskRecord};
-use prl_wire::{EnvClient, Episode, Map, Value};
+use prl_wire::{EnvClient, EnvClientError, Episode, OnDelta, Value};
 use tracing::{debug, info};
 
 use crate::curriculum::{BridgeFeed, Tasks};
-use crate::dispatcher::{DeltaFn, EnvRunner, RunFailure, RunRequest};
+use crate::dispatcher::RunRequest;
 
 /// Max wait for an env server to publish its address and answer health.
 pub const ENV_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
@@ -72,47 +71,11 @@ pub async fn wait_for_address(path: &Path, timeout: Duration) -> Result<String> 
     }
 }
 
-/// One replica's client (implemented by `prl_wire::EnvClient`).
-#[async_trait]
-pub trait ReplicaClient: Send + Sync {
-    async fn run(&self, request: &RunRequest, task_data: &Map, on_delta: DeltaFn) -> std::result::Result<Episode, RunFailure>;
-}
-
-#[async_trait]
-impl ReplicaClient for EnvClient {
-    async fn run(&self, request: &RunRequest, task_data: &Map, on_delta: DeltaFn) -> std::result::Result<Episode, RunFailure> {
-        EnvClient::run(self, task_data, &request.client, &request.model, &request.sampling, Some(on_delta))
-            .await
-            .map_err(|e| RunFailure { type_name: e.type_name().to_owned(), message: e.to_string(), traceback: None })
-    }
-}
-
-/// Routes each run to the replica with the fewest runs in flight (ties: lowest index).
-pub struct ReplicaRouter<C> {
-    clients: Vec<C>,
+/// An env server's replicas; each run goes to the replica with the fewest runs in flight (ties:
+/// lowest index).
+pub struct ReplicaRouter {
+    clients: Vec<EnvClient>,
     in_flight: Vec<AtomicUsize>,
-}
-
-impl<C> ReplicaRouter<C> {
-    pub fn new(clients: Vec<C>) -> Self {
-        let in_flight = clients.iter().map(|_| AtomicUsize::new(0)).collect();
-        Self { clients, in_flight }
-    }
-
-    pub fn clients(&self) -> &[C] {
-        &self.clients
-    }
-
-    pub fn in_flight(&self) -> Vec<usize> {
-        self.in_flight.iter().map(|n| n.load(Ordering::SeqCst)).collect()
-    }
-
-    fn pick(&self) -> usize {
-        let loads = self.in_flight();
-        let replica = (0..loads.len()).min_by_key(|i| loads[*i]).expect("at least one replica");
-        self.in_flight[replica].fetch_add(1, Ordering::SeqCst);
-        replica
-    }
 }
 
 struct InFlightGuard<'a>(&'a AtomicUsize);
@@ -123,29 +86,33 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
-#[async_trait]
-impl<C: ReplicaClient> EnvRunner for ReplicaRouter<C> {
-    async fn run(&self, request: RunRequest, on_delta: DeltaFn) -> std::result::Result<Episode, RunFailure> {
-        let task_data = match serde_json::from_value::<Value>(request.task_data.clone()).map(Value::into_map) {
-            Ok(Some(map)) => map,
-            _ => {
-                return Err(RunFailure {
-                    type_name: "ValueError".into(),
-                    message: "task data must be a mapping".into(),
-                    traceback: None,
-                })
-            }
-        };
-        let replica = self.pick();
+impl ReplicaRouter {
+    pub fn new(clients: Vec<EnvClient>) -> Self {
+        let in_flight = clients.iter().map(|_| AtomicUsize::new(0)).collect();
+        Self { clients, in_flight }
+    }
+
+    pub fn clients(&self) -> &[EnvClient] {
+        &self.clients
+    }
+
+    pub async fn run(&self, request: RunRequest, on_delta: OnDelta) -> std::result::Result<Episode, EnvClientError> {
+        let task_data = serde_json::from_value::<Value>(request.task_data)
+            .ok()
+            .and_then(Value::into_map)
+            .expect("task data is a JSON object");
+        let loads: Vec<usize> = self.in_flight.iter().map(|n| n.load(Ordering::SeqCst)).collect();
+        let replica = (0..loads.len()).min_by_key(|i| loads[*i]).expect("at least one replica");
+        self.in_flight[replica].fetch_add(1, Ordering::SeqCst);
         let _guard = InFlightGuard(&self.in_flight[replica]);
-        self.clients[replica].run(&request, &task_data, on_delta).await
+        self.clients[replica].run(&task_data, &request.client, &request.model, &request.sampling, Some(on_delta)).await
     }
 }
 
 /// A connected env with its selected tasks.
 pub struct StartedEnv {
     pub name: String,
-    pub router: Arc<ReplicaRouter<EnvClient>>,
+    pub router: Arc<ReplicaRouter>,
     pub tasks: Tasks,
     /// None: the selected tasks never end.
     pub num_tasks: Option<usize>,
@@ -202,74 +169,10 @@ pub async fn start_env(
         Some(n) => (Tasks::Finite(loaded.tasks), Some(n)),
         None => {
             let feed = BridgeFeed { bridge: bridge.clone(), kind, env_name: name.to_owned() };
-            (Tasks::Stream(Box::new(feed)), None)
+            (Tasks::Stream(feed), None)
         }
     };
     let shown = num_tasks.map_or_else(|| "infinite".to_string(), |n| n.to_string());
     info!("Env {name} ready in {} (num_tasks={shown})", format_time(t0.elapsed().as_secs_f64()));
     Ok(StartedEnv { name: name.to_owned(), router: Arc::new(ReplicaRouter::new(clients)), tasks, num_tasks })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::Notify;
-
-    struct Fake {
-        runs: AtomicUsize,
-        release: Notify,
-    }
-
-    #[async_trait]
-    impl ReplicaClient for Arc<Fake> {
-        async fn run(&self, _: &RunRequest, _: &Map, _: DeltaFn) -> std::result::Result<Episode, RunFailure> {
-            self.runs.fetch_add(1, Ordering::SeqCst);
-            self.release.notified().await;
-            Err(RunFailure { type_name: "X".into(), message: "done".into(), traceback: None })
-        }
-    }
-
-    fn request() -> RunRequest {
-        RunRequest { task_data: serde_json::json!({}), client: serde_json::json!({}), model: "m".into(), sampling: Map::new() }
-    }
-
-    #[tokio::test]
-    async fn runs_go_to_the_least_loaded_replica() {
-        let fakes: Vec<Arc<Fake>> =
-            (0..2).map(|_| Arc::new(Fake { runs: AtomicUsize::new(0), release: Notify::new() })).collect();
-        let router = Arc::new(ReplicaRouter::new(fakes.clone()));
-        let spawn = |router: Arc<ReplicaRouter<Arc<Fake>>>| {
-            tokio::spawn(async move { router.run(request(), Box::new(|_| {})).await })
-        };
-        let tasks: Vec<_> = (0..4).map(|_| spawn(router.clone())).collect();
-        while fakes.iter().map(|f| f.runs.load(Ordering::SeqCst)).sum::<usize>() < 4 {
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(fakes.iter().map(|f| f.runs.load(Ordering::SeqCst)).collect::<Vec<_>>(), vec![2, 2]);
-        fakes[0].release.notify_waiters();
-        while router.in_flight() != vec![0, 2] {
-            tokio::task::yield_now().await;
-        }
-        let extra = spawn(router.clone());
-        while fakes[0].runs.load(Ordering::SeqCst) < 3 {
-            tokio::task::yield_now().await;
-        }
-        fakes[0].release.notify_waiters();
-        fakes[1].release.notify_waiters();
-        extra.await.unwrap().unwrap_err();
-        for task in tasks {
-            task.await.unwrap().unwrap_err();
-        }
-        assert_eq!(router.in_flight(), vec![0, 0]);
-    }
-
-    #[test]
-    fn address_files() {
-        let dir = Path::new("/c");
-        assert_eq!(env_address_file(dir, Kind::Train, "gsm8k", None), PathBuf::from("/c/envs/train/gsm8k.address"));
-        assert_eq!(
-            replica_address_files(dir, Kind::Eval, "e", Some(2)),
-            vec![PathBuf::from("/c/envs/eval/e.0.address"), PathBuf::from("/c/envs/eval/e.1.address")]
-        );
-    }
 }

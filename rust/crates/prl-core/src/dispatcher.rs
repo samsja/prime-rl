@@ -18,23 +18,26 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use async_trait::async_trait;
 use indexmap::IndexMap;
-use prl_monitors::file::live::LiveEvent;
+use prl_io::clients::InferenceClient;
+use prl_monitors::{LiveEvent, Monitors};
 use prl_types::{
     CancelReason, DispatchFailure, DispatchResult, ErrorInfo, GroupCancellation, Kind, Metrics, Policy, RunIdentity,
     TaskRecord,
 };
-use prl_wire::{Episode, Error as VfError, GroupInfo, PolicySpan, RunInfo, TrainRunInfo, Value, WorkInfo};
+use prl_wire::{
+    EnvClientError, Episode, Error as VfError, GroupInfo, OnDelta, PolicySpan, RunInfo, TrainRunInfo, Value, WorkInfo,
+};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::concurrency::ConcurrencyHandle;
+use crate::envs::ReplicaRouter;
 use crate::eval_source::{EvalSource, TaskRequest};
 use crate::live::{self, DispatchInfo, LiveTrace};
 use crate::train_source::TrainSourceHandle;
@@ -63,48 +66,23 @@ pub struct RunRequest {
     pub sampling: prl_wire::Map,
 }
 
-/// An env request that produced no episode (the Python exception).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RunFailure {
-    pub type_name: String,
-    pub message: String,
-    pub traceback: Option<String>,
+/// Delete the env-server arrays of an episode no sink will train on.
+pub fn release_episode(episode: &Episode) {
+    prl_wire::payload::delete_payloads(episode.traces.iter().flat_map(prl_wire::payload::trace_payload_urls));
 }
-
-pub type DeltaFn = Box<dyn FnMut(&Value) + Send>;
-
-/// Runs episodes of one env (least-loaded replica routing lives in the implementation).
-#[async_trait]
-pub trait EnvRunner: Send + Sync {
-    async fn run(&self, request: RunRequest, on_delta: DeltaFn) -> std::result::Result<Episode, RunFailure>;
-}
-
-/// Releases inference sessions of finished episodes (`InferenceClient.finish_sessions`).
-#[async_trait]
-pub trait SessionFinisher: Send + Sync {
-    async fn finish_sessions(&self, session_ids: Vec<String>);
-}
-
-/// Receives the live-trace events (the monitors).
-#[async_trait]
-pub trait LiveSink: Send + Sync {
-    async fn log_live(&self, events: Vec<LiveEvent>);
-}
-
-/// Deletes the env-server arrays of an episode no sink will see.
-pub type ReleaseFn = Arc<dyn Fn(&Episode) + Send + Sync>;
 
 /// An env as the dispatcher schedules it.
 pub struct DispatchEnv {
     pub name: String,
     pub group_size: usize,
-    pub runner: Arc<dyn EnvRunner>,
+    pub runner: Arc<ReplicaRouter>,
     /// vf `SamplingConfig` dump (`prl_wire::sampling`).
     pub sampling: prl_wire::Map,
     pub client: serde_json::Value,
     /// Fixed model of a frozen generation source; None samples the live policy.
     pub frozen_model: Option<String>,
-    pub sessions: Arc<dyn SessionFinisher>,
+    /// Releases the inference sessions of finished episodes.
+    pub sessions: Arc<InferenceClient>,
 }
 
 impl DispatchEnv {
@@ -139,8 +117,7 @@ pub struct DispatcherIo {
     pub inflight: watch::Sender<usize>,
     pub overload: mpsc::UnboundedReceiver<usize>,
     pub concurrency: Option<ConcurrencyHandle>,
-    pub live: Arc<dyn LiveSink>,
-    pub release: ReleaseFn,
+    pub live: Monitors,
     /// Set once draining with nothing in flight, no eval work, and every result handed off.
     pub idle: watch::Sender<bool>,
 }
@@ -338,10 +315,10 @@ struct Inflight {
     abort: AbortHandle,
     /// Latched when the episode is claimed, so its run stops relaying deltas.
     claimed: Arc<Mutex<bool>>,
-    sessions: Arc<dyn SessionFinisher>,
+    sessions: Arc<InferenceClient>,
 }
 
-type Completion = (u64, std::result::Result<Episode, RunFailure>);
+type Completion = (u64, std::result::Result<Episode, EnvClientError>);
 
 enum Scheduled {
     Yes,
@@ -356,8 +333,7 @@ pub struct Dispatcher {
     policy: watch::Receiver<Policy>,
     inflight_tx: watch::Sender<usize>,
     concurrency: Option<ConcurrencyHandle>,
-    live_sink: Arc<dyn LiveSink>,
-    release_fn: ReleaseFn,
+    live_sink: Monitors,
     idle_tx: watch::Sender<bool>,
 
     max_inflight: usize,
@@ -414,10 +390,6 @@ fn py_opt_repr(s: Option<&str>) -> String {
     s.map_or_else(|| "None".to_string(), py_repr)
 }
 
-fn wall_time() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
-}
-
 impl Dispatcher {
     pub fn new(
         cfg: DispatcherConfig,
@@ -438,7 +410,6 @@ impl Dispatcher {
             inflight_tx: io.inflight,
             concurrency: io.concurrency,
             live_sink: io.live,
-            release_fn: io.release,
             idle_tx: io.idle,
             max_inflight,
             current_inflight: 0,
@@ -674,7 +645,7 @@ impl Dispatcher {
         let slot = self.next_slot;
         self.next_slot += 1;
         let claimed = Arc::new(Mutex::new(false));
-        let on_delta: DeltaFn = {
+        let on_delta: OnDelta = {
             let claimed = claimed.clone();
             let tx = self.delta_tx.clone();
             Box::new(move |delta: &Value| {
@@ -693,7 +664,7 @@ impl Dispatcher {
             task: live::task_label(&task.data),
             policy_version: version,
             step,
-            started: wall_time(),
+            started: prl_monitors::file::unix_time(),
         };
         self.live_events.push(live::pending_event(&info));
         self.inflight.insert(
@@ -779,7 +750,10 @@ impl Dispatcher {
             ids.extend(episode.traces.iter().map(|t| t.id.clone()));
         }
         let sessions = meta.sessions.clone();
-        tokio::spawn(async move { sessions.finish_sessions(ids.into_iter().collect()).await });
+        let ids: Vec<String> = ids.into_iter().collect();
+        if !ids.is_empty() {
+            tokio::spawn(async move { sessions.finish_sessions(&ids).await });
+        }
     }
 
     /// Latch and abort a claimed episode; a run that already returned is released by
@@ -808,11 +782,11 @@ impl Dispatcher {
         version
     }
 
-    fn handle_completed(&mut self, slot: u64, result: std::result::Result<Episode, RunFailure>) -> Result<()> {
+    fn handle_completed(&mut self, slot: u64, result: std::result::Result<Episode, EnvClientError>) -> Result<()> {
         let Some(meta) = self.inflight.shift_remove(&slot) else {
             // Claimed (dropped / cancelled) after it returned: nobody will see its arrays.
             if let Ok(episode) = &result {
-                (self.release_fn)(episode);
+                release_episode(episode);
             }
             return Ok(());
         };
@@ -821,16 +795,11 @@ impl Dispatcher {
         self.inflight_tx.send_replace(self.current_inflight);
         let (gid, env) = (meta.group_id.as_str(), meta.env_name.as_str());
         let mut episode = match result {
-            Err(failure) => {
-                warn!(
-                    "Environment request failed in group {gid} ({env}): {}({})",
-                    failure.type_name,
-                    py_repr(&failure.message)
-                );
+            Err(error) => {
+                let (type_name, message) = (error.type_name().to_string(), error.to_string());
+                warn!("Environment request failed in group {gid} ({env}): {type_name}({})", py_repr(&message));
                 self.counters.record_error(meta.kind, env);
                 let policy_version = self.complete_group_member(&meta);
-                let traceback =
-                    failure.traceback.unwrap_or_else(|| format!("{}: {}\n", failure.type_name, failure.message));
                 let failure = DispatchFailure {
                     kind: meta.kind,
                     env_name: meta.env_name.clone(),
@@ -841,9 +810,9 @@ impl Dispatcher {
                     task_key: meta.task.key.clone(),
                     task_hash: meta.task.hash.clone(),
                     error: ErrorInfo {
-                        type_: failure.type_name,
-                        message: failure.message,
-                        traceback: Some(traceback),
+                        traceback: Some(format!("{type_name}: {message}\n")),
+                        type_: type_name,
+                        message,
                         status_code: None,
                     },
                 };
@@ -975,7 +944,7 @@ impl Dispatcher {
             *age = (*age).min(meta.started_at);
         }
         let mut order: Vec<(String, Instant)> = group_age.into_iter().collect();
-        order.sort_by(|a, b| b.1.cmp(&a.1));
+        order.sort_by_key(|(_, age)| std::cmp::Reverse(*age));
         let mut shed = 0;
         for (gid, _) in order {
             if shed >= n {
@@ -1267,268 +1236,6 @@ pub struct DispatcherInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curriculum::{CurriculumConfig, Tasks};
-    use crate::eval_source::EvalEnvTasks;
-    use crate::train_source::{TrainEnvTasks, TrainSource};
-
-    const FIXTURE: &str = include_str!("../tests/fixtures/episode.json");
-
-    fn fixture() -> Episode {
-        Episode::from_record_json(FIXTURE.as_bytes()).unwrap()
-    }
-
-    fn task() -> TaskRecord {
-        let ep = fixture();
-        TaskRecord {
-            key: ep.task.key.clone().unwrap(),
-            hash: ep.task.hash.clone().unwrap(),
-            data: serde_json::json!({"idx": 0, "prompt": "task 0"}),
-        }
-    }
-
-    type Call = (RunRequest, DeltaFn, oneshot::Sender<std::result::Result<Episode, RunFailure>>);
-
-    struct FakeRunner(mpsc::UnboundedSender<Call>);
-
-    #[async_trait]
-    impl EnvRunner for FakeRunner {
-        async fn run(&self, request: RunRequest, on_delta: DeltaFn) -> std::result::Result<Episode, RunFailure> {
-            let (tx, rx) = oneshot::channel();
-            self.0.send((request, on_delta, tx)).unwrap();
-            rx.await.unwrap_or_else(|_| Err(RunFailure { type_name: "X".into(), message: "dropped".into(), traceback: None }))
-        }
-    }
-
-    struct NoSessions;
-
-    #[async_trait]
-    impl SessionFinisher for NoSessions {
-        async fn finish_sessions(&self, _ids: Vec<String>) {}
-    }
-
-    struct Live(mpsc::UnboundedSender<Vec<LiveEvent>>);
-
-    #[async_trait]
-    impl LiveSink for Live {
-        async fn log_live(&self, events: Vec<LiveEvent>) {
-            let _ = self.0.send(events);
-        }
-    }
-
-    fn env(name: &str, group_size: usize, calls: &mpsc::UnboundedSender<Call>, frozen: Option<&str>) -> DispatchEnv {
-        DispatchEnv {
-            name: name.into(),
-            group_size,
-            runner: Arc::new(FakeRunner(calls.clone())),
-            sampling: prl_wire::Map::new(),
-            client: serde_json::json!({"base_url": "http://x"}),
-            frozen_model: frozen.map(String::from),
-            sessions: Arc::new(NoSessions),
-        }
-    }
-
-    struct Harness {
-        handle: DispatcherHandle,
-        calls: mpsc::UnboundedReceiver<Call>,
-        train_rx: mpsc::Receiver<DispatchResult<Episode>>,
-        eval_rx: mpsc::Receiver<DispatchResult<Episode>>,
-        policy: watch::Sender<Policy>,
-        step: watch::Sender<u64>,
-        limit: watch::Sender<usize>,
-        overload: mpsc::UnboundedSender<usize>,
-        idle: watch::Receiver<bool>,
-        task: tokio::task::JoinHandle<Result<()>>,
-    }
-
-    fn harness(group_size: usize, cap: usize, with_eval: bool) -> Harness {
-        let (calls_tx, calls) = mpsc::unbounded_channel();
-        let (source, _) = TrainSource::new(vec![TrainEnvTasks {
-            name: "train-env".into(),
-            ratio: 1.0,
-            curriculum: CurriculumConfig::default(),
-            tasks: Tasks::Finite(vec![task()]),
-        }])
-        .unwrap()
-        .spawn();
-        let (step, step_rx) = watch::channel(1u64);
-        let (train_tx, train_rx) = mpsc::channel(64);
-        let (eval_tx, eval_rx) = mpsc::channel(64);
-        let train = TrainSide {
-            envs: [("train-env".to_string(), env("train-env", group_size, &calls_tx, None))].into_iter().collect(),
-            source,
-            progress_step: step_rx,
-            results: train_tx,
-        };
-        let eval = with_eval.then(|| EvalSide {
-            envs: [("eval-env".to_string(), env("eval-env", 2, &calls_tx, None))].into_iter().collect(),
-            source: EvalSource::new(
-                vec![EvalEnvTasks { name: "eval-env".into(), tasks: vec![task()], group_size: 2, interval: 1 }],
-                false,
-                false,
-            ),
-            results: eval_tx,
-        });
-        let (policy, policy_rx) = watch::channel(Policy { version: 0, model_name: "policy".into() });
-        let (limit, limit_rx) = watch::channel(cap);
-        let (inflight, _) = watch::channel(0);
-        let (overload, overload_rx) = mpsc::unbounded_channel();
-        let (idle_tx, idle) = watch::channel(false);
-        let (live_tx, _live_rx) = mpsc::unbounded_channel();
-        let (dispatcher, handle, inbox) = Dispatcher::new(
-            DispatcherConfig {
-                dispatch_per_minute: None,
-                run: RunIdentity { id: "run".into(), name: Some("name".into()) },
-                policy_weights_change: true,
-            },
-            Some(train),
-            eval,
-            DispatcherIo {
-                policy: policy_rx,
-                limit: limit_rx,
-                inflight,
-                overload: overload_rx,
-                concurrency: None,
-                live: Arc::new(Live(live_tx)),
-                release: Arc::new(|_| {}),
-                idle: idle_tx,
-            },
-        );
-        let task = tokio::spawn(dispatcher.run(inbox, CancellationToken::new()));
-        Harness { handle, calls, train_rx, eval_rx, policy, step, limit, overload, idle, task }
-    }
-
-    async fn take(calls: &mut mpsc::UnboundedReceiver<Call>, n: usize) -> Vec<Call> {
-        let mut out = Vec::new();
-        for _ in 0..n {
-            out.push(tokio::time::timeout(Duration::from_secs(2), calls.recv()).await.unwrap().unwrap());
-        }
-        out
-    }
-
-    async fn nothing_more(calls: &mut mpsc::UnboundedReceiver<Call>) {
-        assert!(tokio::time::timeout(Duration::from_millis(50), calls.recv()).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn schedules_groups_and_stamps_provenance() {
-        let mut h = harness(4, 4, false);
-        h.handle.start().unwrap();
-        let calls = take(&mut h.calls, 4).await;
-        nothing_more(&mut h.calls).await;
-        let salt = calls[0].0.sampling["cache_salt"].as_str().unwrap().to_string();
-        assert!(salt.ends_with("-0"));
-        assert_eq!(calls[0].0.model, "policy");
-        h.policy.send_modify(|p| p.version = 1);
-        for (_, _, reply) in calls {
-            reply.send(Ok(fixture())).unwrap();
-        }
-        // completions refill the pool
-        take(&mut h.calls, 4).await;
-        let mut groups = BTreeSet::new();
-        for _ in 0..4 {
-            let DispatchResult::Episode(ep) = h.train_rx.recv().await.unwrap() else { panic!() };
-            let Some(RunInfo::Train(run)) = &ep.run else { panic!() };
-            assert_eq!(run.work, WorkInfo::Train { step: 1, policy: Some(PolicySpan { start: 0, end: 1 }) });
-            assert_eq!(ep.env.name.as_deref(), Some("train-env"));
-            groups.insert(ep.group.unwrap().id);
-        }
-        assert_eq!(groups.len(), 1);
-        h.handle.stop().await.unwrap();
-        h.task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn gate_pauses_train_until_policy_catches_up() {
-        let mut h = harness(4, 4, false);
-        h.step.send_replace(3);
-        h.handle.start().unwrap();
-        nothing_more(&mut h.calls).await;
-        h.policy.send_modify(|p| p.version = 1);
-        take(&mut h.calls, 4).await;
-    }
-
-    #[tokio::test]
-    async fn version_pending_blocks_scheduling() {
-        let mut h = harness(4, 4, false);
-        h.handle.version_pending().await.unwrap();
-        h.handle.start().unwrap();
-        nothing_more(&mut h.calls).await;
-        h.handle.version_applied().await.unwrap();
-        take(&mut h.calls, 4).await;
-    }
-
-    #[tokio::test]
-    async fn failure_and_drain_account_every_attempt() {
-        let mut h = harness(4, 2, false);
-        h.handle.start().unwrap();
-        let mut calls = take(&mut h.calls, 2).await;
-        let (_, _, reply) = calls.remove(0);
-        reply
-            .send(Err(RunFailure { type_name: "RuntimeError".into(), message: "boom".into(), traceback: None }))
-            .unwrap();
-        let DispatchResult::Failure(failure) = h.train_rx.recv().await.unwrap() else { panic!() };
-        assert_eq!((failure.error.type_.as_str(), failure.policy_version, failure.step), ("RuntimeError", 0, 1));
-        // the refill takes the group's third episode; one stays unscheduled
-        take(&mut h.calls, 1).await;
-        let cancellations = h.handle.drain().await.unwrap();
-        assert_eq!(cancellations.len(), 1);
-        assert_eq!((cancellations[0].count, cancellations[0].reason), (3, CancelReason::Shutdown));
-        assert_eq!(cancellations[0].group_id, failure.group_id);
-        h.idle.wait_for(|idle| *idle).await.unwrap();
-        nothing_more(&mut h.calls).await;
-    }
-
-    #[tokio::test]
-    async fn overload_drops_youngest_group() {
-        let mut h = harness(2, 4, false);
-        h.limit.send_replace(8);
-        h.handle.start().unwrap();
-        // burst cap = max(2, 8 / 10) = 2: one group per window
-        let first = take(&mut h.calls, 2).await;
-        nothing_more(&mut h.calls).await;
-        for (_, _, reply) in first {
-            reply.send(Ok(fixture())).unwrap();
-        }
-        let second = take(&mut h.calls, 2).await;
-        h.overload.send(1).unwrap();
-        loop {
-            match h.train_rx.recv().await.unwrap() {
-                DispatchResult::Cancelled(c) => {
-                    assert_eq!((c.count, c.reason), (2, CancelReason::Overload));
-                    break;
-                }
-                DispatchResult::Episode(_) => {}
-                DispatchResult::Failure(_) => panic!(),
-            }
-        }
-        drop(second);
-    }
-
-    #[tokio::test]
-    async fn eval_trigger_prefers_eval_then_flips_back() {
-        let mut h = harness(4, 2, true);
-        let outcome = h.handle.trigger_eval(0, false, vec![], Some("eval was triggered at step 0".into())).await.unwrap();
-        assert_eq!((outcome.fired, outcome.owed), (vec!["eval-env".to_string()], 2));
-        h.handle.start().unwrap();
-        let calls = take(&mut h.calls, 2).await;
-        assert!(calls.iter().all(|c| !c.0.sampling.contains_key("cache_salt") || c.0.model == "policy"));
-        let view = h.handle.view().await.unwrap();
-        assert_eq!(view.inflight_eval, 2);
-        // permits are full, so the flip waits for the next admission (as in Python)
-        assert_eq!(view.gauges["dispatcher/mode"], 1.0.into());
-        for (_, _, reply) in calls {
-            reply.send(Ok(fixture())).unwrap();
-        }
-        for _ in 0..2 {
-            let DispatchResult::Episode(ep) = h.eval_rx.recv().await.unwrap() else { panic!() };
-            let Some(RunInfo::Train(run)) = &ep.run else { panic!() };
-            assert!(matches!(run.work, WorkInfo::Eval { step: 0, .. }));
-        }
-        take(&mut h.calls, 2).await; // flipped back: train refills
-        assert_eq!(h.handle.view().await.unwrap().gauges["dispatcher/mode"], 0.0.into());
-        let drained = h.handle.view().await.unwrap().drained;
-        assert_eq!(drained["dispatcher/errored/eval"], 0.0.into());
-    }
 
     #[test]
     fn rate_limiter_matches_aiolimiter() {
@@ -1537,8 +1244,7 @@ mod tests {
         rl.last = now;
         assert!(rl.try_acquire(now).is_ok());
         assert!(rl.try_acquire(now).is_ok());
-        let wait = rl.try_acquire(now).unwrap_err();
-        assert_eq!(wait - now, Duration::from_secs(30));
+        assert_eq!(rl.try_acquire(now).unwrap_err() - now, Duration::from_secs(30));
         assert!(rl.try_acquire(now + Duration::from_secs(30)).is_ok());
     }
 

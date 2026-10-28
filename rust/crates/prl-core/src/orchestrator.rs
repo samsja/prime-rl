@@ -1,20 +1,13 @@
 //! The orchestrator supervisor (`orchestrator.py`): setup, actor wiring, the step loop's
 //! lifecycle (drain -> final broadcast -> final checkpoint -> finalize) and bounded teardown.
-//!
-//! Actors: dispatcher, train source, train pipeline (sink + ship), eval pipeline (sink +
-//! triggers), weight watcher, concurrency controller, inference metrics collector, monitors,
-//! control server, lag monitor and the pipeline-view logger. They share `policy` (watcher),
-//! `progress_step` (train pipeline), `limit` (concurrency) and `inflight` (dispatcher) watch
-//! channels. Any actor that exits early fails the run, like `_on_component_done`.
+//! Any actor that exits early fails the run, like `_on_component_done`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
-use async_trait::async_trait;
 use indexmap::IndexMap;
-use prl_config::{AdmissionGateConfig, OrchestratorConfig, TaskSamplerConfig, TrainSourceConfig};
+use prl_config::{AdmissionGateConfig, ModelReference, OrchestratorConfig, Split, TaskSamplerConfig, TrainSourceConfig};
 use prl_io::ckpt::CheckpointManager;
 use prl_io::clients::{connect_frozen_client, AdminPlane, ClientType, InferenceClient};
 use prl_io::control::Controller;
@@ -23,32 +16,33 @@ use prl_io::inference_metrics::InferenceMetricsCollector;
 use prl_io::logging::format_time;
 use prl_io::weights::{NixlBridge, WeightReceiver};
 use prl_monitors::{Monitors, MonitorsSetup, WandbBridge};
-use prl_types::{Bridge, Kind, Metrics, Policy, Progress, RunIdentity};
+use prl_train::algo::{build_algorithm, AlgorithmDeps};
+use prl_train::{BatchPacker, BatchSender, FlopTable, PayloadReleaser, SinkConfig, TrainEnvSpec, TrainSink};
+use prl_types::{Bridge, DispatchResult, Kind, Metrics, Policy, Progress, RunIdentity, Scorer};
+use prl_wire::Episode;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::concurrency::{ConcurrencyController, ConcurrencyHandle, ConcurrencyIo, ConcurrencyParams};
-use crate::curriculum::{AdvRangeGate, CurriculumConfig, DifficultyPool, SamplerConfig};
-use crate::dispatcher::{
-    DispatchEnv, Dispatcher, DispatcherConfig, DispatcherHandle, DispatcherIo, EvalSide, TrainSide,
-};
+use crate::curriculum::{AdvRangeGate, CurriculumConfig, DifficultyPool, SamplerConfig, Tasks};
+use crate::dispatcher::{DispatchEnv, Dispatcher, DispatcherConfig, DispatcherHandle, DispatcherIo, EvalSide, TrainSide};
 use crate::envs::{config_dir, replica_address_files, start_env, StartedEnv};
 use crate::eval_pipeline::{EvalEnvShape, EvalPipeline, EvalPipelineConfig, EvalProgress};
 use crate::eval_source::{EvalEnvTasks, EvalSource};
 use crate::fmt::pct;
-use crate::glue::ClientSessions;
 use crate::lag::{self, LagHandle};
 use crate::periodic::PeriodicLogger;
-use crate::train_pipeline::{wait_for_version, TrainPipeline, TrainPipelineConfig, TrainView};
+use crate::train_pipeline::{wait_for_version, TrainPipeline, TrainPipelineConfig, TrainPipelineHandle, TrainPipelineInbox, TrainView};
 use crate::train_source::{TrainEnvTasks, TrainSource};
-use crate::watcher::{UpdateHook, VersionObserver, WeightWatcher};
+use crate::watcher::WeightWatcher;
 
 /// Wall-clock budget for teardown; the process force-exits past it.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(300);
 
 type Components = JoinSet<(&'static str, Result<()>)>;
+type Results = mpsc::Receiver<DispatchResult<Episode>>;
 
 fn spawn_component(
     tasks: &mut Components,
@@ -56,33 +50,6 @@ fn spawn_component(
     fut: impl std::future::Future<Output = Result<()>> + Send + 'static,
 ) {
     tasks.spawn(async move { (name, fut.await) });
-}
-
-/// The dispatcher pauses scheduling across a weight update.
-#[async_trait]
-impl VersionObserver for DispatcherHandle {
-    fn name(&self) -> &str {
-        "Dispatcher"
-    }
-
-    async fn on_version_pending(&self, _step: u64) -> Result<()> {
-        self.version_pending().await
-    }
-
-    async fn on_new_version(&self, _step: u64) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Resumes the dispatcher after the update hooks ran, so an eval trigger switches the mode
-/// before anything is scheduled on the new policy.
-struct ResumeDispatch(DispatcherHandle);
-
-#[async_trait]
-impl UpdateHook for ResumeDispatch {
-    async fn on_update(&self, _step: u64) -> Result<()> {
-        self.0.version_applied().await
-    }
 }
 
 fn curriculum_config(source: &TrainSourceConfig) -> CurriculumConfig {
@@ -101,27 +68,23 @@ fn curriculum_config(source: &TrainSourceConfig) -> CurriculumConfig {
     let gates = config
         .gates
         .iter()
-        .map(|(name, gate)| match gate {
-            AdmissionGateConfig::AdvantageRange(g) => {
-                (name.clone(), AdvRangeGate { reject_min: g.reject_min, reject_max: g.reject_max })
-            }
+        .map(|(name, AdmissionGateConfig::AdvantageRange(g))| {
+            (name.clone(), AdvRangeGate { reject_min: g.reject_min, reject_max: g.reject_max })
         })
         .collect();
     CurriculumConfig { sampler, gates }
 }
 
+/// The vf `SamplingConfig` of train requests (`TrainEnv.__init__`).
 fn train_sampling(source: &TrainSourceConfig, live: bool) -> Result<prl_wire::Map> {
     let s = &source.sampling;
-    let extra_body = serde_json::from_value::<prl_wire::Value>(s.extra_body.clone())?
-        .into_map()
-        .unwrap_or_default();
     let sampling = prl_wire::sampling::TrainSampling {
         temperature: s.temperature,
         top_p: s.top_p,
         top_k: s.top_k.map(|k| k as i64),
         max_completion_tokens: s.max_completion_tokens.map(|k| k as i64),
         logprobs: s.logprobs.map(|k| k as i64),
-        extra_body,
+        extra_body: json_map(&s.extra_body)?,
     };
     Ok(prl_wire::sampling::train_sampling(&sampling, live))
 }
@@ -130,6 +93,31 @@ fn json_map(value: &serde_json::Value) -> Result<prl_wire::Map> {
     serde_json::from_value::<prl_wire::Value>(value.clone())?
         .into_map()
         .ok_or_else(|| anyhow!("expected a mapping, got {value}"))
+}
+
+/// The micro-batch packer with the trainer model's FLOP cost table (from the bridge).
+async fn build_packer(config: &OrchestratorConfig, bridge: &Arc<dyn Bridge>) -> Result<BatchPacker> {
+    let (seq_len, multiple) = (config.seq_len as usize, config.pad_to_multiple_of as usize);
+    let max_len = if config.pad_to_seq_len { seq_len } else { FlopTable::max_len(seq_len, multiple) };
+    let table = FlopTable::new(bridge.flop_cost_table(max_len).await?);
+    Ok(BatchPacker::new(seq_len, config.num_train_workers as usize, multiple, config.pad_to_seq_len, table))
+}
+
+/// Connect an env per source (concurrently), logging the phase like Python.
+async fn start_envs(config: &OrchestratorConfig, kind: Kind, names: &[String], bridge: &Arc<dyn Bridge>) -> Result<Vec<StartedEnv>> {
+    info!("Loading {} environments ({})", kind.as_str(), names.join(", "));
+    let t0 = Instant::now();
+    let split = if kind == Kind::Train { Split::Train } else { Split::Eval };
+    let dir = config_dir(&config.output_dir);
+    let envs = futures::future::try_join_all(names.iter().map(|name| {
+        let address = config.env_addresses.get(&(split, name.clone())).cloned().flatten();
+        let files = replica_address_files(&dir, kind, name, config.env_server_replicas);
+        start_env(kind, name, address, files, bridge.clone())
+    }))
+    .await?;
+    let label = if kind == Kind::Train { "Train" } else { "Eval" };
+    prl_io::success!("{label} environments ready in {}", format_time(t0.elapsed().as_secs_f64()));
+    Ok(envs)
 }
 
 /// Read-only handles the pipeline-view logger polls.
@@ -195,12 +183,12 @@ impl PipelineView {
         if let Some(gc) = &self.gc {
             payload.extend(gc.clone());
         }
-        payload.extend(self.lag.stats().await.metrics());
+        payload.extend(self.lag.metrics().await);
         (body, payload)
     }
 }
 
-/// Run the orchestrator until it exits.
+/// Run the orchestrator until it exits. `shutdown` (SIGINT) cancels it like Python's main task.
 pub async fn run(
     config: OrchestratorConfig,
     bridge: Arc<dyn Bridge>,
@@ -210,19 +198,18 @@ pub async fn run(
 ) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut tasks = Components::new();
-    let result = tokio::select! {
+    let setup = tokio::select! {
         r = Orchestrator::setup(config, bridge, wandb, nixl, &mut tasks, cancel.clone()) => r,
         _ = shutdown.cancelled() => Err(anyhow!("interrupted during setup")),
     };
-    let orchestrator = match result {
-        Ok(orchestrator) => orchestrator,
+    match setup {
+        Ok(orchestrator) => orchestrator.start(tasks, shutdown).await,
         Err(err) => {
             cancel.cancel();
             while tasks.join_next().await.is_some() {}
-            return Err(err);
+            Err(err)
         }
-    };
-    orchestrator.start(tasks, shutdown).await
+    }
 }
 
 struct Orchestrator {
@@ -230,9 +217,9 @@ struct Orchestrator {
     cancel: CancellationToken,
     metrics_cancel: CancellationToken,
     dispatcher: DispatcherHandle,
-    train: crate::train_pipeline::TrainPipelineHandle,
-    train_pipeline: Option<(TrainPipeline, crate::train_pipeline::TrainPipelineInbox, mpsc::Receiver<prl_types::DispatchResult<prl_wire::Episode>>)>,
-    watcher: Option<WeightWatcher<WeightReceiver>>,
+    train: TrainPipelineHandle,
+    train_pipeline: Option<(TrainPipeline, TrainPipelineInbox, Results)>,
+    watcher: Option<WeightWatcher>,
     applied: watch::Receiver<u64>,
     idle: watch::Receiver<bool>,
     monitors: Monitors,
@@ -243,6 +230,7 @@ struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// `Orchestrator.setup()`: same order and log lines as Python.
     async fn setup(
         config: OrchestratorConfig,
         bridge: Arc<dyn Bridge>,
@@ -259,26 +247,34 @@ impl Orchestrator {
             ClientType::ChatCompletions,
             Some(&config.renderer),
         )?);
-        let mut admin =
-            AdminPlane::setup(&config.model.client, &config.model.name, config.inference_metrics_roles.clone())?;
+        let roles = config.inference_metrics_roles.clone();
+        let mut admin = AdminPlane::setup(&config.model.client, &config.model.name, roles)?;
 
         let (monitors, monitors_task) =
             prl_monitors::spawn(MonitorsSetup::from_orchestrator(&config, wandb), cancel.child_token()).await?;
         tasks.spawn(async move { ("monitors", monitors_task.await.map_err(anyhow::Error::from).and_then(|r| r)) });
 
         // The launcher-set $PRL_RUN_ID is the run identity; standalone runs mint one.
+        let env_var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         let run = RunIdentity {
-            id: std::env::var("PRL_RUN_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
-            name: std::env::var("PRL_RUN_NAME").ok().filter(|s| !s.is_empty()),
+            id: env_var("PRL_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
+            name: env_var("PRL_RUN_NAME"),
         };
         let heartbeat = config.heartbeat.as_ref().map(|h| Arc::new(Heartbeat::new(h.url.clone(), h.min_interval)));
-        let config_dir = config_dir(&config.output_dir);
         let ckpt = CheckpointManager::new(&config.output_dir);
 
+        let deps = AlgorithmDeps {
+            policy: policy_client.clone() as Arc<dyn Scorer>,
+            policy_model_name: policy_client.model_name.clone(),
+            connect_frozen: Arc::new(|model| {
+                Box::pin(async move { Ok(Arc::new(connect_frozen_client(&model, None).await?) as Arc<dyn Scorer>) })
+            }),
+            bridge: Some(bridge.clone()),
+        };
         let mut algorithms = Vec::new();
         for source in &config.train.source {
             info!("Initializing {} algorithm for {}", source.algo.params.tag(), source.resolved_name);
-            algorithms.push(crate::train_glue::build_algorithm(&config, source, &policy_client, &bridge)?);
+            algorithms.push(build_algorithm(&source.algo, &deps)?);
         }
 
         let resume_step = match &config.resume {
@@ -298,61 +294,32 @@ impl Orchestrator {
             None => info!("Starting from scratch"),
         }
 
-        let packer = Arc::new(crate::train_glue::build_packer(&config, &bridge).await?);
+        let packer = Arc::new(build_packer(&config, &bridge).await?);
         info!("Initializing micro batch sender ({})", config.reprs.rollout_transport);
-        let sender = prl_train::BatchSender::new(
-            config.output_dir.clone(),
-            config.num_train_workers as usize,
-            progress.step,
-            &config.rollout_transport,
-        )
-        .await?;
+        let workers = config.num_train_workers as usize;
+        let sender = BatchSender::new(config.output_dir.clone(), workers, progress.step, &config.rollout_transport).await?;
 
         let train_names: Vec<String> = config.train.source.iter().map(|s| s.resolved_name.clone()).collect();
-        info!("Loading train environments ({})", train_names.join(", "));
-        let t0 = Instant::now();
-        let train_envs = futures::future::try_join_all(config.train.source.iter().map(|s| {
-            let address = config.env_addresses.get(&(prl_config::Split::Train, s.resolved_name.clone())).cloned().flatten();
-            let files = replica_address_files(&config_dir, Kind::Train, &s.resolved_name, config.env_server_replicas);
-            start_env(Kind::Train, &s.resolved_name, address, files, bridge.clone())
-        }))
-        .await?;
-        prl_io::success!("Train environments ready in {}", format_time(t0.elapsed().as_secs_f64()));
+        let mut train_envs = start_envs(&config, Kind::Train, &train_names, &bridge).await?;
+        let eval_config = config.eval.clone();
+        let eval_sources = eval_config.as_ref().map(|e| e.source.clone()).unwrap_or_default();
+        let eval_names: Vec<String> = eval_sources.iter().map(|s| s.resolved_name.clone()).collect();
+        let eval_envs =
+            if eval_names.is_empty() { Vec::new() } else { start_envs(&config, Kind::Eval, &eval_names, &bridge).await? };
+        let eval_examples: Vec<_> = eval_envs.iter().map(StartedEnv::examples).collect::<Result<_>>()?;
 
-        let eval_sources = config.eval.as_ref().map(|e| e.source.clone()).unwrap_or_default();
-        let mut eval_envs = Vec::new();
-        if !eval_sources.is_empty() {
-            let names: Vec<String> = eval_sources.iter().map(|s| s.resolved_name.clone()).collect();
-            info!("Loading eval environments ({})", names.join(", "));
-            let t0 = Instant::now();
-            eval_envs = futures::future::try_join_all(eval_sources.iter().map(|s| {
-                let address =
-                    config.env_addresses.get(&(prl_config::Split::Eval, s.resolved_name.clone())).cloned().flatten();
-                let files = replica_address_files(&config_dir, Kind::Eval, &s.resolved_name, config.env_server_replicas);
-                start_env(Kind::Eval, &s.resolved_name, address, files, bridge.clone())
-            }))
-            .await?;
-            prl_io::success!("Eval environments ready in {}", format_time(t0.elapsed().as_secs_f64()));
-        }
-        let eval_examples: Vec<Vec<prl_types::TaskRecord>> =
-            eval_envs.iter().map(StartedEnv::examples).collect::<Result<_>>()?;
-
-        // Train source over the env tasksets (each consumed once).
-        let mut train_envs = train_envs;
         let mut source_envs = Vec::new();
         for (source, env) in config.train.source.iter().zip(train_envs.iter_mut()) {
-            let tasks = std::mem::replace(&mut env.tasks, crate::curriculum::Tasks::Finite(Vec::new()));
             source_envs.push(TrainEnvTasks {
                 name: source.resolved_name.clone(),
                 ratio: source.ratio,
                 curriculum: curriculum_config(source),
-                tasks,
+                tasks: std::mem::replace(&mut env.tasks, Tasks::Finite(Vec::new())),
             });
         }
         let mut train_source = TrainSource::new(source_envs)?;
         if let Some(step) = resume_step {
-            let path: Option<PathBuf> =
-                config.resume.as_ref().and_then(|r| r.dir.as_ref()).map(|dir| dir.join("orchestrator"));
+            let path = config.resume.as_ref().and_then(|r| r.dir.as_ref()).map(|dir| dir.join("orchestrator"));
             let state = ckpt.load(step, path.as_deref())?;
             progress = state.progress.clone();
             train_source.load(&state.train_source).await?;
@@ -366,10 +333,10 @@ impl Orchestrator {
         // Frozen generation sources and the algorithms' reference pools.
         let frozen = futures::future::try_join_all(config.train.source.iter().map(|s| async {
             match &s.algo.sampling.source {
-                prl_config::ModelReference::Frozen(model) => {
+                ModelReference::Frozen(model) => {
                     Ok::<_, anyhow::Error>(Some(Arc::new(connect_frozen_client(model, Some(&config.renderer)).await?)))
                 }
-                prl_config::ModelReference::Policy => Ok(None),
+                ModelReference::Policy => Ok(None),
             }
         }))
         .await?;
@@ -378,22 +345,19 @@ impl Orchestrator {
         let admin_clients = admin.clients().to_vec();
         info!("Initializing weight broadcast ({})", config.reprs.weight_broadcast);
         let t0 = Instant::now();
-        let mut receiver = WeightReceiver::new(
-            prl_io::pathing::broadcast_dir(&config.output_dir),
-            config.weight_broadcast.clone(),
-            admin,
-            config.model.name.clone(),
-            nixl,
-        )?;
+        let broadcast_dir = prl_io::pathing::broadcast_dir(&config.output_dir);
+        let wb = config.weight_broadcast.clone();
+        let mut receiver = WeightReceiver::new(broadcast_dir, wb, admin, config.model.name.clone(), nixl)?;
         receiver.initialize().await?;
         debug!("Initialized weight broadcast in {}", format_time(t0.elapsed().as_secs_f64()));
-        let sync_version = resume_step.unwrap_or(0);
 
         // Shared values.
         let (policy_tx, policy_rx) = watch::channel(Policy { version: 0, model_name: policy_client.model_name.clone() });
-        // Written once a policy update's hooks (eval trigger, dispatcher resume) all ran: the
-        // waits for a version use it, so they never overtake the eval trigger of that version.
+        // Written once a policy update's eval trigger and dispatcher resume ran: version waits
+        // use it so they never overtake the eval trigger of that version.
         let (applied_tx, applied_rx) = watch::channel(0u64);
+        let (step_tx, step_rx) = watch::channel(progress.step);
+
         let concurrency = ConcurrencyController::new(
             ConcurrencyParams {
                 min_inflight: config.concurrency.min_inflight as usize,
@@ -406,10 +370,8 @@ impl Orchestrator {
         let (inflight_tx, inflight_rx) = watch::channel(0usize);
         let (overload_tx, overload_rx) = mpsc::unbounded_channel();
         let (load_tx, load_rx) = mpsc::channel(16);
-        let (concurrency_handle, concurrency_task) = concurrency.spawn(
-            ConcurrencyIo { samples: load_rx, inflight: inflight_rx, limit: limit_tx, overload: Some(overload_tx) },
-            cancel.child_token(),
-        );
+        let io = ConcurrencyIo { samples: load_rx, inflight: inflight_rx, limit: limit_tx, overload: Some(overload_tx) };
+        let (concurrency, concurrency_task) = concurrency.spawn(io, cancel.child_token());
         tasks.spawn(async move { ("concurrency", concurrency_task.await.map_err(anyhow::Error::from).and_then(|r| r)) });
 
         // Results channels, bounded like Python's out_q.
@@ -417,191 +379,134 @@ impl Orchestrator {
         let (train_results_tx, train_results_rx) = mpsc::channel(bound);
         let (eval_results_tx, eval_results_rx) = mpsc::channel(bound);
 
-        let (source_handle, source_task) = train_source.spawn();
+        let (source, source_task) = train_source.spawn();
         tasks.spawn(async move { ("train_source", source_task.await.map_err(anyhow::Error::from)) });
 
         let mut train_dispatch = IndexMap::new();
-        for (i, source) in config.train.source.iter().enumerate() {
-            let live = frozen[i].is_none();
-            let clients = frozen[i].clone().unwrap_or_else(|| policy_client.clone());
+        let mut env_specs = IndexMap::new();
+        for (((source_config, env), frozen), algorithm) in
+            config.train.source.iter().zip(&train_envs).zip(frozen).zip(algorithms)
+        {
+            let live = frozen.is_none();
+            let clients = frozen.unwrap_or_else(|| policy_client.clone());
+            let name = source_config.resolved_name.clone();
+            let sampling = &source_config.sampling;
+            env_specs.insert(
+                name.clone(),
+                TrainEnvSpec {
+                    group_size: source_config.group_size as usize,
+                    temperature: sampling.temperature as f32,
+                    requires_sampling_masks: sampling.truncates_distribution && live,
+                    requires_top_logprobs: sampling.logprobs.is_some() && live,
+                    algorithm,
+                },
+            );
             train_dispatch.insert(
-                source.resolved_name.clone(),
+                name.clone(),
                 DispatchEnv {
-                    name: source.resolved_name.clone(),
-                    group_size: source.group_size as usize,
-                    runner: train_envs[i].router.clone(),
-                    sampling: train_sampling(source, live)?,
+                    name,
+                    group_size: source_config.group_size as usize,
+                    runner: env.router.clone(),
+                    sampling: train_sampling(source_config, live)?,
                     client: serde_json::to_value(&clients.train_client)?,
                     frozen_model: (!live).then(|| clients.model_name.clone()),
-                    sessions: Arc::new(ClientSessions(clients.clone())),
+                    sessions: clients,
                 },
             );
         }
-        let progress_step_placeholder = watch::channel(progress.step);
-        let ckpt_enabled = config.ckpt.is_some();
-        let ckpt_interval = config.ckpt.as_ref().and_then(|c| c.interval);
-        let controller = config.control.as_ref().map(|_| Controller::new(true));
-        let train_specs = crate::train_glue::train_env_specs(&config, algorithms)?;
-        let sink = crate::train_glue::build_sink(&config, train_specs)?;
-        let train_config = TrainPipelineConfig {
-            max_steps: config.max_steps,
-            ckpt_interval,
-            ckpt_enabled,
-            weight_broadcast_timeout: Duration::from_secs(config.weight_broadcast.timeout()),
-            train_env_names: train_names.clone(),
+
+        let eval_side = match &eval_config {
+            Some(eval) if !eval_envs.is_empty() => {
+                let mut envs = IndexMap::new();
+                let mut tasks_by_env = Vec::new();
+                for ((s, env), examples) in eval_sources.iter().zip(&eval_envs).zip(&eval_examples) {
+                    let interval = *eval
+                        .intervals
+                        .get(&s.resolved_name)
+                        .ok_or_else(|| anyhow!("No eval interval configured for env {:?}", s.resolved_name))?;
+                    tasks_by_env.push(EvalEnvTasks {
+                        name: s.resolved_name.clone(),
+                        tasks: examples.clone(),
+                        group_size: s.group_size as usize,
+                        interval,
+                    });
+                    envs.insert(
+                        s.resolved_name.clone(),
+                        DispatchEnv {
+                            name: s.resolved_name.clone(),
+                            group_size: s.group_size as usize,
+                            runner: env.router.clone(),
+                            sampling: json_map(&s.sampling)?,
+                            client: serde_json::to_value(&policy_client.eval_client)?,
+                            frozen_model: None,
+                            sessions: policy_client.clone(),
+                        },
+                    );
+                }
+                let source = EvalSource::new(tasks_by_env, eval.skip_first_step, resume_step.is_some());
+                Some(EvalSide { envs, source, results: eval_results_tx })
+            }
+            _ => None,
         };
 
-        // The dispatcher reads `progress_step`, written by the train pipeline.
-        let (step_tx, step_rx) = progress_step_placeholder;
-        {
-            let eval_side = if eval_envs.is_empty() {
-                None
-            } else {
-                let eval_config = config.eval.as_ref().expect("eval envs imply eval config");
-                let tasks = eval_sources
-                    .iter()
-                    .zip(eval_examples.iter())
-                    .map(|(s, examples)| {
-                        let interval = *eval_config
-                            .intervals
-                            .get(&s.resolved_name)
-                            .ok_or_else(|| anyhow!("No eval interval configured for env {:?}", s.resolved_name))?;
-                        Ok(EvalEnvTasks {
-                            name: s.resolved_name.clone(),
-                            tasks: examples.clone(),
-                            group_size: s.group_size as usize,
-                            interval,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Some((tasks, eval_config.skip_first_step))
-            };
-            let eval_side = match eval_side {
-                None => None,
-                Some((tasks, skip_first)) => {
-                    let mut envs = IndexMap::new();
-                    for (s, env) in eval_sources.iter().zip(eval_envs.iter()) {
-                        envs.insert(
-                            s.resolved_name.clone(),
-                            DispatchEnv {
-                                name: s.resolved_name.clone(),
-                                group_size: s.group_size as usize,
-                                runner: env.router.clone(),
-                                sampling: json_map(&s.sampling)?,
-                                client: serde_json::to_value(&policy_client.eval_client)?,
-                                frozen_model: None,
-                                sessions: Arc::new(ClientSessions(policy_client.clone())),
-                            },
-                        );
-                    }
-                    Some(EvalSide {
-                        envs,
-                        source: EvalSource::new(tasks, skip_first, resume_step.is_some()),
-                        results: eval_results_tx,
-                    })
-                }
-            };
-            let (idle_tx, idle_rx) = watch::channel(false);
-            let built = Dispatcher::new(
-                DispatcherConfig {
-                    dispatch_per_minute: config.dispatch_per_minute.map(|d| d as f64),
-                    run: run.clone(),
-                    policy_weights_change: true,
-                },
-                Some(TrainSide {
-                    envs: train_dispatch,
-                    source: source_handle.clone(),
-                    progress_step: step_rx,
-                    results: train_results_tx,
-                }),
-                eval_side,
-                DispatcherIo {
-                    policy: policy_rx.clone(),
-                    limit: limit_rx,
-                    inflight: inflight_tx,
-                    overload: overload_rx,
-                    concurrency: Some(concurrency_handle.clone()),
-                    live: Arc::new(monitors.clone()),
-                    release: Arc::new(crate::eval_pipeline::release_episode),
-                    idle: idle_tx,
-                },
-            );
-            let (dispatcher, dispatcher_handle, dispatcher_inbox) = built;
-            let (train_pipeline, train_handle, train_inbox, view_rx) = TrainPipeline::new(
-                train_config,
-                sink,
-                source_handle.clone(),
-                progress.clone(),
-                applied_rx.clone(),
-                dispatcher_handle.clone(),
-                packer,
-                sender,
-                ckpt.clone(),
-                controller.clone(),
-                monitors.clone(),
-                heartbeat.clone(),
-                step_tx,
-            );
-            spawn_component(tasks, "dispatcher", dispatcher.run(dispatcher_inbox, cancel.child_token()));
-            Self::finish_setup(
-                config,
-                cancel,
-                tasks,
-                monitors,
-                policy_client,
-                admin_clients,
-                load_tx,
-                concurrency_handle,
-                dispatcher_handle,
-                train_handle,
-                (train_pipeline, train_inbox, train_results_rx),
-                view_rx,
-                eval_results_rx,
-                eval_sources.iter().zip(eval_examples.iter()).map(|(s, ex)| (s.resolved_name.clone(), EvalEnvShape { group_size: s.group_size as usize, num_examples: ex.len() })).collect(),
-                resume_step,
-                receiver,
-                policy_tx,
-                applied_tx,
-                applied_rx,
-                idle_rx,
-                sync_version,
-                controller,
-                ckpt,
-                train_envs.into_iter().chain(eval_envs).collect(),
-                train_names,
-            )
-            .await
-        }
-    }
+        let (idle_tx, idle_rx) = watch::channel(false);
+        let (dispatcher, dispatcher_handle, dispatcher_inbox) = Dispatcher::new(
+            DispatcherConfig {
+                dispatch_per_minute: config.dispatch_per_minute.map(|d| d as f64),
+                run,
+                policy_weights_change: true,
+            },
+            Some(TrainSide {
+                envs: train_dispatch,
+                source: source.clone(),
+                progress_step: step_rx,
+                results: train_results_tx,
+            }),
+            eval_side,
+            DispatcherIo {
+                policy: policy_rx,
+                limit: limit_rx,
+                inflight: inflight_tx,
+                overload: overload_rx,
+                concurrency: Some(concurrency.clone()),
+                live: monitors.clone(),
+                idle: idle_tx,
+            },
+        );
+        spawn_component(tasks, "dispatcher", dispatcher.run(dispatcher_inbox, cancel.child_token()));
 
-    #[allow(clippy::too_many_arguments)]
-    async fn finish_setup(
-        config: OrchestratorConfig,
-        cancel: CancellationToken,
-        tasks: &mut Components,
-        monitors: Monitors,
-        _policy_client: Arc<InferenceClient>,
-        admin_clients: Vec<prl_io::http::AdminClient>,
-        load_tx: mpsc::Sender<Vec<prl_io::inference_metrics::EngineLoadSample>>,
-        concurrency: ConcurrencyHandle,
-        dispatcher: DispatcherHandle,
-        train: crate::train_pipeline::TrainPipelineHandle,
-        train_pipeline: (TrainPipeline, crate::train_pipeline::TrainPipelineInbox, mpsc::Receiver<prl_types::DispatchResult<prl_wire::Episode>>),
-        train_view: watch::Receiver<TrainView>,
-        eval_results: mpsc::Receiver<prl_types::DispatchResult<prl_wire::Episode>>,
-        eval_shapes: IndexMap<String, EvalEnvShape>,
-        resume_step: Option<u64>,
-        receiver: WeightReceiver,
-        policy_tx: watch::Sender<Policy>,
-        applied_tx: watch::Sender<u64>,
-        applied_rx: watch::Receiver<u64>,
-        idle_rx: watch::Receiver<bool>,
-        sync_version: u64,
-        controller: Option<Controller>,
-        ckpt: CheckpointManager,
-        envs: Vec<StartedEnv>,
-        train_names: Vec<String>,
-    ) -> Result<Self> {
+        let controller = config.control.as_ref().map(|_| Controller::new(true));
+        let sink = TrainSink::new(
+            SinkConfig {
+                batch_size: config.batch_size as usize,
+                max_staleness: config.max_staleness as i64,
+                constant_trainer_batch_size: config.constant_trainer_batch_size,
+            },
+            env_specs,
+            PayloadReleaser::new(prl_wire::payload::delete_payloads),
+        );
+        let (train_pipeline, train, train_inbox, train_view) = TrainPipeline::new(
+            TrainPipelineConfig {
+                max_steps: config.max_steps,
+                ckpt_interval: config.ckpt.as_ref().and_then(|c| c.interval),
+                ckpt_enabled: config.ckpt.is_some(),
+                weight_broadcast_timeout: Duration::from_secs(config.weight_broadcast.timeout()),
+                train_env_names: train_names.clone(),
+            },
+            sink,
+            source,
+            progress,
+            applied_rx.clone(),
+            dispatcher_handle.clone(),
+            packer,
+            sender,
+            ckpt.clone(),
+            controller.clone(),
+            monitors.clone(),
+            heartbeat,
+            step_tx,
+        );
+
         // The collector always polls (it feeds the concurrency controller); its metrics fan out
         // to the monitors when collection is on.
         let metrics_cancel = cancel.child_token();
@@ -615,54 +520,63 @@ impl Orchestrator {
         )?;
         // One awaited scrape so the controller derives its initial limit before the loop starts.
         collector.probe(1, Duration::ZERO).await;
-        {
-            let monitors = monitors.clone();
-            let metrics_cancel = metrics_cancel.clone();
-            tokio::spawn(collector.run(metrics_cancel));
-            tokio::spawn(async move {
-                while let Some(row) = metrics_rx.recv().await {
-                    monitors.log_metrics(row, None).await;
-                }
-            });
-        }
+        tokio::spawn(collector.run(metrics_cancel.clone()));
+        let metrics_monitors = monitors.clone();
+        tokio::spawn(async move {
+            while let Some(row) = metrics_rx.recv().await {
+                metrics_monitors.log_metrics(row, None).await;
+            }
+        });
 
-        let mut hooks: Vec<Box<dyn UpdateHook>> = Vec::new();
         let mut eval_progress = None;
-        let eval_envs: Vec<String> = eval_shapes.keys().cloned().collect();
-        if !eval_shapes.is_empty() {
-            let eval_config = config.eval.as_ref().expect("eval envs imply eval config");
+        let mut eval_handle = None;
+        if let Some(eval) = eval_config.as_ref().filter(|_| !eval_envs.is_empty()) {
+            let shapes = eval_sources
+                .iter()
+                .zip(&eval_examples)
+                .map(|(s, ex)| (s.resolved_name.clone(), EvalEnvShape { group_size: s.group_size as usize, num_examples: ex.len() }))
+                .collect();
             let (pipeline, handle, progress, inbox) = EvalPipeline::new(
                 EvalPipelineConfig {
-                    envs: eval_shapes,
+                    envs: shapes,
                     resume_step,
-                    retrigger_on_resume: eval_config.retrigger_on_resume,
+                    retrigger_on_resume: eval.retrigger_on_resume,
                     max_steps: config.max_steps,
                 },
-                dispatcher.clone(),
+                dispatcher_handle.clone(),
                 monitors.clone(),
             );
-            spawn_component(tasks, "eval_pipeline", pipeline.run(inbox, eval_results, cancel.child_token()));
-            hooks.push(Box::new(handle));
+            spawn_component(tasks, "eval_pipeline", pipeline.run(inbox, eval_results_rx, cancel.child_token()));
+            eval_handle = Some(handle);
             eval_progress = Some(progress);
         }
-        hooks.push(Box::new(ResumeDispatch(dispatcher.clone())));
-        let (mut watcher, watcher_gauges) =
-            WeightWatcher::new(receiver, policy_tx, applied_tx, vec![Box::new(dispatcher.clone())], hooks, sync_version);
 
-        let (lag, lag_task) = lag::spawn(cancel.child_token());
-        tokio::spawn(async move {
-            let _ = lag_task.await;
-        });
+        let sync_version = resume_step.unwrap_or(0);
+        let (gauges_tx, gauges_rx) = watch::channel(Metrics::new());
+        let mut watcher = WeightWatcher {
+            receiver,
+            policy: policy_tx,
+            applied: applied_tx,
+            gauges: gauges_tx,
+            dispatcher: dispatcher_handle.clone(),
+            eval: eval_handle,
+            ckpt_step: sync_version,
+            last_update_weights_time: 0.0,
+            last_wait_for_ckpt_time: 0.0,
+            update_count: 0,
+        };
+
+        let lag = lag::spawn(cancel.child_token());
         let view = PipelineView {
-            dispatcher: dispatcher.clone(),
+            dispatcher: dispatcher_handle.clone(),
             concurrency,
             lag,
-            watcher: watcher_gauges,
+            watcher: gauges_rx,
             train: train_view,
             eval: eval_progress,
             gc: config.gc.as_ref().map(|gc| prl_io::gc::GarbageCollector::new(gc.interval).gauges()),
             train_envs: train_names,
-            eval_envs,
+            eval_envs: eval_names,
         };
 
         info!("Syncing inference to the trainer's startup broadcast (v{sync_version})");
@@ -674,9 +588,9 @@ impl Orchestrator {
             config,
             cancel,
             metrics_cancel,
-            dispatcher,
+            dispatcher: dispatcher_handle,
             train,
-            train_pipeline: Some(train_pipeline),
+            train_pipeline: Some((train_pipeline, train_inbox, train_results_rx)),
             watcher: Some(watcher),
             applied: applied_rx,
             idle: idle_rx,
@@ -684,7 +598,7 @@ impl Orchestrator {
             view,
             controller,
             ckpt,
-            envs,
+            envs: train_envs.into_iter().chain(eval_envs).collect(),
         })
     }
 
