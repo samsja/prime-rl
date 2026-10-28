@@ -1,0 +1,154 @@
+//! A JSON writer byte-compatible with `orjson.dumps` (default options, plus
+//! `OPT_SERIALIZE_NUMPY` for float32 arrays held as `Value::F32`).
+//!
+//! orjson's float format: the shortest round-trip digits, in decimal notation when the
+//! decimal exponent is in `-5..16` (`100.0`, `0.00001`) and scientific otherwise (`1e-6`,
+//! `1.5e+16`); numpy float32 uses `-6..13`. NaN and infinities are `null`. Strings escape only `"`, `\` and control
+//! characters.
+
+use crate::value::Value;
+
+pub fn to_vec(value: &Value) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
+    write(&mut out, value);
+    out
+}
+
+pub fn write(out: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Nil => out.extend_from_slice(b"null"),
+        Value::Bool(true) => out.extend_from_slice(b"true"),
+        Value::Bool(false) => out.extend_from_slice(b"false"),
+        Value::Int(i) => out.extend_from_slice(itoa(*i as i128).as_bytes()),
+        Value::UInt(u) => out.extend_from_slice(itoa(*u as i128).as_bytes()),
+        Value::F32(f) => write_f32(out, *f),
+        Value::F64(f) => write_f64(out, *f),
+        Value::Str(s) => write_str(out, s),
+        Value::Bin(b) => write_str(out, &String::from_utf8_lossy(b)),
+        Value::Array(items) => {
+            out.push(b'[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                write(out, item);
+            }
+            out.push(b']');
+        }
+        Value::Map(map) => {
+            out.push(b'{');
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                write_str(out, k);
+                out.push(b':');
+                write(out, v);
+            }
+            out.push(b'}');
+        }
+    }
+}
+
+fn itoa(i: i128) -> String {
+    i.to_string()
+}
+
+pub fn write_f64(out: &mut Vec<u8>, f: f64) {
+    if !f.is_finite() {
+        out.extend_from_slice(b"null");
+        return;
+    }
+    let mut buf = ryu::Buffer::new();
+    format_shortest(out, buf.format_finite(f), -5..16);
+}
+
+pub fn write_f32(out: &mut Vec<u8>, f: f32) {
+    if !f.is_finite() {
+        out.extend_from_slice(b"null");
+        return;
+    }
+    let mut buf = ryu::Buffer::new();
+    format_shortest(out, buf.format_finite(f), -6..13);
+}
+
+/// Re-lay ryu's shortest representation in orjson's notation.
+fn format_shortest(out: &mut Vec<u8>, repr: &str, decimal_exps: std::ops::Range<i32>) {
+    let (negative, repr) = match repr.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, repr),
+    };
+    let (mantissa, exp) = match repr.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().expect("ryu exponent")),
+        None => (repr, 0),
+    };
+    let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    // value = 0.DIGITS * 10^point
+    let mut digits: String = format!("{int_part}{frac_part}");
+    let mut point = int_part.len() as i32 + exp;
+    let leading = digits.len() - digits.trim_start_matches('0').len();
+    digits.drain(..leading);
+    point -= leading as i32;
+    let trimmed = digits.trim_end_matches('0').len();
+    digits.truncate(trimmed);
+    if negative {
+        out.push(b'-');
+    }
+    if digits.is_empty() {
+        out.extend_from_slice(b"0.0");
+        return;
+    }
+    let n = digits.len() as i32;
+    let sci_exp = point - 1;
+    if decimal_exps.contains(&sci_exp) {
+        if point <= 0 {
+            out.extend_from_slice(b"0.");
+            out.extend(std::iter::repeat_n(b'0', (-point) as usize));
+            out.extend_from_slice(digits.as_bytes());
+        } else if point >= n {
+            out.extend_from_slice(digits.as_bytes());
+            out.extend(std::iter::repeat_n(b'0', (point - n) as usize));
+            out.extend_from_slice(b".0");
+        } else {
+            out.extend_from_slice(&digits.as_bytes()[..point as usize]);
+            out.push(b'.');
+            out.extend_from_slice(&digits.as_bytes()[point as usize..]);
+        }
+    } else {
+        out.push(digits.as_bytes()[0]);
+        if n > 1 {
+            out.push(b'.');
+            out.extend_from_slice(&digits.as_bytes()[1..]);
+        }
+        out.push(b'e');
+        out.push(if sci_exp > 0 { b'+' } else { b'-' });
+        out.extend_from_slice(sci_exp.abs().to_string().as_bytes());
+    }
+}
+
+pub fn write_str(out: &mut Vec<u8>, s: &str) {
+    out.push(b'"');
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let escape: Option<&[u8]> = match b {
+            b'"' => Some(b"\\\""),
+            b'\\' => Some(b"\\\\"),
+            b'\n' => Some(b"\\n"),
+            b'\r' => Some(b"\\r"),
+            b'\t' => Some(b"\\t"),
+            0x08 => Some(b"\\b"),
+            0x0c => Some(b"\\f"),
+            0x00..=0x1f => None,
+            _ => continue,
+        };
+        out.extend_from_slice(&bytes[start..i]);
+        match escape {
+            Some(e) => out.extend_from_slice(e),
+            None => out.extend_from_slice(format!("\\u{b:04x}").as_bytes()),
+        }
+        start = i + 1;
+    }
+    out.extend_from_slice(&bytes[start..]);
+    out.push(b'"');
+}

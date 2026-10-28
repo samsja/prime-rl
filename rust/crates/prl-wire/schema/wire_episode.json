@@ -1,0 +1,5979 @@
+{
+ "root": "Episode[WireTaskData, State, WireAgentConfig]",
+ "models": {
+  "Episode[WireTaskData, State, WireAgentConfig]": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "env",
+     "schema": {
+      "k": "model",
+      "ref": "EnvInfo"
+     }
+    },
+    {
+     "name": "task",
+     "schema": {
+      "k": "model",
+      "ref": "TraceTask[WireTaskData]"
+     }
+    },
+    {
+     "name": "group",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "GroupInfo"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "union",
+        "disc": "type",
+        "options": [
+         {
+          "k": "model",
+          "ref": "TrainRunInfo"
+         },
+         {
+          "k": "model",
+          "ref": "EvalRunInfo"
+         }
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "ok",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "is_timeout",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "errors",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "Error"
+      }
+     }
+    },
+    {
+     "name": "traces",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "Trace[WireTaskData, State, WireAgentConfig]"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": [
+    "num_input_tokens",
+    "num_output_tokens",
+    "num_total_tokens"
+   ]
+  },
+  "EnvInfo": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     },
+     "default": ""
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TraceTask[WireTaskData]": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "data",
+     "schema": {
+      "k": "model",
+      "ref": "WireTaskData"
+     }
+    },
+    {
+     "name": "key",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "hash",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "WireTaskData": {
+   "fields": [
+    {
+     "name": "idx",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "id",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "description",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "prompt",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "list",
+        "item": {
+         "k": "union",
+         "disc": "role",
+         "options": [
+          {
+           "k": "model",
+           "ref": "SystemMessage"
+          },
+          {
+           "k": "model",
+           "ref": "UserMessage"
+          },
+          {
+           "k": "model",
+           "ref": "AssistantMessage"
+          },
+          {
+           "k": "model",
+           "ref": "ToolMessage"
+          }
+         ]
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "system_prompt",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "scoring",
+     "schema": {
+      "k": "model",
+      "ref": "ScoringConfig"
+     }
+    },
+    {
+     "name": "image",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "workdir",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "agent_user",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "skills",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "union",
+       "disc": null,
+       "options": [
+        {
+         "k": "any"
+        },
+        {
+         "k": "dict",
+         "value": {
+          "k": "str"
+         }
+        }
+       ]
+      }
+     }
+    },
+    {
+     "name": "network",
+     "schema": {
+      "k": "model",
+      "ref": "NetworkPolicyConfig"
+     }
+    },
+    {
+     "name": "artifacts",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "Artifact"
+      }
+     }
+    },
+    {
+     "name": "artifact_max_bytes",
+     "schema": {
+      "k": "int"
+     },
+     "default": 33554432
+    },
+    {
+     "name": "timeout",
+     "schema": {
+      "k": "model",
+      "ref": "TaskTimeout"
+     }
+    },
+    {
+     "name": "resources",
+     "schema": {
+      "k": "model",
+      "ref": "TaskResources"
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
+  "SystemMessage": {
+   "fields": [
+    {
+     "name": "role",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "system"
+      ]
+     },
+     "default": "system"
+    },
+    {
+     "name": "content",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "list",
+        "item": {
+         "k": "union",
+         "disc": "type",
+         "options": [
+          {
+           "k": "model",
+           "ref": "TextContentPart"
+          },
+          {
+           "k": "model",
+           "ref": "ImageUrlContentPart"
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TextContentPart": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "text"
+      ]
+     },
+     "default": "text"
+    },
+    {
+     "name": "text",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ImageUrlContentPart": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "image_url"
+      ]
+     },
+     "default": "image_url"
+    },
+    {
+     "name": "image_url",
+     "schema": {
+      "k": "model",
+      "ref": "ImageUrlSource"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ImageUrlSource": {
+   "fields": [
+    {
+     "name": "url",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "UserMessage": {
+   "fields": [
+    {
+     "name": "role",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "user"
+      ]
+     },
+     "default": "user"
+    },
+    {
+     "name": "content",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "list",
+        "item": {
+         "k": "union",
+         "disc": "type",
+         "options": [
+          {
+           "k": "model",
+           "ref": "TextContentPart"
+          },
+          {
+           "k": "model",
+           "ref": "ImageUrlContentPart"
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "AssistantMessage": {
+   "fields": [
+    {
+     "name": "role",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "assistant"
+      ]
+     },
+     "default": "assistant"
+    },
+    {
+     "name": "content",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "reasoning_content",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "tool_calls",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "list",
+        "item": {
+         "k": "model",
+         "ref": "ToolCall"
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "provider_state",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "list",
+        "item": {
+         "k": "dict",
+         "value": {
+          "k": "any"
+         }
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ToolCall": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "function",
+       "custom"
+      ]
+     },
+     "default": "function"
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "namespace",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "arguments",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ToolMessage": {
+   "fields": [
+    {
+     "name": "role",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "tool"
+      ]
+     },
+     "default": "tool"
+    },
+    {
+     "name": "tool_call_id",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "content",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "list",
+        "item": {
+         "k": "union",
+         "disc": "type",
+         "options": [
+          {
+           "k": "model",
+           "ref": "TextContentPart"
+          },
+          {
+           "k": "model",
+           "ref": "ImageUrlContentPart"
+          }
+         ]
+        }
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ScoringConfig": {
+   "fields": [
+    {
+     "name": "mode",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "shared",
+       "isolated"
+      ]
+     },
+     "default": "shared"
+    },
+    {
+     "name": "runtime",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "union",
+        "disc": "type",
+        "options": [
+         {
+          "k": "model",
+          "ref": "SubprocessConfig"
+         },
+         {
+          "k": "model",
+          "ref": "DockerConfig"
+         },
+         {
+          "k": "model",
+          "ref": "PrimeConfig"
+         },
+         {
+          "k": "model",
+          "ref": "CustomRuntimeConfig"
+         }
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "env",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "dict",
+        "value": {
+         "k": "str"
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "retries",
+     "schema": {
+      "k": "model",
+      "ref": "RetryConfig"
+     }
+    },
+    {
+     "name": "network",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "NetworkPolicyConfig"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "skip_on_truncated",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "skip_on_timeout",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "SubprocessConfig": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "subprocess"
+      ]
+     },
+     "default": "subprocess"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "DockerConfig": {
+   "fields": [
+    {
+     "name": "allow",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "block",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "docker"
+      ]
+     },
+     "default": "docker"
+    },
+    {
+     "name": "image",
+     "schema": {
+      "k": "str"
+     },
+     "default": "python:3.11-slim"
+    },
+    {
+     "name": "workdir",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "cpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "memory",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "gpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "disk",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "mounts",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "model",
+       "ref": "BindMount"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "BindMount": {
+   "fields": [
+    {
+     "name": "source",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "read_only",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PrimeConfig": {
+   "fields": [
+    {
+     "name": "allow",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "block",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "prime"
+      ]
+     },
+     "default": "prime"
+    },
+    {
+     "name": "image",
+     "schema": {
+      "k": "str"
+     },
+     "default": "python:3.11-slim"
+    },
+    {
+     "name": "workdir",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "region",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "labels",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "cpu",
+     "schema": {
+      "k": "float"
+     },
+     "default": 1.0
+    },
+    {
+     "name": "memory",
+     "schema": {
+      "k": "float"
+     },
+     "default": 2.0
+    },
+    {
+     "name": "gpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "disk",
+     "schema": {
+      "k": "float"
+     },
+     "default": 5.0
+    },
+    {
+     "name": "checkpoint",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "idle_timeout",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     },
+     "default": 3600
+    },
+    {
+     "name": "creates_per_min",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "mounts",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "model",
+       "ref": "PrimeVolume"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PrimeVolume": {
+   "fields": [
+    {
+     "name": "name",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "read_only",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "CustomRuntimeConfig": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "custom"
+      ]
+     },
+     "default": "custom"
+    },
+    {
+     "name": "import_path",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "RetryConfig": {
+   "fields": [
+    {
+     "name": "max_retries",
+     "schema": {
+      "k": "int"
+     },
+     "default": 0
+    },
+    {
+     "name": "rules",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "RetryRule"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "RetryRule": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "status_code",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "list",
+        "item": {
+         "k": "union",
+         "disc": null,
+         "options": [
+          {
+           "k": "int"
+          },
+          {
+           "k": "literal",
+           "values": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx"
+           ]
+          }
+         ]
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "message",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_retries",
+     "schema": {
+      "k": "int"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "NetworkPolicyConfig": {
+   "fields": [
+    {
+     "name": "allow",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "block",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Artifact": {
+   "fields": [
+    {
+     "name": "source",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "destination",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "exclude",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "required",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TaskTimeout": {
+   "fields": [
+    {
+     "name": "setup",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "agent",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "finalize",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "scoring",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TaskResources": {
+   "fields": [
+    {
+     "name": "cpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "memory",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "gpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "disk",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "GroupInfo": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TrainRunInfo": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "train"
+      ]
+     },
+     "default": "train"
+    },
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "work",
+     "schema": {
+      "k": "union",
+      "disc": "type",
+      "options": [
+       {
+        "k": "model",
+        "ref": "TrainWorkInfo"
+       },
+       {
+        "k": "model",
+        "ref": "EvalWorkInfo"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TrainWorkInfo": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "train"
+      ]
+     },
+     "default": "train"
+    },
+    {
+     "name": "step",
+     "schema": {
+      "k": "int"
+     }
+    },
+    {
+     "name": "policy",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "PolicySpan"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PolicySpan": {
+   "fields": [
+    {
+     "name": "start",
+     "schema": {
+      "k": "int"
+     }
+    },
+    {
+     "name": "end",
+     "schema": {
+      "k": "int"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "EvalWorkInfo": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "eval"
+      ]
+     },
+     "default": "eval"
+    },
+    {
+     "name": "step",
+     "schema": {
+      "k": "int"
+     }
+    },
+    {
+     "name": "policy",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "PolicySpan"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "EvalRunInfo": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "eval"
+      ]
+     },
+     "default": "eval"
+    },
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Error": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "message",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "status_code",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "traceback",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Trace[WireTaskData, State, WireAgentConfig]": {
+   "fields": [
+    {
+     "name": "version",
+     "schema": {
+      "k": "int"
+     },
+     "default": 1
+    },
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "verifiers",
+     "schema": {
+      "k": "model",
+      "ref": "VersionInfo"
+     }
+    },
+    {
+     "name": "task",
+     "schema": {
+      "k": "model",
+      "ref": "TraceTask[WireTaskData]"
+     }
+    },
+    {
+     "name": "agent",
+     "schema": {
+      "k": "model",
+      "ref": "AgentInfo[WireAgentConfig]"
+     }
+    },
+    {
+     "name": "tools",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "Tool"
+      }
+     }
+    },
+    {
+     "name": "nodes",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "MessageNode"
+      }
+     }
+    },
+    {
+     "name": "calls",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "ModelCall"
+      }
+     }
+    },
+    {
+     "name": "mm_token_type_id_map",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "int"
+      }
+     }
+    },
+    {
+     "name": "request_rewrites",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "InterceptRecord"
+      }
+     }
+    },
+    {
+     "name": "response_rewrites",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "InterceptRecord"
+      }
+     }
+    },
+    {
+     "name": "rewards",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "union",
+       "disc": null,
+       "options": [
+        {
+         "k": "model",
+         "ref": "Reward"
+        },
+        {
+         "k": "none"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "name": "metrics",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "union",
+       "disc": null,
+       "options": [
+        {
+         "k": "float"
+        },
+        {
+         "k": "none"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "name": "info",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "any"
+      }
+     }
+    },
+    {
+     "name": "root_reply",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "state",
+     "schema": {
+      "k": "model",
+      "ref": "State"
+     },
+     "exclude": true
+    },
+    {
+     "name": "extra_usage",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "Usage"
+      }
+     }
+    },
+    {
+     "name": "is_completed",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "ok",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "stop_condition",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "is_timeout",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "errors",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "Error"
+      }
+     }
+    },
+    {
+     "name": "dropped",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "timing",
+     "schema": {
+      "k": "model",
+      "ref": "Timing"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": [
+    "num_input_tokens",
+    "num_output_tokens",
+    "num_total_tokens"
+   ]
+  },
+  "VersionInfo": {
+   "fields": [
+    {
+     "name": "version",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "commit",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "AgentInfo[WireAgentConfig]": {
+   "fields": [
+    {
+     "name": "config",
+     "schema": {
+      "k": "model",
+      "ref": "WireAgentConfig"
+     }
+    },
+    {
+     "name": "runtime",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "union",
+        "disc": "type",
+        "options": [
+         {
+          "k": "model",
+          "ref": "SubprocessRuntimeInfo"
+         },
+         {
+          "k": "model",
+          "ref": "DockerRuntimeInfo"
+         },
+         {
+          "k": "model",
+          "ref": "PrimeRuntimeInfo"
+         },
+         {
+          "k": "model",
+          "ref": "CustomRuntimeInfo"
+         }
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "str"
+     },
+     "default": "agent"
+    },
+    {
+     "name": "trainable",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "WireAgentConfig": {
+   "fields": [
+    {
+     "name": "harness",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "WireHarnessConfig"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "runtime",
+     "schema": {
+      "k": "union",
+      "disc": "type",
+      "options": [
+       {
+        "k": "model",
+        "ref": "SubprocessConfig"
+       },
+       {
+        "k": "model",
+        "ref": "DockerConfig"
+       },
+       {
+        "k": "model",
+        "ref": "PrimeConfig"
+       },
+       {
+        "k": "model",
+        "ref": "CustomRuntimeConfig"
+       }
+      ]
+     }
+    },
+    {
+     "name": "scoring",
+     "schema": {
+      "k": "model",
+      "ref": "ScoringConfig"
+     }
+    },
+    {
+     "name": "deployment",
+     "schema": {
+      "k": "model",
+      "ref": "DeploymentConfig"
+     }
+    },
+    {
+     "name": "model",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "client",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "union",
+        "disc": "type",
+        "options": [
+         {
+          "k": "model",
+          "ref": "EvalClientConfig"
+         },
+         {
+          "k": "model",
+          "ref": "TrainClientConfig"
+         }
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "sampling",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "SamplingConfig"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_turns",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_input_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_output_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_total_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_turn_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "timeout",
+     "schema": {
+      "k": "model",
+      "ref": "TimeoutConfig"
+     }
+    },
+    {
+     "name": "retries",
+     "schema": {
+      "k": "model",
+      "ref": "RetryConfig"
+     }
+    },
+    {
+     "name": "network_notice",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "WireHarnessConfig": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "str"
+     },
+     "default": "bash"
+    },
+    {
+     "name": "env",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "forward_env",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "mcp_header_env",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "dict",
+       "value": {
+        "k": "str"
+       }
+      }
+     }
+    },
+    {
+     "name": "tool_timeout",
+     "schema": {
+      "k": "float"
+     },
+     "default": 600.0
+    },
+    {
+     "name": "disabled_tools",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "list",
+        "item": {
+         "k": "str"
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "dialect",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "chat_completions",
+         "responses",
+         "anthropic_messages"
+        ]
+       },
+       {
+        "k": "literal",
+        "values": [
+         "auto"
+        ]
+       }
+      ]
+     },
+     "default": "auto"
+    },
+    {
+     "name": "skills",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "union",
+       "disc": null,
+       "options": [
+        {
+         "k": "any"
+        },
+        {
+         "k": "dict",
+         "value": {
+          "k": "str"
+         }
+        }
+       ]
+      }
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
+  "DeploymentConfig": {
+   "fields": [
+    {
+     "name": "mode",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "colocated"
+      ]
+     },
+     "default": "colocated"
+    },
+    {
+     "name": "trust_compose",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "EvalClientConfig": {
+   "fields": [
+    {
+     "name": "base_url",
+     "schema": {
+      "k": "str"
+     },
+     "default": "https://api.pinference.ai/api/v1"
+    },
+    {
+     "name": "api_key_var",
+     "schema": {
+      "k": "str"
+     },
+     "default": "PRIME_API_KEY"
+    },
+    {
+     "name": "headers",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "headers_from_env",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "timeout",
+     "schema": {
+      "k": "model",
+      "ref": "ClientTimeoutConfig"
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "eval"
+      ]
+     },
+     "default": "eval"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ClientTimeoutConfig": {
+   "fields": [
+    {
+     "name": "connect",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     },
+     "default": 30.0
+    },
+    {
+     "name": "read",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "write",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "pool",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TrainClientConfig": {
+   "fields": [
+    {
+     "name": "base_url",
+     "schema": {
+      "k": "str"
+     },
+     "default": "https://api.pinference.ai/api/v1"
+    },
+    {
+     "name": "api_key_var",
+     "schema": {
+      "k": "str"
+     },
+     "default": "PRIME_API_KEY"
+    },
+    {
+     "name": "headers",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "headers_from_env",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "timeout",
+     "schema": {
+      "k": "model",
+      "ref": "ClientTimeoutConfig"
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "train"
+      ]
+     },
+     "default": "train"
+    },
+    {
+     "name": "renderer",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "union",
+        "disc": "name",
+        "options": [
+         {
+          "k": "model",
+          "ref": "AutoRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "DefaultRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Qwen3RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "PrimeQwen3RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Qwen35RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Qwen36RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Qwen38RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Qwen3VLRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Gemma4RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "GLM5RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "GLM51RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "GLM53RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "GLM53FlashRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "GLM45RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "GptOssRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "MuseGlimmerRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Hy3RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "InklingRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "KimiK2RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "KimiK25RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "LagunaXS2RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "LagunaM1RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "LagunaXS21RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "LagunaS21RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Llama3RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "MiniMaxM2RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Nemotron3RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Nemotron3UltraRendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "Nemotron35RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "DeepSeekV3RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "DeepSeekR1RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "DeepSeekV4RendererConfig"
+         },
+         {
+          "k": "model",
+          "ref": "CustomRendererConfig"
+         }
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "renderer_model_name",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "multiplex",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "AutoRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "auto"
+      ]
+     },
+     "default": "auto"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "DefaultRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "default"
+      ]
+     },
+     "default": "default"
+    },
+    {
+     "name": "tool_parser",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "reasoning_parser",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
+  "Qwen3RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "qwen3"
+      ]
+     },
+     "default": "qwen3"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PrimeQwen3RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "prime-qwen3"
+      ]
+     },
+     "default": "prime-qwen3"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Qwen35RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "qwen3.5"
+      ]
+     },
+     "default": "qwen3.5"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "bool"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "add_vision_id",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "image_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Qwen36RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "qwen3.6"
+      ]
+     },
+     "default": "qwen3.6"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "bool"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "add_vision_id",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "preserve_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "image_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Qwen38RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "qwen3.8"
+      ]
+     },
+     "default": "qwen3.8"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "bool"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "add_vision_id",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "preserve_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "xhigh",
+       "medium",
+       "low"
+      ]
+     },
+     "default": "xhigh"
+    },
+    {
+     "name": "image_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Qwen3VLRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "qwen3-vl"
+      ]
+     },
+     "default": "qwen3-vl"
+    },
+    {
+     "name": "add_vision_id",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "image_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Gemma4RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "gemma4"
+      ]
+     },
+     "default": "gemma4"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "preserve_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "image_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "GLM5RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "glm-5"
+      ]
+     },
+     "default": "glm-5"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "clear_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "GLM51RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "glm-5.1"
+      ]
+     },
+     "default": "glm-5.1"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "clear_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "GLM53RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "glm-5.3"
+      ]
+     },
+     "default": "glm-5.3"
+    },
+    {
+     "name": "clear_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "default": "max"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "GLM53FlashRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "glm-5.3-flash"
+      ]
+     },
+     "default": "glm-5.3-flash"
+    },
+    {
+     "name": "clear_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "default": "max"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "GLM45RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "glm-4.5"
+      ]
+     },
+     "default": "glm-4.5"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "GptOssRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "gpt-oss"
+      ]
+     },
+     "default": "gpt-oss"
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "low",
+       "medium",
+       "high"
+      ]
+     },
+     "default": "medium"
+    },
+    {
+     "name": "conversation_start_date",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "use_system_prompt",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "knowledge_cutoff",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "model_identity",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "auto_drop_analysis",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "MuseGlimmerRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "muse-glimmer"
+      ]
+     },
+     "default": "muse-glimmer"
+    },
+    {
+     "name": "reasoning_strength",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "low",
+       "medium",
+       "high",
+       "xhigh"
+      ]
+     },
+     "default": "high"
+    },
+    {
+     "name": "knowledge_cutoff",
+     "schema": {
+      "k": "str"
+     },
+     "default": "2026-01-04"
+    },
+    {
+     "name": "current_date",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Hy3RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "hy3"
+      ]
+     },
+     "default": "hy3"
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "no_think",
+       "low",
+       "high"
+      ]
+     },
+     "default": "no_think"
+    },
+    {
+     "name": "preserved_thinking",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "bool"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "is_training",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "raw_last_assistant",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "fallback_strategy",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "reasoning_toolcall_retry"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "InklingRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "inkling"
+      ]
+     },
+     "default": "inkling"
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "float"
+       }
+      ]
+     },
+     "default": 0.9
+    },
+    {
+     "name": "image_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    },
+    {
+     "name": "audio_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "KimiK2RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "kimi-k2"
+      ]
+     },
+     "default": "kimi-k2"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "KimiK25RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "kimi-k2.5"
+      ]
+     },
+     "default": "kimi-k2.5"
+    },
+    {
+     "name": "thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "image_cache_max",
+     "schema": {
+      "k": "int"
+     },
+     "default": 256
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "LagunaXS2RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "laguna-xs.2"
+      ]
+     },
+     "default": "laguna-xs.2"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "render_assistant_messages_raw",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "LagunaM1RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "laguna-m.1"
+      ]
+     },
+     "default": "laguna-m.1"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "render_assistant_messages_raw",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "LagunaXS21RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "laguna-xs-2.1"
+      ]
+     },
+     "default": "laguna-xs-2.1"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "LagunaS21RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "laguna-s-2.1"
+      ]
+     },
+     "default": "laguna-s-2.1"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "preserve_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Llama3RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "llama-3"
+      ]
+     },
+     "default": "llama-3"
+    },
+    {
+     "name": "date_string",
+     "schema": {
+      "k": "str"
+     },
+     "default": "26 Jul 2024"
+    },
+    {
+     "name": "tools_in_user_message",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "MiniMaxM2RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "minimax-m2"
+      ]
+     },
+     "default": "minimax-m2"
+    },
+    {
+     "name": "model_identity",
+     "schema": {
+      "k": "str"
+     },
+     "default": "You are a helpful assistant. Your name is MiniMax-M2.5 and is built by MiniMax."
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Nemotron3RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "nemotron-3"
+      ]
+     },
+     "default": "nemotron-3"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "truncate_history_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "low_effort",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Nemotron3UltraRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "nemotron-3-ultra"
+      ]
+     },
+     "default": "nemotron-3-ultra"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "truncate_history_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "medium_effort",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Nemotron35RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "nemotron-3.5"
+      ]
+     },
+     "default": "nemotron-3.5"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "truncate_history_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "DeepSeekV3RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "deepseek-v3"
+      ]
+     },
+     "default": "deepseek-v3"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "DeepSeekR1RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "deepseek-r1"
+      ]
+     },
+     "default": "deepseek-r1"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "DeepSeekV4RendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "deepseek-v4"
+      ]
+     },
+     "default": "deepseek-v4"
+    },
+    {
+     "name": "enable_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "drop_thinking",
+     "schema": {
+      "k": "bool"
+     },
+     "default": true
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "default": "low"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "CustomRendererConfig": {
+   "fields": [
+    {
+     "name": "thinking_retention",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "tool_cycle",
+         "all"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "custom"
+      ]
+     },
+     "default": "custom"
+    },
+    {
+     "name": "import_path",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
+  "SamplingConfig": {
+   "fields": [
+    {
+     "name": "temperature",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "top_p",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "reasoning_effort",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "max_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
+  "TimeoutConfig": {
+   "fields": [
+    {
+     "name": "setup",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "rollout",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "finalize",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "scoring",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "SubprocessRuntimeInfo": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "borrowed",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "subprocess"
+      ]
+     },
+     "default": "subprocess"
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "DockerRuntimeInfo": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "borrowed",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "allow",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "block",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "docker"
+      ]
+     },
+     "default": "docker"
+    },
+    {
+     "name": "image",
+     "schema": {
+      "k": "str"
+     },
+     "default": "python:3.11-slim"
+    },
+    {
+     "name": "workdir",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "cpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "memory",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "gpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "disk",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "mounts",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "model",
+       "ref": "BindMount"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PrimeRuntimeInfo": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "borrowed",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "allow",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "block",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "prime"
+      ]
+     },
+     "default": "prime"
+    },
+    {
+     "name": "image",
+     "schema": {
+      "k": "str"
+     },
+     "default": "python:3.11-slim"
+    },
+    {
+     "name": "workdir",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "region",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "labels",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    },
+    {
+     "name": "cpu",
+     "schema": {
+      "k": "float"
+     },
+     "default": 1.0
+    },
+    {
+     "name": "memory",
+     "schema": {
+      "k": "float"
+     },
+     "default": 2.0
+    },
+    {
+     "name": "gpu",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "disk",
+     "schema": {
+      "k": "float"
+     },
+     "default": 5.0
+    },
+    {
+     "name": "checkpoint",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "idle_timeout",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     },
+     "default": 3600
+    },
+    {
+     "name": "creates_per_min",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "mounts",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "model",
+       "ref": "PrimeVolume"
+      }
+     }
+    },
+    {
+     "name": "image_cached",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "bool"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "CustomRuntimeInfo": {
+   "fields": [
+    {
+     "name": "id",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "borrowed",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "literal",
+      "values": [
+       "custom"
+      ]
+     },
+     "default": "custom"
+    },
+    {
+     "name": "import_path",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
+  "Tool": {
+   "fields": [
+    {
+     "name": "type",
+     "schema": {
+      "k": "str"
+     },
+     "default": "function"
+    },
+    {
+     "name": "name",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "namespace",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "description",
+     "schema": {
+      "k": "str"
+     },
+     "default": ""
+    },
+    {
+     "name": "parameters",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "any"
+      }
+     }
+    },
+    {
+     "name": "strict",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "bool"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": true,
+   "computed": []
+  },
+  "MessageNode": {
+   "fields": [
+    {
+     "name": "parent",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "tools",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "Tool"
+      }
+     },
+     "exclude_if_empty": true
+    },
+    {
+     "name": "semantic_parents",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "model",
+       "ref": "ParentLink"
+      }
+     }
+    },
+    {
+     "name": "message",
+     "schema": {
+      "k": "union",
+      "disc": "role",
+      "options": [
+       {
+        "k": "model",
+        "ref": "SystemMessage"
+       },
+       {
+        "k": "model",
+        "ref": "UserMessage"
+       },
+       {
+        "k": "model",
+        "ref": "AssistantMessage"
+       },
+       {
+        "k": "model",
+        "ref": "ToolMessage"
+       }
+      ]
+     }
+    },
+    {
+     "name": "sampled",
+     "schema": {
+      "k": "bool"
+     },
+     "default": false
+    },
+    {
+     "name": "timestamp",
+     "schema": {
+      "k": "float"
+     }
+    },
+    {
+     "name": "token_ids",
+     "schema": {
+      "k": "ndarray"
+     }
+    },
+    {
+     "name": "renderer_token_ids",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "ndarray"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     },
+     "exclude": true
+    },
+    {
+     "name": "mask",
+     "schema": {
+      "k": "ndarray"
+     }
+    },
+    {
+     "name": "is_content",
+     "schema": {
+      "k": "ndarray"
+     }
+    },
+    {
+     "name": "logprobs",
+     "schema": {
+      "k": "ndarray"
+     }
+    },
+    {
+     "name": "advantages",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "ndarray"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "reference_logprobs",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "ndarray"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "trainer_logprobs",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "ndarray"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "entropies",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "ndarray"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "loss_weights",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "dict",
+        "value": {
+         "k": "ndarray"
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "routed_experts",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "ndarray"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "sampling_mask",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "any"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "weight_versions",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "list",
+        "item": {
+         "k": "model",
+         "ref": "WeightVersionSpan"
+        }
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "top_logprobs",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "any"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ParentLink": {
+   "fields": [
+    {
+     "name": "node",
+     "schema": {
+      "k": "int"
+     }
+    },
+    {
+     "name": "type",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "WeightVersionSpan": {
+   "fields": [
+    {
+     "name": "version",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "start",
+     "schema": {
+      "k": "int"
+     }
+    },
+    {
+     "name": "end",
+     "schema": {
+      "k": "int"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ModelCall": {
+   "fields": [
+    {
+     "name": "node",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "model",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "sampling",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "SamplingConfig"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "endpoint",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "str"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "finish_reason",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "literal",
+        "values": [
+         "stop",
+         "length",
+         "tool_calls"
+        ]
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "usage",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "Usage"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "time",
+     "schema": {
+      "k": "model",
+      "ref": "TimeSpan"
+     }
+    },
+    {
+     "name": "error",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "Error"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "policy",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "PolicyEvent"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "acp",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "model",
+        "ref": "ACPInfo"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Usage": {
+   "fields": [
+    {
+     "name": "prompt_tokens",
+     "schema": {
+      "k": "int"
+     }
+    },
+    {
+     "name": "completion_tokens",
+     "schema": {
+      "k": "int"
+     }
+    },
+    {
+     "name": "cached_input_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "reasoning_tokens",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "int"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    },
+    {
+     "name": "cost",
+     "schema": {
+      "k": "union",
+      "disc": null,
+      "options": [
+       {
+        "k": "float"
+       },
+       {
+        "k": "none"
+       }
+      ]
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TimeSpan": {
+   "fields": [
+    {
+     "name": "start",
+     "schema": {
+      "k": "float"
+     },
+     "default": 0.0
+    },
+    {
+     "name": "end",
+     "schema": {
+      "k": "float"
+     },
+     "default": 0.0
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "PolicyEvent": {
+   "fields": [
+    {
+     "name": "code",
+     "schema": {
+      "k": "str"
+     }
+    },
+    {
+     "name": "paths",
+     "schema": {
+      "k": "list",
+      "item": {
+       "k": "str"
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "ACPInfo": {
+   "fields": [
+    {
+     "name": "request_id",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "InterceptRecord": {
+   "fields": [
+    {
+     "name": "handler",
+     "schema": {
+      "k": "str"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Reward": {
+   "fields": [
+    {
+     "name": "score",
+     "schema": {
+      "k": "float"
+     }
+    },
+    {
+     "name": "weight",
+     "schema": {
+      "k": "float"
+     },
+     "default": 1.0
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "State": {
+   "fields": [
+    {
+     "name": "artifacts",
+     "schema": {
+      "k": "dict",
+      "value": {
+       "k": "union",
+       "disc": null,
+       "options": [
+        {
+         "k": "bytes"
+        },
+        {
+         "k": "none"
+        }
+       ]
+      }
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "Timing": {
+   "fields": [
+    {
+     "name": "start",
+     "schema": {
+      "k": "float"
+     }
+    },
+    {
+     "name": "boot",
+     "schema": {
+      "k": "model",
+      "ref": "TimeSpan"
+     }
+    },
+    {
+     "name": "setup",
+     "schema": {
+      "k": "model",
+      "ref": "TimeSpan"
+     }
+    },
+    {
+     "name": "agent",
+     "schema": {
+      "k": "model",
+      "ref": "AgentSpan"
+     }
+    },
+    {
+     "name": "finalize",
+     "schema": {
+      "k": "model",
+      "ref": "TimeSpan"
+     }
+    },
+    {
+     "name": "scoring",
+     "schema": {
+      "k": "model",
+      "ref": "TimeSpan"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "AgentSpan": {
+   "fields": [
+    {
+     "name": "start",
+     "schema": {
+      "k": "float"
+     },
+     "default": 0.0
+    },
+    {
+     "name": "end",
+     "schema": {
+      "k": "float"
+     },
+     "default": 0.0
+    },
+    {
+     "name": "model",
+     "schema": {
+      "k": "model",
+      "ref": "TimeSplit"
+     }
+    },
+    {
+     "name": "harness",
+     "schema": {
+      "k": "model",
+      "ref": "TimeSplit"
+     }
+    }
+   ],
+   "extra": false,
+   "computed": []
+  },
+  "TimeSplit": {
+   "fields": [
+    {
+     "name": "duration",
+     "schema": {
+      "k": "float"
+     },
+     "default": 0.0
+    }
+   ],
+   "extra": false,
+   "computed": []
+  }
+ }
+}
