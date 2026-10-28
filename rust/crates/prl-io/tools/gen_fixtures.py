@@ -93,7 +93,100 @@ def pyrandom() -> None:
     (FIXTURES / "pyrandom.json").write_text(json.dumps(cases))
 
 
+def inference_metrics() -> None:
+    """Two polls of two engines' expositions (one prefill server with 2 engines, one decode
+    server) and the metrics/load samples the Python collector derives from them."""
+    import httpx
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+
+    from prime_rl.orchestrator.inference_metrics import EngineSample, InferenceMetricsCollector, parse_prometheus_text
+
+    def exposition(engines: list[str], scale: float) -> str:
+        registry = CollectorRegistry()
+        running = Gauge("vllm:num_requests_running", "Running", ["engine", "model_name"], registry=registry)
+        waiting = Gauge("vllm:num_requests_waiting", "Waiting", ["engine", "model_name"], registry=registry)
+        by_reason = Gauge("vllm:num_requests_waiting_by_reason", "Waiting by reason", ["engine", "reason"], registry=registry)
+        kv = Gauge("vllm:kv_cache_usage_perc", "KV \\ usage\nhelp", ["engine"], registry=registry)
+        info = Gauge("vllm:cache_config_info", "cache", ["engine", "num_gpu_blocks", "block_size", "kv_cache_size_tokens"], registry=registry)
+        hits = Counter("vllm:prefix_cache_hits", "hits", ["engine"], registry=registry)
+        queries = Counter("vllm:prefix_cache_queries", "queries", ["engine"], registry=registry)
+        preempt = Counter("vllm:num_preemptions", "preemptions", ["engine"], registry=registry)
+        finished = Counter("vllm:request_success", "done", ["engine", "finished_reason"], registry=registry)
+        ttft = Histogram("vllm:time_to_first_token_seconds", "ttft", ["engine"], buckets=[0.01, 0.1, 1.0, 10.0], registry=registry)
+        other = Gauge("process_cpu_seconds", "not vllm", registry=registry)
+        other.set(3)
+        for i, engine in enumerate(engines):
+            running.labels(engine, "m").set(int(4 * scale) + i)
+            waiting.labels(engine, "m").set(2 * scale + i)
+            by_reason.labels(engine, "capacity").set(1 * scale)
+            by_reason.labels(engine, "deferred").set(1)
+            kv.labels(engine).set(0.25 * scale + 0.1 * i)
+            info.labels(engine, "1000", "16", "16000" if i == 0 else "").set(1)
+            hits.labels(engine).inc(100 * scale + i)
+            queries.labels(engine).inc(300 * scale + 7 * i)
+            preempt.labels(engine).inc(int(3 * scale) + i)
+            finished.labels(engine, "stop").inc(10 * scale)
+            finished.labels(engine, "length").inc(2 * scale)
+            for v in [0.005, 0.05, 0.5 * scale, 5.0, 0.3 * i]:
+                for _ in range(int(scale)):
+                    ttft.labels(engine).observe(v)
+        return generate_latest(registry).decode() + 'vllm:untyped_thing{engine="0"} 5\nvllm:weird{engine="0"} NaN\n'
+
+    base_urls = ["http://prefill-a:8000", "http://decode-a:8000"]
+    roles = ["prefill", "decode"]
+    engines = [["0", "1"], ["0"]]
+    clients = [httpx.AsyncClient(base_url=url) for url in base_urls]
+    collector = InferenceMetricsCollector(clients, roles=roles)
+    collector.max_model_len_by_endpoint[collector.endpoints[1].key] = 32768
+    polls = []
+    for poll, (timestamp, scale) in enumerate([(100.0, 1.0), (105.5, 3.0)]):
+        texts = [exposition(e, scale) for e in engines]
+        samples = [
+            EngineSample(endpoint=endpoint, engine_label=label, timestamp=timestamp, snapshot=snapshot)
+            for endpoint, text in zip(collector.endpoints, texts)
+            for label, snapshot in sorted(parse_prometheus_text(text).items())
+        ]
+        metrics = collector.build_metrics(samples)
+        load = [vars(collector.build_load_sample(s)) for s in samples]
+        from prime_rl.orchestrator.inference_metrics import TimedSnapshot
+
+        for s in samples:
+            collector.previous[s.key] = TimedSnapshot(timestamp=s.timestamp, snapshot=s.snapshot)
+        polls.append({"timestamp": timestamp, "texts": texts, "metrics": list(metrics.items()), "load": load})
+    fixture = {"base_urls": base_urls, "roles": roles, "max_model_len": {"1": 32768}, "polls": polls}
+    (FIXTURES / "inference_metrics.json").write_text(json.dumps(fixture, indent=1))
+
+
+def client_configs() -> None:
+    """`setup_client(...).model_dump(mode="json")` for the shapes the orchestrator builds."""
+    from renderers import Qwen3VLRendererConfig
+
+    from prime_rl.configs.shared import ClientConfig
+    from prime_rl.orchestrator.clients import setup_client
+
+    config = ClientConfig(
+        base_url="http://worker-a:8000/v1",
+        api_key_var="VLLM_API_KEY",
+        headers={"X-Test": "test"},
+        headers_from_env={"X-Token": "PROVIDER_TOKEN"},
+        timeout={"read": 12},
+    )
+    renderer = Qwen3VLRendererConfig()
+    cases = {
+        "renderer": setup_client(config, client_type="renderer", renderer_config=renderer, renderer_model_name="Qwen/Qwen3-VL-4B-Instruct"),
+        "renderer_auto": setup_client(config, client_type="renderer"),
+        "chat": setup_client(config),
+    }
+    fixture = {
+        "renderer_config": renderer.model_dump(mode="json"),
+        "cases": {name: client.model_dump(mode="json") for name, client in cases.items()},
+    }
+    (FIXTURES / "client_configs.json").write_text(json.dumps(fixture, indent=1))
+
+
 if __name__ == "__main__":
     FIXTURES.mkdir(parents=True, exist_ok=True)
     checkpoints()
     pyrandom()
+    inference_metrics()
+    client_configs()

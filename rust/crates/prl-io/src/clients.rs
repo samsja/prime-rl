@@ -265,7 +265,7 @@ async fn check_health_one(client: &AdminClient, interval: u64, log_interval: u64
             },
             Err(error) => error,
         };
-        if wait_time % log_interval == 0 && wait_time > 0 {
+        if wait_time.is_multiple_of(log_interval) && wait_time > 0 {
             let message = format!("Waiting for inference server at {} to start up ({wait_time}s elapsed)", client.base_url());
             if quiet {
                 tracing::debug!("{message}");

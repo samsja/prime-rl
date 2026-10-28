@@ -47,7 +47,7 @@ pub enum SamplerState {
     /// `StandardSampler`: `{"cursor": int}`.
     Standard { cursor: u64 },
     /// `DifficultyPoolSampler`: `{"rng": getstate(), "task_rewards": {key: float}}`.
-    DifficultyPool { rng: PyRandomState, task_rewards: IndexMap<String, f64> },
+    DifficultyPool { rng: Box<PyRandomState>, task_rewards: IndexMap<String, f64> },
 }
 
 impl TrainSourceState {
@@ -143,7 +143,7 @@ impl OrchestratorState {
             let sampler = match keys.as_slice() {
                 ["cursor"] => SamplerState::Standard { cursor: u64::try_from(sampler.get("cursor")?.as_int()?)? },
                 ["rng", "task_rewards"] => SamplerState::DifficultyPool {
-                    rng: PyRandomState::from_py(sampler.get("rng")?)?,
+                    rng: Box::new(PyRandomState::from_py(sampler.get("rng")?)?),
                     task_rewards: sampler
                         .get("task_rewards")?
                         .as_dict()?

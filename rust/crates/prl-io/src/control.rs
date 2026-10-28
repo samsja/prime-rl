@@ -241,7 +241,8 @@ mod tests {
     #[test]
     fn update_pauses_at_due_step() {
         // (requires_step, requested_step, steps_before, steps_after, expected)
-        let cases: [(bool, Option<u64>, &[u64], &[u64], &[bool]); 3] = [
+        type Case = (bool, Option<u64>, &'static [u64], &'static [u64], &'static [bool]);
+        let cases: [Case; 3] = [
             (false, None, &[], &[16], &[true]),
             (true, Some(17), &[16], &[16, 17], &[false, true]),
             (true, Some(16), &[16], &[16], &[true]),

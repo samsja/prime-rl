@@ -1,0 +1,72 @@
+{
+ "renderer_config": {
+  "thinking_retention": null,
+  "name": "qwen3-vl",
+  "add_vision_id": false,
+  "image_cache_max": 256
+ },
+ "cases": {
+  "renderer": {
+   "base_url": "http://worker-a:8000/v1",
+   "api_key_var": "VLLM_API_KEY",
+   "headers": {
+    "X-Test": "test"
+   },
+   "headers_from_env": {
+    "X-Token": "PROVIDER_TOKEN"
+   },
+   "timeout": {
+    "connect": 30.0,
+    "read": 12.0,
+    "write": null,
+    "pool": null
+   },
+   "type": "train",
+   "renderer": {
+    "thinking_retention": null,
+    "name": "qwen3-vl",
+    "add_vision_id": false,
+    "image_cache_max": 256
+   },
+   "renderer_model_name": "Qwen/Qwen3-VL-4B-Instruct",
+   "multiplex": 256
+  },
+  "renderer_auto": {
+   "base_url": "http://worker-a:8000/v1",
+   "api_key_var": "VLLM_API_KEY",
+   "headers": {
+    "X-Test": "test"
+   },
+   "headers_from_env": {
+    "X-Token": "PROVIDER_TOKEN"
+   },
+   "timeout": {
+    "connect": 30.0,
+    "read": 12.0,
+    "write": null,
+    "pool": null
+   },
+   "type": "train",
+   "renderer": null,
+   "renderer_model_name": null,
+   "multiplex": 256
+  },
+  "chat": {
+   "base_url": "http://worker-a:8000/v1",
+   "api_key_var": "VLLM_API_KEY",
+   "headers": {
+    "X-Test": "test"
+   },
+   "headers_from_env": {
+    "X-Token": "PROVIDER_TOKEN"
+   },
+   "timeout": {
+    "connect": 30.0,
+    "read": 12.0,
+    "write": null,
+    "pool": null
+   },
+   "type": "eval"
+  }
+ }
+}

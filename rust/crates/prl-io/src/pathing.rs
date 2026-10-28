@@ -65,7 +65,7 @@ pub async fn wait_for_path(path: &Path) {
             tracing::debug!("Found path `{}`", path.display());
             return;
         }
-        if wait_time % log_interval == 0 && wait_time > 0 {
+        if wait_time.is_multiple_of(log_interval) && wait_time > 0 {
             tracing::debug!("Waiting for path `{}` for {wait_time} seconds", path.display());
         }
         tokio::time::sleep(Duration::from_secs(interval)).await;

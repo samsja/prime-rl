@@ -218,80 +218,81 @@ Optional plain file sink `HH:MM:SS {level:>7} {message}`. `format_time`: `<1s` -
 => `clients.py` + `inference_metrics.py` must move out of `orchestrator/` (e.g. `prime_rl/inference/clients.py`)
 before deletion; `ckpt.py`/`gc.py` have no outside users.
 
-## 2. Rust design (`prl_io`)
+## 2. Rust design (`prl_io`) — as implemented
 
-All network calls are `reqwest` (rustls); all waits are tokio timers; everything is cancel-safe by drop.
-
-```rust
-pub mod logging;      // setup_logger(level, json, log_file), success!(), format_time(f64)
-pub mod pathing;      // ckpt_dir, broadcast_dir, step_path, all_ckpt_steps, resolve_latest_ckpt_step, wait_for_path
-pub mod http;         // AdminClient {base_url, reqwest::Client}, resolve_headers/api_key, RetryPolicy, admin_post
-pub mod clients;      // VfClientConfig, InferenceClient, AdminPlane, setup_admin_plane, check_health,
-                      // maybe_check_has_model, load_lora_adapter, init_nixl_broadcast, connect_frozen_client
-pub mod dynamo;       // DynamoAdminPlane (AdminPlane::Dynamo variant)
-pub mod inference_metrics; // parse_prometheus_text, aggregations, EngineLoadSample, InferenceMetricsCollector actor
-pub mod weights;      // WeightReceiver (Filesystem | Nccl | Nixl via NixlBridge trait), UpdateTimes
-pub mod control;      // Controller (actor handle), ControlServer (axum)
-pub mod heartbeat;    // Heartbeat
-pub mod ckpt;         // PyValue + pickle codec, torch zip, OrchestratorState, CheckpointManager, PyRandom
-pub mod gc;           // GarbageCollector (no-op stats, see gaps)
-```
-
-Key types:
+All network calls are `reqwest` (rustls); waits are tokio timers; everything is cancel-safe by drop.
+Configs are `prl_config` types (pyo3-extracted pydantic objects).
 
 ```rust
-pub struct UpdateTimes { pub pause: Vec<f64>, pub transfer: Vec<f64>, pub resume: Vec<f64> }
+// logging
+pub fn setup_logger(level: &str, json_logging: bool, log_file: Option<&Path>, console_level: Option<&str>) -> Result<()>;
+macro success!(...)                       // loguru SUCCESS = info event with `success = true`
+pub fn format_time(seconds: f64) -> String;
+// pathing
+ckpt_dir, broadcast_dir, step_path, all_ckpt_steps(dir) -> io::Result<Vec<u64>>, resolve_latest_ckpt_step, wait_for_path
+// http
+resolve_api_key(var, base_url), resolve_headers(headers, headers_from_env, var, base_url)
+pub struct AdminClient;                    // Clone; base_url() renders like httpx, key() = rstrip("/")
+setup_admin_clients(&ClientConfig) -> Vec<AdminClient>; router_admin_client(&ClientConfig)
+pub struct RetryPolicy { max_delay, max_attempts }   // tenacity stop/wait semantics
+admin_post(client, path, &AdminRequest, timeout_s); post_all(clients, path, &AdminRequest, timeout_s) -> Vec<f64>
+ADMIN_TIMEOUT_S = 300, UPDATE_WEIGHTS_TIMEOUT_S = 720
+// clients
+pub enum ClientType { Renderer, ChatCompletions }
+pub struct VfClientConfig;                 // Serialize == pydantic model_dump(mode="json") (fixture-tested)
+setup_client(&ClientConfig, ClientType, renderer: Option<&Value>, renderer_model_name: Option<&str>) -> VfClientConfig
+pub struct InferenceClient { pub train_client, pub eval_client, pub model_name, .. }
+  ::new(&ClientConfig, model, train: ClientType, eval: ClientType, renderer: Option<&Value>)
+  .score(&[i32]) -> Vec<f64>; .finish_sessions(&[String]); impl prl_types::Scorer
+connect_frozen_client(&FrozenModelConfig, renderer: Option<&Value>) -> InferenceClient
+check_health(clients, interval, log_interval, timeout, quiet); maybe_check_has_model; check_inference_ready
 pub enum AdminPlane { Standard(StandardAdminPlane), Dynamo(DynamoAdminPlane) }
-impl AdminPlane {
-    pub async fn wait_for_ready(&mut self, model: &str) -> Result<()>;
-    pub async fn initialize_nccl(&mut self, host, port, timeout, world) -> Result<()>;
-    pub async fn update_weights(&mut self, dir: Option<&Path>, t: Transport, step: u64,
-                                on_paused: impl FnOnce() -> Result<()>) -> Result<UpdateTimes>;
-    pub fn clients(&self) -> &[AdminClient];   // cheap clones for the metrics collector
-}
-pub struct InferenceClient { pub train_client: VfClientConfig, pub eval_client: VfClientConfig, pub model_name: String, .. }
-impl InferenceClient { pub async fn score(&self, ids: &[u32]) -> Result<Vec<f64>>; pub async fn finish_sessions(&self, ids: &[String]); }
-
-pub struct EngineLoadSample { engine_id, role: Option<String>, kv_capacity_tokens: Option<u64>, max_model_len: Option<u64>,
-                              kv_usage: f64, running: u64, waiting: u64, waiting_capacity: Option<u64>, preemptions_delta: u64 }
-pub struct InferenceMetricsCollector { .. }       // owns endpoints + previous snapshots
-impl InferenceMetricsCollector {
-    pub fn new(clients: Vec<AdminClient>, roles: Option<Vec<Option<String>>>, log_metrics: bool,
-               load_tx: mpsc::Sender<Vec<EngineLoadSample>>, metrics_tx: mpsc::Sender<Metrics>) -> Result<Self>;
-    pub async fn probe(&mut self) -> bool;
-    pub async fn run(self, cancel: CancellationToken);   // the actor: poll every 5 s until cancelled
-}
-
-pub struct WeightReceiver { .. }   // owns the AdminPlane during the run (single writer of engine weights)
-impl WeightReceiver {
-    pub async fn initialize(&mut self) -> Result<()>;
-    pub fn next_version(&self, current: u64) -> u64;
-    pub async fn wait_published(&self, step: u64, cancel: &CancellationToken) -> Result<()>;
-    pub async fn receive(&mut self, step: u64) -> Result<UpdateTimes>;
-    pub async fn sync_startup(&mut self, step: u64, timeout: Duration) -> Result<UpdateTimes>;
-}
-#[async_trait] pub trait NixlBridge: Send { async fn publish(&mut self) -> Result<()>;
-    async fn wait_ready(&mut self, step: u64) -> Result<()>; async fn send_complete(&mut self, step: u64) -> Result<()>; }
-
-pub struct Controller { .. }  // Clone handle over Arc<Mutex<ControllerState>> (shared with the HTTP server — the only
-                              // state shared across tasks, mirroring the Python lock), + `submitted: Arc<Notify>`
-impl Controller { submit, get, update(step) -> bool, mark_saved(step), submitted() -> Arc<Notify> }
-pub async fn serve_control(controller: Controller, host: &str, port: u16, cancel: CancellationToken) -> Result<()>;
-
-pub struct Heartbeat { .. } impl Heartbeat { pub fn new(url, min_interval) ; pub fn beat(&self); }
-
-pub struct OrchestratorState { pub progress: Progress, pub train_source: TrainSourceState }
-pub struct TrainSourceState { pub rng: PyRandomState, pub envs: IndexMap<String, CurriculumState> }
-pub struct CurriculumState { pub sampler: SamplerState, pub gates: IndexMap<String, PyValue> }
-pub enum SamplerState { Standard { cursor: u64 }, DifficultyPool { rng: PyRandomState, task_rewards: IndexMap<String, f64> } }
-pub struct PyRandomState { pub key: [u32; 624], pub pos: u32, pub gauss_next: Option<f64> }
-pub struct PyRandom;  // CPython random.Random: new(seed), from_state, state, random(), choices_index(weights)
-pub struct CheckpointManager { .. } impl { new(output_dir), ckpt_path(step), save(&state, step), load(step, path) }
+  ::standard(&ClientConfig, roles: Option<Vec<InferenceRole>>); ::setup(&PolicyClientConfig, model, roles)
+  .clients() -> &[AdminClient]; .wait_for_ready(model); .initialize_nccl(host, port, timeout, world)
+  .update_weights(dir: Option<&Path>, Transport, step, on_paused: FnOnce() -> Result<()>) -> UpdateTimes
+pub struct UpdateTimes { pause, transfer, resume: Vec<f64> }
+pause_engines, resume_engines, update_engines, load_lora_adapter(clients, name, path, step), init_nixl_broadcast(...)
+// dynamo
+DynamoAdminPlane, parse_dynamo_worker, resolve_dynamo_discovery_url, DiscoveryError::{Pending, Retryable, Fatal}
+// inference_metrics
+parse_metric_families (prometheus_client parser semantics), parse_prometheus_text -> Vec<(engine_label, EngineSnapshot)>
+engine_values, bucket_deltas, build_scope_metrics, histogram_quantile, py_sum (3.12 compensated), py_mean, py_median
+pub struct EngineLoadSample { engine_id, role: Option<InferenceRole>, kv_capacity_tokens, max_model_len, kv_usage,
+                              running, waiting, waiting_capacity, preemptions_delta }
+pub struct InferenceMetricsCollector
+  ::new(clients, roles: Option<&[InferenceRole]>, log_metrics, load_tx: Option<mpsc::Sender<Vec<EngineLoadSample>>>,
+        metrics_tx: Option<mpsc::Sender<Metrics>>)
+  .probe(attempts, interval) -> bool; .run(cancel)  (actor: poll every 5 s); .collect_and_log(); .observe(samples)
+// weights
+pub struct WeightReceiver ::new(broadcast_dir, WeightBroadcastConfig, AdminPlane, model, nixl: Option<Box<dyn NixlBridge>>)
+  .initialize(); .step_dir(step); .is_published(step); .next_version(cur) -> Result<u64>;
+  .wait_published(step, &CancellationToken); .receive(step) -> UpdateTimes (of the last full update);
+  .sync_startup(step, Duration) -> UpdateTimes; .update_times(); .admin()
+#[async_trait] pub trait NixlBridge { publish(); wait_ready(step, timeout_s); send_complete(step) }   // Python side
+// control
+pub struct Controller (Clone, shared state) ::new(requires_step); submit/get/update/mark_saved; submitted() -> Arc<Notify>
+serve(controller, host, port, cancel); serve_on(controller, listener, cancel); router(controller)
+// heartbeat
+Heartbeat::new(url, min_interval_s).beat()
+// ckpt
+CheckpointManager::new(output_dir) .ckpt_path(step) .save(&OrchestratorState, step) .load(step, path)
+OrchestratorState { progress, train_source: TrainSourceState { rng: PyRandomState, envs: IndexMap<String, CurriculumState> } }
+CurriculumState { sampler: SamplerState::{Standard{cursor}, DifficultyPool{rng: Box<PyRandomState>, task_rewards}}, gates }
+TrainSourceState::validate_envs(&[String]); PyValue + pickle::{dumps, loads}; torchzip::{write, read}
+PyRandom::{new(seed), new_from_entropy(), from_state, state, random, choices_index(weights)}
+// gc
+GarbageCollector::new(interval).gauges()
 ```
 
-Siblings: config (serde config types), core (consumes everything above; owns Progress/Policy in prl-types and the
-ConcurrencyController), wire (embeds `VfClientConfig` in env requests), monitors (receives time-keyed metrics via
-core's wiring).
+Tests (`cargo test -p prl-io`; `PRL_IO_PYTHON=1` additionally has Python `torch.load` a Rust checkpoint):
+unit tests per module (controller cases from `tests/unit/control/test_controller.py`, dynamo parsing/derivation
+from `tests/unit/inference/test_dynamo.py`, loguru byte-exact lines, `format_time`, pickle opcodes, tenacity waits);
+`tests/ckpt_compat.rs` (loads a Python-written checkpoint, round-trips, CPython RNG sequences/states/choices);
+`tests/inference_metrics_compat.rs` (two polls of a P/D deployment: every metric key in order + value, load samples);
+`tests/clients_http.rs` (mock vLLM: LoRA shape + 404 retry, 5xx-only retry, init_broadcaster shape, prefill-before-
+decode pause order, health retries/timeout message, model check, update flow incl. resume after failure, prefill
+logprobs, setup_client vs pydantic dumps, filesystem receiver handshake); `tests/control_http.rs` (routes, codes,
+payloads). Fixtures: `uv run --no-sync python rust/crates/prl-io/tools/gen_fixtures.py`.
 
 ## 3. Gaps / deliberate differences
 
@@ -301,6 +302,9 @@ core's wiring).
 - NIXL: the orchestrator side needs the NIXL C++ agent (UCX) and the ModelExpress gRPC client. The Rust receiver
   keeps the protocol (ack, init_broadcaster with session_id, ready/complete notifications) and delegates the agent +
   ModelExpress calls to a `NixlBridge` (implemented via the Python bridge by prl-py/core).
-- Per-attempt httpx timeouts (connect/read/write/pool) map to reqwest `connect_timeout` + per-request total timeout
-  = read timeout.
+- Per-attempt httpx timeouts (connect/read/write/pool) map to reqwest `connect_timeout` (10 s on admin clients,
+  also for the otherwise unbounded `/health` polls) + per-request total timeout = read timeout.
+- `statistics.mean` is computed as `fsum(values) / n` (Python divides the exact fraction): may differ in the last ulp.
+- JSON log lines have an empty `function` (tracing has no function names).
+- The pickle reader copies memoized containers (no shared references); orchestrator checkpoints never share them.
 - `{e!r}` in log lines renders Rust error Display instead of Python reprs.
