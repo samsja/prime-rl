@@ -1045,6 +1045,7 @@ dependencies = [
  "prl-config",
  "prl-io",
  "prl-monitors",
+ "prl-train",
  "prl-types",
  "prl-wire",
  "serde",
@@ -1061,10 +1062,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures",
  "http-body-util",
+ "indexmap",
+ "prl-config",
  "prl-core",
  "prl-io",
  "prl-monitors",
+ "prl-train",
  "prl-types",
  "prl-wire",
  "serde",
@@ -1074,6 +1079,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "uuid",
  "zstd",
 ]
 
@@ -1140,6 +1146,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "prl-config",
+ "prl-eval",
  "prl-io",
  "prl-monitors",
  "prl-types",
