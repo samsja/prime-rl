@@ -68,8 +68,11 @@ where
                     tokio::select! {
                         result = &mut task => break result,
                         _ = poll.tick(), if interrupt.is_none() => {
-                            if let Err(err) = Python::with_gil(|py| py.check_signals()) {
-                                tracing::warn!(target: "prl_py", "Received {err}, shutting down the {name}");
+                            let signalled = Python::with_gil(|py| {
+                                py.check_signals().err().map(|err| (err.get_type(py).to_string(), err))
+                            });
+                            if let Some((exception, err)) = signalled {
+                                tracing::warn!(target: "prl_py", "Received {exception}, shutting down the {name}");
                                 shutdown.cancel();
                                 interrupt = Some(err);
                             }
