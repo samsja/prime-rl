@@ -49,28 +49,22 @@ impl EpisodeRef {
 
     /// An owned episode holding exactly the view's traces.
     pub fn to_episode(&self) -> Episode {
-        let mut episode = Episode { traces: Vec::new(), ..(*self.episode).clone_without_traces() };
-        episode.traces = self.traces().cloned().collect();
-        episode
+        self.with_traces(self.traces().cloned().collect())
     }
-}
 
-trait CloneWithoutTraces {
-    fn clone_without_traces(&self) -> Episode;
-}
-
-impl CloneWithoutTraces for Episode {
-    fn clone_without_traces(&self) -> Episode {
+    /// An owned copy of the episode carrying `traces` instead of its own.
+    pub fn with_traces(&self, traces: Vec<Trace>) -> Episode {
+        let e = &self.episode;
         Episode {
-            id: self.id.clone(),
-            env: self.env.clone(),
-            task: self.task.clone(),
-            group: self.group.clone(),
-            run: self.run.clone(),
-            ok: self.ok,
-            is_timeout: self.is_timeout,
-            errors: self.errors.clone(),
-            traces: Vec::new(),
+            id: e.id.clone(),
+            env: e.env.clone(),
+            task: e.task.clone(),
+            group: e.group.clone(),
+            run: e.run.clone(),
+            ok: e.ok,
+            is_timeout: e.is_timeout,
+            errors: e.errors.clone(),
+            traces,
         }
     }
 }

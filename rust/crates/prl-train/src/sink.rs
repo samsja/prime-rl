@@ -325,7 +325,7 @@ impl TrainSink {
         // Every delivered trace's arrays are either queued for a batch or deleted here.
         let mut release = Vec::new();
         for (trace_id, urls) in delivered {
-            let queued: HashSet<String> = self.pending_batch.get(&trace_id).map(|s| sample_payload_urls(s)).unwrap_or_default().into_iter().collect();
+            let queued: HashSet<String> = self.pending_batch.get(&trace_id).map(sample_payload_urls).unwrap_or_default().into_iter().collect();
             release.extend(urls.into_iter().filter(|u| !queued.contains(u)));
         }
         self.payloads.release(release);

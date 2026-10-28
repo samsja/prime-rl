@@ -156,74 +156,52 @@ effective), `EpisodeCollection/TrainEpisodes/EvalEpisodes` (`effective` predicat
 `tests/unit/orchestrator/{test_train_sink,test_train_sink_payloads,test_batch,test_algorithms,test_advantage,test_metrics,
 test_rollout_staleness}.py`, `tests/unit/transports/{test_batch_encode,test_batch_transport}.py`.
 
-## 2. Rust API (crate `prl-train`)
+## 2. Rust API (crate `prl-train`, as implemented)
 
-```rust
-// samples / wire
-pub struct TrainingSample { token_ids: Vec<i32>, mask: Vec<bool>, logprobs: Vec<f32>, temperatures: Vec<f32>, env_name: String,
-  ref_logprobs, mm_refs: Option<MMRefs>, mm_token_type_ids, rl_weights, ce_weights, ref_kl_weights, advantages: Option<Vec<..>>,
-  trace_id: Option<String>, branch_index: Option<i64>, staleness: Option<Vec<i16>>, payload: Option<PayloadSlice> }
-pub struct MicroBatch { ... same fields as Python ... }        // transport::types
-pub fn encode_micro_batches(&[MicroBatch]) -> Vec<u8>          // byte-identical to msgspec
-// packer
-pub trait BinCost: Send + Sync { fn cost(&self, seq_lens: &[usize]) -> i128; }
-pub struct FlopTable { per_len: Vec<i128> }                       // from Python bridge: bin_cost([n]) for n in 0..=max_len
-pub struct BatchPacker { seq_len, num_train_workers, pad_to_multiple_of, bin_cost: Arc<dyn BinCost> }
-impl BatchPacker { pub fn pack(&self, samples: Vec<TrainingSample>) -> Result<Vec<Vec<MicroBatch>>> }  // CPU: call in spawn_blocking
-// senders
-pub enum BatchSender { FileSystem(..), Zmq(..) }
-impl BatchSender { pub async fn new(output_dir, data_world_size, current_step, &TransportConfig) -> Result<Self>;
-                   pub async fn send(&mut self, grid: Vec<Vec<MicroBatch>>) -> Result<f64 /*seconds*/>; }
-// algorithms
-#[async_trait] pub trait Algorithm: Send { fn action_loss_type(&self) -> ActionLossType;
-  async fn setup(&mut self) -> Result<()>; async fn score_episode(&mut self, ep: &mut Episode) -> Result<()>;
-  async fn score_group(&mut self, eps: &mut [Episode]) -> Result<()>; }
-pub fn build_algorithm(cfg: &AlgoConfig, deps: AlgorithmDeps) -> Result<Box<dyn Algorithm>>;
-pub struct AlgorithmDeps { policy_scorer: Arc<dyn Scorer>, frozen: Arc<dyn Fn(&FrozenModelConfig)->Arc<dyn Scorer>>,
-  hint_renderer: Option<Arc<dyn HintRenderer>>, echo_filter: Option<Arc<dyn EchoFilter>> }
-#[async_trait] pub trait Scorer { async fn score(&self, token_ids: Vec<i32>) -> Result<Vec<f32>>; }   // implemented by prl-io
-pub trait HintRenderer { fn render_ids(&self, system_content: &str) -> Result<Vec<i32>>; }            // Python bridge
-pub trait EchoFilter { fn masks(&self, trace: &Trace) -> Result<Vec<Vec<bool>>>; }                     // Python bridge
-// sink
-pub struct TrainEnvSpec { group_size: usize, temperature: f32, requires_sampling_masks: bool,
-  requires_top_logprobs: bool, algorithm: Box<dyn Algorithm> }
-pub struct TrainSink { .. }
-impl TrainSink {
-  pub fn new(cfg: SinkConfig{batch_size, max_staleness, constant_trainer_batch_size}, envs: IndexMap<String, TrainEnvSpec>,
-             payloads: PayloadReleaser, on_result: Option<Box<dyn FnMut(&[Episode]) -> bool + Send>>) -> Self;
-  pub async fn add(&mut self, ep: Episode, step: u64) -> Result<Option<TrainBatch>>;
-  pub async fn fail(&mut self, f: DispatchFailure, step: u64) -> Result<Option<TrainBatch>>;
-  pub async fn cancel(&mut self, c: GroupCancellation, step: u64) -> Result<Option<TrainBatch>>;
-  pub async fn take_batch(&mut self, step: u64) -> Result<Option<TrainBatch>>;
-  pub fn take_rollout_window(&mut self, force: bool) -> Option<RolloutWindow>;
-  pub fn release_samples(&self, samples: &[TrainingSample]); pub fn discard_queued(&mut self);
-  pub fn count(&mut self, key, value);   // rollout_window.metrics.count (used by shipper for rollout/queued/cancelled)
-  pub fn batch_progress(&self) -> (usize, usize); pub fn buffered_count(&self) -> usize; pub fn pending_batch_by_env(&self) -> IndexMap<String, usize>;
-}
-pub struct TrainBatch { cohort: TrainEpisodes, samples: Vec<TrainingSample> }
-// payload release
-pub struct PayloadReleaser  // fire-and-forget HTTP DELETE (no proxy), bounded worker pool
-// metrics / annotations / staleness
-TrainEpisodes, EvalEpisodes, RolloutWindow, MetricWindow, Stat, dispatch_failure_metrics, rollout_staleness,
-max_rollout_staleness, stamp_arrival, stamp_batch, is_trainable, scalar_advantage
-```
+- `sample`: `TrainingSample`, `PayloadSlice`, `MMRefs`/`MMImageRef`, `sample_payload_urls`.
+- `trajectories`: `iter_trainable_branches(&Trace) -> Vec<(Branch, mask)>`, `trace_to_samples(&Trace, env) -> Result<Vec<TrainingSample>>`, `trainable_node_ids`.
+- `staleness`: `min_fresh_version`, `node_policy_versions`, `rollout_staleness(&Episode, traces, step) -> Result<Option<Staleness>>`,
+  `stale_token_runs`, `token_staleness`, `mask_stale_tokens`.
+- `algo`: `trait Algorithm { action_loss_type, setup, score_episode(&mut Episode), score_group(&mut [Episode]), finalize_episode }`
+  (async), `build_algorithm(&AlgoConfig, &AlgorithmDeps)`, `AlgorithmDeps { policy: Arc<dyn prl_types::Scorer>, policy_model_name,
+  connect_frozen: ConnectFrozen, bridge: Option<Arc<dyn prl_types::Bridge>> }`, `iter_trainable_traces(&[Episode]) -> Vec<(e, t)>`,
+  routing (`assign_advantages`, `assign_reference_logprobs`, `scalar_advantage`, `is_trainable`, `stamp_loss_routing`).
+- `metrics`: `Stat`, `MetricWindow`, `TraceRecord`, `EpisodeMetrics` (snapshot / train_snapshot, Stat accessors), `TrainEpisodes`,
+  `EvalEpisodes::new(Vec<Arc<Episode>>, group_size)`, `RolloutWindow`, `dispatch_failure_metrics`, `compute_pass_metrics`, `pass_at_k`.
+  Collections hold `EpisodeRef { Arc<Episode>, trace indices }` (Python's shallow `model_copy(update={"traces": ...})`).
+- `sink`: `TrainSink::new(SinkConfig, IndexMap<String, TrainEnvSpec>, PayloadReleaser)`, `setup`, `add/fail/cancel(.., step, &mut dyn Admission)`,
+  `take_batch(step)`, `take_rollout_window()` (= `force=True`), `count_queued_cancelled`, `release_samples`, `discard_queued`,
+  `batch_progress`, `buffered_count`, `pending_batch_by_env`; `TrainBatch { cohort: TrainEpisodes, samples }`; `Admission` (curriculum
+  verdict, async), `AdmitAll`; `PayloadReleaser::default()` = `prl_wire::payload::delete_payloads`. The sink is a plain struct (core's
+  actor owns it); the step is passed explicitly; sample building, pruning and staleness stamping run on `spawn_blocking`.
+- `packer`: `BatchPacker::new(seq_len, num_train_workers, pad_to_multiple_of, pad_to_seq_len, Arc<dyn BinCost>)`, `pack` (sync; call
+  from `spawn_blocking`), `FlopTable::new(Vec<i128>)` from `Bridge::flop_cost_table(seq_len + pad_to_multiple_of)`; `prepare_batch`,
+  `prepare_sample`, `pad_micro_batch`; `partition::balanced_partition` (KK with Python-`heapq`-identical ordering + swap refinement, i128).
+- `transport`: `MicroBatch`, `encode_micro_batches` (hand-written msgpack writer, byte-identical to msgspec), `BatchSender::{new(output_dir,
+  data_world_size, current_step, &prl_config::TransportConfig), send(grid) -> seconds, close}`. ZMQ uses libzmq (`zmq` crate, ROUTER with
+  `ROUTER_MANDATORY`) on a blocking thread; the pure-Rust `zeromq` 0.4 ROUTER loses wakeups with several peers (its fair queue returns
+  `Pending` while other streams are ready), so it is not used.
 
-`step` is passed explicitly (the caller owns `progress.step`, e.g. via `watch<u64>`); the sink is a plain owned struct the
-core TrainSink actor wraps. CPU-heavy calls (`trace_to_samples`, packing, encoding, metric snapshots) are sync fns the
-actor runs on `spawn_blocking`.
-
-## 3. Needs from siblings
-- **wire**: `Episode`/`Trace`/`MessageNode`/`ModelCall`/`Branch` Rust types (mutable advantages/reference_logprobs/
-  loss_weights, Clone). Derived helpers (`branches()`, token counts, `is_truncated`, ...) live in prl-wire or prl-train (agreed with wire).
-- **io**: `Scorer` impl for the policy pool and for a frozen `FrozenModelConfig` endpoint (prefill logprobs).
-- **core/scaffold (bridge)**: `flop_cost_table(max_len) -> list[int]` (Python `FlopCounter(get_model(meta))([n])`),
-  `render_ids(system_content) -> list[int]` for opsd, echo filter call (trace -> masks).
-- **config**: `AlgoConfig` enum, `TransportConfig`, orchestrator fields `seq_len, num_train_workers, pad_to_multiple_of,
-  pad_to_seq_len, batch_size, constant_trainer_batch_size, max_staleness, output_dir`.
+## 3. Tests
+- `tests/packer_parity.rs`: 60 random sample sets packed by Python `prepare_batch` and encoded by `BatchSender.encode`
+  (`fixtures/gen_packer.py`): Rust bytes identical (sum, flop-shaped and >int64 bin costs; 1-8 workers; padding; mm; payloads).
+- `tests/sink_parity.rs`: 30 random scenarios (`fixtures/gen_sink.py`): real `vf.Episode`s (forks, compaction attempts, subagent edges,
+  weight versions, errors, drops, judges, payload refs), failures, overload/shutdown cancellations, curriculum verdicts, all non-calling
+  algorithms, constant/deferred pruning, max_staleness 0-4, step advances — replayed through the Rust sink: every batch's samples, cohort,
+  effective train metrics (`train/agg` + per env), rollout staleness, advantages, rollout windows (metrics + counters), released payload
+  URLs, batch progress match. Also `dispatch_failure_metrics`.
+- `tests/algo_parity.rs`: opd / opsd / echo-with-user-filter against deterministic fake teacher, renderer and filter
+  (`fixtures/gen_algos.py`); ported unit tests for `stamp_loss_routing`, zero-advantage pruning, opsd template.
+- `tests/transport_interop.rs` (`--ignored`, needs the repo Python env): the Python trainer's `FileSystemBatchReceiver` /
+  `ZMQBatchReceiver` (4 ranks, 2 data ranks, 2 steps) decode Rust-sent batches losslessly.
 
 ## 4. Gaps / deviations
-- Echo user filter and opsd renderer go through the Python bridge (Python callables / renderers package).
-- GRPO/MaxRL arithmetic in f32 like torch; summation order may differ from torch's vectorized reductions by ULPs.
+- Echo user filters and the opsd hint renderer run in Python through `prl_types::Bridge` (`echo_filter`, `render_ids`).
+- GRPO / MaxRL use f32 arithmetic like torch, but sums accumulate in f64 (torch: f32 cascade sums), so advantages can differ by an ULP.
+- Python iterates a `set` for the cohort episode order and for `stop_condition/*` keys; Rust uses first-seen order (Python's order is
+  hash-randomized, so no consumer can rely on it).
+- `compute_pass_metrics` divides `u128` binomials as f64 (Python divides exact ints): identical below 2^53.
+- `annotations.py` (`stamp_arrival`, `stamp_batch`) moved to prl-monitors; `delete_payloads`/`trace_payload_urls` live in prl-wire.
 
 ## 5. Imports of these modules from outside the orchestrator (to handle when Python orchestrator is deleted)
 - `src/prime_rl/eval/runner.py`: `orchestrator.annotations.{stamp_arrival, stamp_batch}`, `orchestrator.metrics.dispatch_failure_metrics`,

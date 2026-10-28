@@ -125,12 +125,12 @@ pub fn format_template(template: &str, demonstration: &str) -> Result<String> {
     while let Some(i) = rest.find(['{', '}']) {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
-        if tail.starts_with("{{") {
+        if let Some(after) = tail.strip_prefix("{{") {
             out.push('{');
-            rest = &tail[2..];
-        } else if tail.starts_with("}}") {
+            rest = after;
+        } else if let Some(after) = tail.strip_prefix("}}") {
             out.push('}');
-            rest = &tail[2..];
+            rest = after;
         } else if let Some(after) = tail.strip_prefix("{demonstration}") {
             out.push_str(demonstration);
             rest = after;

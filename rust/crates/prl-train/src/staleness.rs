@@ -15,15 +15,8 @@ pub fn min_fresh_version(step: i64, max_staleness: i64) -> i64 {
 pub fn node_policy_versions(node: &MessageNode, fallback: i64) -> Vec<(usize, usize, i64)> {
     let sampled = node.mask.iter().filter(|&&m| m).count();
     let offset = node.mask.len() - sampled;
-    match &node.weight_versions {
-        None => {
-            if sampled > 0 {
-                vec![(offset, offset + sampled, fallback)]
-            } else {
-                Vec::new()
-            }
-        }
-        Some(spans) if spans.is_empty() => {
+    match node.weight_versions.as_deref() {
+        None | Some([]) => {
             if sampled > 0 {
                 vec![(offset, offset + sampled, fallback)]
             } else {

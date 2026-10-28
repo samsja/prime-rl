@@ -15,7 +15,7 @@ use prl_config::{ActionLossType, AlgoConfig, AlgoParams, FrozenModelConfig};
 use prl_types::{Bridge, Scorer};
 use prl_wire::Episode;
 
-pub use distill::{OpdAlgorithm, OpsdAlgorithm};
+pub use distill::{format_template, OpdAlgorithm, OpsdAlgorithm};
 pub use grpo::{
     DebugAlgorithm, EchoAlgorithm, GrpoAlgorithm, HierarchicalGrpoAlgorithm, MaxRlAlgorithm, RaeAlgorithm, SftAlgorithm,
 };

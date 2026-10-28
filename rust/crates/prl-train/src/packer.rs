@@ -248,7 +248,7 @@ impl Bin {
     fn split_by_workload(self, bin_cost: &dyn BinCost) -> (Bin, Bin) {
         let mut ranked: Vec<(i128, MicroBatch)> =
             self.samples.into_iter().map(|s| (bin_cost.cost(&[s.input_ids.len()]), s)).collect();
-        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        ranked.sort_by_key(|(workload, _)| std::cmp::Reverse(*workload));
         let (mut left, mut right) = (Vec::new(), Vec::new());
         let (mut left_workload, mut right_workload) = (0i128, 0i128);
         for (workload, sample) in ranked {
@@ -492,7 +492,7 @@ fn pad_group_for_distribution(group: &mut Vec<MicroBatch>, num_train_workers: us
 }
 
 fn distribute_group(group: Vec<MicroBatch>, num_train_workers: usize, bin_cost: &dyn BinCost) -> Vec<Vec<MicroBatch>> {
-    assert!(group.len() % num_train_workers == 0, "Number of micro batches is not divisible by number of data ranks");
+    assert!(group.len().is_multiple_of(num_train_workers), "Number of micro batches is not divisible by number of data ranks");
     if group.is_empty() {
         return (0..num_train_workers).map(|_| Vec::new()).collect();
     }

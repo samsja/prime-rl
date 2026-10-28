@@ -69,7 +69,7 @@ async fn run(kind: &str) {
     let mut sender = BatchSender::new(dir.path().to_path_buf(), 2, 0, &transport).await.unwrap();
     let mut expected = Vec::new();
     for step in 0..steps {
-        let grid = grid(step as i32);
+        let grid = grid(step);
         expected.push(grid.iter().map(|list| format!("{:x}", Sha256::digest(encode_micro_batches(list)))).collect::<Vec<_>>());
         sender.send(grid).await.unwrap();
     }

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use anyhow::{bail, Result};
-use prl_wire::{Branch, MessageNode, Trace, Value};
+use prl_wire::{Branch, Trace, Value};
 
 use crate::sample::{MMImageRef, MMRefs, PayloadSlice, TrainingSample, PAYLOAD_INFO_KEY};
 
@@ -197,9 +197,4 @@ pub fn trainable_node_ids(trace: &Trace) -> Vec<usize> {
 
 pub(crate) fn count_true(mask: &[bool]) -> usize {
     mask.iter().filter(|&&m| m).count()
-}
-
-#[allow(dead_code)]
-pub(crate) fn node_sampled_count(node: &MessageNode) -> usize {
-    count_true(&node.mask)
 }

@@ -463,11 +463,7 @@ impl EpisodeCollection {
         selected
             .iter()
             .zip(by_episode)
-            .map(|(episode, traces)| {
-                let mut out = EpisodeRef::subset(episode.episode.clone(), Vec::new()).to_episode();
-                out.traces = traces;
-                out
-            })
+            .map(|(episode, traces)| episode.with_traces(traces))
             .collect()
     }
 

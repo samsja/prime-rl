@@ -125,7 +125,7 @@ fn siftup(heap: &mut [KKState], mut pos: usize) {
 
 fn karmarkar_karp(weights: &[i128], num_partitions: usize) -> Vec<Vec<usize>> {
     assert!(weights.len() >= num_partitions);
-    assert!(weights.len() % num_partitions == 0);
+    assert!(weights.len().is_multiple_of(num_partitions));
     let mut weighted: Vec<(i128, usize)> = weights.iter().enumerate().map(|(i, &w)| (w, i)).collect();
     weighted.sort();
     let mut states: Vec<KKState> = Vec::new();
