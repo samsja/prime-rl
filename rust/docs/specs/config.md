@@ -73,7 +73,7 @@ Not extracted:
   `eval.sampling/...`). They are launcher or validation inputs, already merged into each
   source.
 - `model.trust_remote_code`, `model.vlm`. The orchestrator does not read them.
-- `write_resolved_config` stays in Python (`prime_rl.orchestrator.rust.run_rust_orchestrator`).
+- `write_resolved_config` stays in Python (`prime_rl.rust_bridge`).
 
 Orchestrator logic over config that is **not** in this crate, so its owner must port or
 bridge it:
@@ -130,9 +130,3 @@ check in `tests/extract.rs`.
 
 `tests/unit/test_configs.py` (pydantic validation) stays in Python. It is unchanged,
 because the validation never moves.
-
-## Imports of `prime_rl.orchestrator` from outside it (flag for deletion at parity)
-
-`eval/runner.py`, `eval/control.py`, `transports/weights/{__init__,filesystem,base}.py`,
-`transports/weights/nixl/nixl.py`, `inference/dynamo.py`, `entrypoints/orchestrator.py`,
-`entrypoints/env_server.py`.
