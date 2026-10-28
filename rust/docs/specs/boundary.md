@@ -84,6 +84,20 @@ Rust: `prime_rl_orch_rs::wandb::PyWandb::from_bridge(py, &bridge) -> Option<Box<
 built in `run` with the GIL held and handed to the orchestrator. prl-monitors calls it from a blocking thread; each
 call takes the GIL. Test: `wandb_forwards_calls`.
 
+### NIXL weight receiver (`PyBridge.nixl_receiver()`)
+
+Only built when `weight_broadcast.type == "nixl"`. Returns
+`prime_rl.transports.weights.nixl.bridge.NixlReceiverBridge(config.weight_broadcast)` (owner: io): the consumer's
+NIXL agent (UCX, `set_ucx_env_defaults(0)`, agent name `orchestrator-<host>-r0`) and ModelExpress session (role
+`orchestrator`, worker `orchestrator`). Methods, all blocking: `publish()` (agent metadata -> ModelExpress, after
+`/init_broadcaster`), `wait_ready(step, timeout)` (resolve + connect the trainer peer on first use, wait for
+`policy:{step:016x}:ready`), `send_complete(step)`. The Rust `prl_io::weights::WeightReceiver` drives the protocol
+(markers, `/init_broadcaster` with `session_id`, `/update_weights` with a null `weight_dir`).
+Rust: `prime_rl_orch_rs::nixl::PyNixl::from_bridge(py, &bridge) -> Box<dyn prl_io::weights::NixlBridge>`, passed to
+`WeightReceiver::new`; calls run on the blocking pool with the GIL. Tests: `drives_python_bridge` (fake object),
+`real_nixl_handshake` (`PRL_NIXL_LIVE=1`: real NIXL agents over UCX/TCP, ModelExpress faked),
+`tests/unit/transports/test_nixl_receiver_bridge.py`.
+
 Planned / on request: anything else a spec proves cannot be ported.
 To add a method: Python method on `PyBridge` (plain args, JSON `bytes` result), trait method in `prl_types::Bridge`
 (core), impl in `prl-py/src/bridge.rs`, a row here.

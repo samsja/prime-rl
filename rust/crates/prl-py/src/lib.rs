@@ -1,6 +1,7 @@
 //! Python extension module `prime_rl_orch_rs`: entry point of the Rust orchestrator.
 
 pub mod bridge;
+pub mod nixl;
 pub mod wandb;
 
 use pyo3::exceptions::PyRuntimeError;

@@ -124,6 +124,13 @@ class PyBridge:
         ids = renderer.render_ids([{"role": "system", "content": system_content}], add_generation_prompt=False)
         return orjson.dumps(list(ids))
 
+    def nixl_receiver(self):
+        """The consumer's NIXL agent + ModelExpress session (``prl_io::weights::NixlBridge``),
+        built when the weight broadcast is ``nixl``."""
+        from prime_rl.transports.weights.nixl.bridge import NixlReceiverBridge
+
+        return NixlReceiverBridge(self.config.weight_broadcast)
+
     def echo_filter(self, import_path: str, kwargs: str, trace: bytes) -> bytes:
         """Masks from echo's user filter ``import_object(import_path)(trace, **kwargs)``.
         ``kwargs`` is a JSON object; ``trace`` is a JSON-encoded ``vf.WireTrace``. Returns the
