@@ -9,6 +9,9 @@ single run directory inside. Sections:
   traces     trace stream / annotations / index: record counts per kind, record schemas
   logs       orchestrator.log line shapes (numbers, ids, paths normalized)
   ckpt       checkpoint layout and orchestrator progress.pt contents
+
+Trainer-owned payloads (broadcasts/, weights/, checkpoints/step_*/trainer) are ignored: they are
+not written by the orchestrator, and parity runs prune them to save disk.
 """
 
 import argparse
@@ -86,7 +89,9 @@ def layout(run: Path) -> dict[str, int]:
     counts: Counter = Counter()
     for path in run.rglob("*"):
         rel = path.relative_to(run).as_posix()
-        if rel.startswith(("weights/", "broadcasts/")) and path.is_file() and rel.count("/") > 2:
+        # Trainer-owned payloads (weights, trainer checkpoints) are unchanged by the orchestrator and
+        # are pruned after runs to save disk.
+        if rel.startswith(("weights/", "broadcasts/")) or re.match(r"checkpoints/step_\d+/trainer", rel):
             continue
         counts[normalize_path(rel) + ("/" if path.is_dir() else "")] += 1
     return counts
@@ -361,8 +366,14 @@ def ckpt_summary(run: Path) -> dict:
 def compare_ckpt(a: Path, b: Path) -> int:
     section("CHECKPOINTS (checkpoints/step_*/)")
     issues = 0
-    files_a = {p.relative_to(a / "checkpoints").as_posix() for p in (a / "checkpoints").rglob("*") if p.is_file()} if (a / "checkpoints").is_dir() else set()
-    files_b = {p.relative_to(b / "checkpoints").as_posix() for p in (b / "checkpoints").rglob("*") if p.is_file()} if (b / "checkpoints").is_dir() else set()
+    def ckpt_files(run: Path) -> set[str]:
+        root = run / "checkpoints"
+        if not root.is_dir():
+            return set()
+        rels = (p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+        return {rel for rel in rels if not re.match(r"step_\d+/trainer", rel)}
+
+    files_a, files_b = ckpt_files(a), ckpt_files(b)
     issues += show_set_diff("checkpoint files", files_a, files_b)
     ca, cb = ckpt_summary(a), ckpt_summary(b)
     for step in sorted(set(ca) | set(cb), key=lambda s: int(s.split("_")[1])):
