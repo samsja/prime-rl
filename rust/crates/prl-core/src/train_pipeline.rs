@@ -4,11 +4,10 @@
 //! Packing and sending a batch (which blocks until every trainer rank requested it) runs in its
 //! own task while results keep flowing into the sink. Results that arrive during a send belong
 //! to the next batch window (`progress.step + 1`), as in Python, which consumed them only after
-//! the send. The post-send work (step advance, checkpoint, metrics, drain) runs in order once
-//! the send completes; batches completed meanwhile wait in a queue. Control submissions are
-//! applied at any time.
+//! the send; the next batch is cut only once the post-send work (step advance, checkpoint,
+//! metrics, drain) ran, so per-batch metrics land in the same window as in Python. Control
+//! submissions are applied at any time.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -152,8 +151,6 @@ pub struct TrainPipeline {
     last_batch_at: Instant,
     draining: bool,
     shipping: Option<Shipping>,
-    /// Batches completed while the previous one was still shipping.
-    queued: VecDeque<TrainBatch>,
 }
 
 /// Pack and send of one batch, the result of the ship task.
@@ -213,7 +210,6 @@ impl TrainPipeline {
             last_batch_at: Instant::now(),
             draining: false,
             shipping: None,
-            queued: VecDeque::new(),
         };
         this.publish_view();
         (this, TrainPipelineHandle { tx }, TrainPipelineInbox { cmd_rx }, view_rx)
@@ -272,7 +268,7 @@ impl TrainPipeline {
                 shipped = async { (&mut self.shipping.as_mut().expect("shipping").task).await }, if self.shipping.is_some() => {
                     let shipping = self.shipping.take().expect("shipping");
                     self.finish_ship(shipping, shipped??, &cancel).await?;
-                    self.ship_next(None, &cancel).await?;
+                    self.ship_next(&cancel).await?;
                 }
                 result = results.recv(), if results_open => match result {
                     Some(result) => self.handle(result, &cancel).await?,
@@ -294,8 +290,9 @@ impl TrainPipeline {
 
     async fn handle(&mut self, result: DispatchResult<Episode>, cancel: &CancellationToken) -> Result<()> {
         // During a send the batch window collecting is the next one.
-        let step = self.progress.step + u64::from(self.shipping.is_some());
-        let batch = match result {
+        let shipping = self.shipping.is_some();
+        let step = self.progress.step + u64::from(shipping);
+        match result {
             DispatchResult::Episode(mut episode) => {
                 let Some(run) = &episode.run else { bail!("Dispatched episode is missing run identity") };
                 if !matches!(run, RunInfo::Train(_)) {
@@ -309,40 +306,31 @@ impl TrainPipeline {
             }
             DispatchResult::Failure(failure) => self.sink.fail(failure, step, &mut self.admission).await?,
             DispatchResult::Cancelled(cancellation) => self.sink.cancel(cancellation, step, &mut self.admission).await?,
-        };
-        self.handle_train_result(batch, cancel).await
-    }
-
-    async fn handle_train_result(&mut self, batch: Option<TrainBatch>, cancel: &CancellationToken) -> Result<()> {
-        self.beat();
-        self.ship_next(batch, cancel).await
-    }
-
-    /// Ship `batch` (or the next ready one) unless a send is in flight; batches that cannot
-    /// ship after training stops are released.
-    async fn ship_next(&mut self, mut batch: Option<TrainBatch>, cancel: &CancellationToken) -> Result<()> {
-        loop {
-            if self.draining {
-                for batch in batch.take().into_iter().chain(self.queued.drain(..)) {
-                    self.sink.count_queued_cancelled(batch.cohort.num_traces() as f64);
-                    self.sink.release_samples(&batch.samples);
-                }
-                self.sink.discard_queued();
-                return Ok(());
-            }
-            if self.shipping.is_some() {
-                self.queued.extend(batch);
-                return Ok(());
-            }
-            let next = match batch.take().or_else(|| self.queued.pop_front()) {
-                Some(next) => next,
-                None => match self.sink.take_batch(self.progress.step).await? {
-                    Some(next) => next,
-                    None => return Ok(()),
-                },
-            };
-            self.start_ship(next, cancel).await?;
         }
+        self.beat();
+        // Batches are cut only between sends, as in Python (which consumed nothing during one).
+        if !shipping {
+            self.ship_next(cancel).await?;
+        }
+        Ok(())
+    }
+
+    /// Cut and ship the next batch until none is ready or a send is in flight; after training
+    /// stops, ready batches are released instead.
+    async fn ship_next(&mut self, cancel: &CancellationToken) -> Result<()> {
+        while self.shipping.is_none() {
+            let Some(batch) = self.sink.take_batch(self.progress.step).await? else { break };
+            if self.draining {
+                self.sink.count_queued_cancelled(batch.cohort.num_traces() as f64);
+                self.sink.release_samples(&batch.samples);
+                break;
+            }
+            self.start_ship(batch, cancel).await?;
+        }
+        if self.draining {
+            self.sink.discard_queued();
+        }
+        Ok(())
     }
 
     /// Stop scheduling train work and let the pipeline empty; triggered evals still complete.
@@ -352,8 +340,9 @@ impl TrainPipeline {
         let cancellations = self.dispatcher.drain().await?;
         let n: usize = cancellations.iter().map(|c| c.count).sum();
         for cancellation in cancellations {
-            let batch = self.sink.cancel(cancellation, self.progress.step, &mut self.admission).await?;
-            Box::pin(self.handle_train_result(batch, cancel)).await?;
+            self.sink.cancel(cancellation, self.progress.step, &mut self.admission).await?;
+            self.beat();
+            Box::pin(self.ship_next(cancel)).await?;
         }
         info!(
             "{reason} — draining pipeline (cancelled {n} outstanding train episode(s); any in-flight evals will complete)"

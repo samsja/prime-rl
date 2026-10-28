@@ -14,7 +14,8 @@ pydantic object directly through pyo3.
   the Python orchestrator produced.
 - Inference: same vLLM HTTP endpoints (OpenAI API, admin endpoints, weight updates, /metrics).
 - Outputs: same metric keys, same monitor outputs (wandb, prime platform, file traces), same checkpoint format
-  (`progress.pt` stays `torch.load`-able), same console log lines.
+  (`progress.pt` stays `torch.load`-able; it pickles `Progress` as `prime_rl.orchestrator.types.Progress` so an
+  older Python orchestrator can resume it, which only an older Python env can load), same console log lines.
 - Launcher: `uv run rl ...` is unchanged; the `orchestrator @ config.json` entrypoint runs the Rust orchestrator.
 
 ## Layout
@@ -76,8 +77,8 @@ Actors (`prl-core` unless noted):
 - `TrainSource`: train tasks across envs + curricula; `on_result` admission, metrics, checkpoint state.
 - `TrainPipeline`: `prl_train::TrainSink` + the ship flow, checkpoint saves and control pauses. Single
   writer of `progress_step`. Pack + send run in a ship task while results keep flowing into the sink
-  (stamped with the next step, the window Python consumed them in); the post-send work (step advance, ckpt,
-  metrics, drain) runs in order when the send completes, and batches completed meanwhile queue behind it.
+  (stamped with the next step, the window Python consumed them in); the next batch is cut only after the
+  post-send work (step advance, ckpt, metrics, drain) ran, so per-batch metrics land in Python's windows.
 - `EvalPipeline`: eval results -> `EvalSink` epochs -> finalize; `trigger_eval` after each applied policy.
 - `WeightWatcher`: polls the weight receiver (prl-io), single writer of `policy`. Per update: dispatcher
   `version_pending` -> receive -> `policy` -> hooks in order: `EvalPipeline` (eval trigger, may switch the
