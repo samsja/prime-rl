@@ -195,8 +195,10 @@ the trait. Only scalar rows cross (JSON from the Python-`json.dumps`-compatible 
 - `tests/actor.rs`: ordering, failure containment, crash path; worker unit tests: strikes, rejections, cooldown, coalescing, drops.
 
 ### 2.5 Known gaps vs Python
-- Legacy samples fallback (parquet / `/samples` when Prime Traces is not enabled for the account, or `PRIME_TRACES_OPT_OUT`):
-  not ported. Not-enabled accounts get a warning and no episode upload; opt-out errors at init.
-- `PRIME_CONTEXT` profile overlay of the prime CLI config (`~/.prime/environments/<ctx>.json`) is not read.
+- Legacy samples fallback (parquet / `/samples` when Prime Traces is not enabled for the account, or when
+  `PRIME_TRACES_OPT_OUT` opts out): not ported. Those runs work as in Python (an invalid opt-out value fails registration),
+  but their episodes are not uploaded; a warning says so.
+- `PRIME_CONTEXT` is read where Python reads it: the monitor's credential check (`prime_sandboxes.Config`); the SDK
+  settings ignore it, as in Python.
 - prime_runs `on_error="raise"` mode and fork handling: not applicable (the monitors never use them).
 - Log lines match the Python messages; the `Initializing {name} monitor (...)` config rendering is approximate.
