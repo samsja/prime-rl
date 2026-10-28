@@ -426,6 +426,13 @@ def compare_ckpt(a: Path, b: Path) -> int:
             print(f"  {step}: only in {'A' if vb is None else 'B'}")
             issues += 1
             continue
+        for label, v in (("A", va), ("B", vb)):
+            if "error" in v:
+                print(
+                    f"  {step}: cannot load {label}'s progress.pt ({v['error']}); run this tool from an env that "
+                    "has prime_rl.orchestrator (the baseline worktree)"
+                )
+                issues += 1
         structure_same = {k: v for k, v in va.items() if k != "progress"} == {
             k: v for k, v in vb.items() if k != "progress"
         }
