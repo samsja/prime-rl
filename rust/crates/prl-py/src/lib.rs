@@ -1,7 +1,11 @@
 //! Python extension module `prime_rl_orch_rs`: entry point of the Rust orchestrator.
 
+pub mod bridge;
+
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+
+use crate::bridge::PyBridge;
 
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("PRIME_RL_ORCH_RS_LOG")
@@ -9,25 +13,26 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-async fn run_orchestrator(config: serde_json::Value, _bridge: Py<PyAny>) -> anyhow::Result<()> {
-    let keys: Vec<&String> = config.as_object().map(|o| o.keys().collect()).unwrap_or_default();
-    tracing::info!(?keys, "rust orchestrator started (stub)");
+// Stub until prl-core lands: `prl_core::run(config, Arc::new(bridge))`.
+async fn run_orchestrator(config_type: String, bridge: PyBridge) -> anyhow::Result<()> {
+    tracing::info!(config_type, "rust orchestrator started (stub)");
+    let _ = bridge;
     Ok(())
 }
 
-/// Run the orchestrator until it exits. Releases the GIL for the whole run; Rust calls back into
-/// `bridge` (a `prime_rl.orchestrator.rust.PyBridge`) from blocking threads that re-acquire the GIL.
+/// Run the orchestrator until it exits. `config` is the validated `OrchestratorConfig`.
+/// Releases the GIL for the whole run; Rust calls back into `bridge` (a
+/// `prime_rl.orchestrator.rust.PyBridge`) from blocking threads that re-acquire the GIL.
 #[pyfunction]
-fn run(py: Python<'_>, config_json: &str, bridge: Py<PyAny>) -> PyResult<()> {
+fn run(py: Python<'_>, config: &Bound<'_, PyAny>, bridge: Py<PyAny>) -> PyResult<()> {
     init_tracing();
-    let config: serde_json::Value = serde_json::from_str(config_json)
-        .map_err(|e| PyRuntimeError::new_err(format!("invalid orchestrator config JSON: {e}")))?;
+    let config_type = config.get_type().name()?.to_string();
     py.allow_threads(|| {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("prl-orch")
             .build()?;
-        runtime.block_on(run_orchestrator(config, bridge))
+        runtime.block_on(run_orchestrator(config_type, PyBridge::new(bridge)))
     })
     .map_err(|e| PyRuntimeError::new_err(format!("{e:#}")))
 }

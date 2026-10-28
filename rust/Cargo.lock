@@ -1080,7 +1080,6 @@ dependencies = [
  "prl-types",
  "pyo3",
  "pyo3-build-config",
- "pythonize",
  "serde",
  "serde_json",
  "tokio",
@@ -1211,16 +1210,6 @@ dependencies = [
  "pyo3-build-config",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "pythonize"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "597907139a488b22573158793aa7539df36ae863eba300c75f3a0d65fc475e27"
-dependencies = [
- "pyo3",
- "serde",
 ]
 
 [[package]]
