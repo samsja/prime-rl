@@ -218,20 +218,6 @@ pub enum DispatchResult<E> {
     Cancelled(GroupCancellation),
 }
 
-/// Broadcast pipeline facts (`tokio::sync::broadcast`). Components subscribe;
-/// nobody references the supervisor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PipelineEvent {
-    /// Inference serves weights of `version` (written after the swap).
-    PolicyAdvanced { version: u64 },
-    /// The batch of `step` was sent to the trainer; `progress.step` is now `step + 1`.
-    BatchShipped { step: u64 },
-    /// Eval epochs fired for `envs` at `step`.
-    EvalTriggered { step: u64, envs: Vec<String> },
-    /// The final step shipped (or the budget was exceeded): no more train work.
-    Draining { reason: String },
-}
-
 /// One task: `data` is shipped verbatim as the run request's `task_data`; `key`/`hash` are the
 /// identity checked against the returned episode's `task`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

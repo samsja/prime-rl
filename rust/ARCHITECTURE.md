@@ -60,32 +60,47 @@ prl-eval -> prl-py`.
 
 ## Runtime design: event-driven actors
 
-The Python orchestrator is a central `main_loop` that pulls from `dispatcher.out_q` and calls into components,
-plus callbacks (`watcher.on_update`, `concurrency.bind`) and shared mutable objects (`Policy`, `Progress`,
-`dispatch_allowed` Event). The Rust design pushes this to native async message passing:
+The Python orchestrator is a central `main_loop` over `dispatcher.out_q` plus callbacks and shared mutable
+objects. The Rust orchestrator (`prl_core::run`) is a set of tokio actors: each owns its state, reacts in a
+`tokio::select!` over its inbox(es), timers and cancellation, and is reached through a cloneable handle
+(`mpsc` commands; request/response with a `oneshot`). No `Arc<Mutex<_>>` over component state.
 
-- Each component is an actor: one tokio task that owns its state exclusively and reacts to messages
-  (`tokio::select!` over its inbox(es), timers and cancellation). No `Arc<Mutex<_>>` over component state.
-- Commands go point-to-point over `mpsc` (component inbox enums). Request/response uses a `oneshot` in the
-  command (e.g. the periodic logger asking for gauges).
-- Shared slowly-changing values are `tokio::sync::watch` channels with a single writer:
-  `policy: watch<Policy>` (written by the watcher), `progress_step: watch<u64>` (written by the shipper),
-  `dispatch_gate: watch<bool>` (derived by a tiny gate actor from policy + step, replacing
-  `update_dispatch_gate` being called from two places), `concurrency_limit: watch<usize>`.
-- Broadcast facts as events (`PolicyAdvanced{version}`, `BatchShipped{step}`, `EvalTriggered{step, envs}`,
-  `Draining`) to the components that subscribe. Components never reference the supervisor.
-- Data flow:
-  `TrainSource/EvalSource -> Dispatcher -> EnvClient(s)` ; completed runs flow
-  `Dispatcher -> TrainSink | EvalSink` (episodes, failures, group cancellations) ;
-  `TrainSink -> Shipper` (TrainBatch: pack -> send -> ckpt -> metrics -> BatchShipped) ;
-  `EvalSink -> EvalReporter` ; `WeightWatcher -> PolicyAdvanced` ;
-  `InferenceMetricsCollector -> ConcurrencyController -> concurrency_limit / overload -> Dispatcher` ;
-  everything that logs -> `Monitors` actor (single ordered consumer that fans out to file / prime / wandb).
-- CPU-heavy work (scoring big groups, packing, metric aggregation over a batch) runs on `spawn_blocking`/rayon,
-  never on the reactor threads.
-- Lifecycle: a supervisor owns a `CancellationToken` and a `JoinSet`. Any actor that returns an error cancels the
-  whole tree (same semantics as `_on_component_done`). Draining is an event, not a flag poked from outside.
-  Shutdown has the same global timeout semantics as Python (`SHUTDOWN_TIMEOUT_S`).
+Actors (`prl-core` unless noted):
+
+- `Dispatcher`: groups, in-flight env runs (a `JoinSet`), permits, admission window, rate limiter, mode
+  (PREFER_TRAIN / PREFER_EVAL) and the `EvalSource`. Draws train tasks from the `TrainSource` actor. The
+  dispatch gate (`(progress_step - 1) - policy.version <= 1`) is evaluated inside the dispatcher from the
+  `policy` and `progress_step` watches. Results go to per-kind outboxes drained into bounded channels
+  (`DispatchResult<Episode>`: episode, `DispatchFailure`, `GroupCancellation`) to the two pipelines, so the
+  dispatcher keeps serving commands while a sink is busy. Run tasks relay env-server deltas on a channel; the
+  live view is flushed to `Monitors` every 0.5 s.
+- `TrainSource`: train tasks across envs + curricula; `on_result` admission, metrics, checkpoint state.
+- `TrainPipeline`: `prl_train::TrainSink` + the ship flow (pack on `spawn_blocking` -> send -> ckpt ->
+  metrics), checkpoint saves and control pauses. Single writer of `progress_step`. Ingestion is serial with
+  shipping, as in Python.
+- `EvalPipeline`: eval results -> `EvalSink` epochs -> finalize; `trigger_eval` after each applied policy.
+- `WeightWatcher`: polls the weight receiver (prl-io), single writer of `policy`. Per update: dispatcher
+  `version_pending` -> receive -> `policy` -> hooks in order: `EvalPipeline` (eval trigger, may switch the
+  dispatcher to PREFER_EVAL) -> dispatcher `version_applied`.
+- `ConcurrencyController`: pure AIMD state machine wrapped in an actor; fed engine load samples by prl-io's
+  `InferenceMetricsCollector` and per-episode completions by the dispatcher; single writer of `limit`; sends
+  overload excess to the dispatcher.
+- `Monitors` (prl-monitors): single ordered consumer of every log call (metrics, episodes, annotations,
+  live events, eval plans), fanning out to file / prime / wandb. Episodes are logged to `all` on arrival
+  before they reach a sink.
+- Also: control server (prl-io), lag monitor, pipeline-view `PeriodicLogger` (polls the dispatcher and
+  concurrency handles and reads the watcher / pipeline progress watches).
+
+Watch channels (single writer): `policy: Policy` (watcher), `progress_step: u64` (train pipeline),
+`limit: usize` (concurrency), `inflight: usize` (dispatcher), `idle: bool` (dispatcher), plus progress
+watches the pipelines and watcher publish for the pipeline view.
+
+Lifecycle: the supervisor owns a `CancellationToken` and a `JoinSet` of named components; any component
+exiting early fails the run (`_on_component_done` semantics). Draining starts in the train pipeline after the
+final batch (`dispatcher.drain()` returns the train cancellations directly). When the dispatcher reports
+`idle`, the supervisor stops it, lets the eval pipeline consume its closed channel, waits for the final
+broadcast, saves the final checkpoint, finalizes the monitors, and tears down within `SHUTDOWN_TIMEOUT`
+(300 s, then process exit). prl-py cancels a `shutdown` token on SIGINT.
 
 ## Working rules
 
