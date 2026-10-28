@@ -3,6 +3,7 @@
 use std::ffi::CString;
 
 use prime_rl_orch_rs::bridge::PyBridge;
+use prime_rl_orch_rs::wandb::PyWandb;
 use prl_types::{Bridge, Kind};
 use pyo3::prelude::*;
 use serde_json::json;
@@ -10,7 +11,23 @@ use serde_json::json;
 const FAKE_BRIDGE: &str = r#"
 import json
 
+class FakeWandb:
+    def __init__(self):
+        self.calls = []
+
+    def init(self, train_env_names, eval_env_names, overview_flavor):
+        self.calls.append(["init", train_env_names, eval_env_names, overview_flavor])
+
+    def log(self, row_json, step):
+        self.calls.append(["log", json.loads(row_json), step])
+
+    def finish(self, paused):
+        self.calls.append(["finish", paused])
+
 class FakeBridge:
+    def __init__(self, wandb=True):
+        self.wandb = FakeWandb() if wandb else None
+
     def load_tasks(self, split, env_name):
         if env_name == "missing":
             raise KeyError(f"No {split} env named {env_name!r}")
@@ -33,7 +50,7 @@ class FakeBridge:
         return json.dumps([[i < json.loads(kwargs)["keep"] for i in range(n)]]).encode()
 "#;
 
-fn fake_bridge() -> PyBridge {
+fn fake_bridge_object(wandb: bool) -> Py<PyAny> {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         // SAFETY: set once, before the interpreter starts and before other threads read the env.
@@ -43,8 +60,12 @@ fn fake_bridge() -> PyBridge {
     Python::with_gil(|py| {
         let code = CString::new(FAKE_BRIDGE).unwrap();
         let module = PyModule::from_code(py, &code, c"fake_bridge.py", c"fake_bridge").unwrap();
-        PyBridge::new(module.getattr("FakeBridge").unwrap().call0().unwrap().unbind())
+        module.getattr("FakeBridge").unwrap().call1((wandb,)).unwrap().unbind()
     })
+}
+
+fn fake_bridge() -> PyBridge {
+    PyBridge::new(fake_bridge_object(true))
 }
 
 /// Run `f` on a multi-thread runtime with the GIL released, as `prime_rl_orch_rs.run` does.
@@ -93,4 +114,25 @@ fn train_helpers() {
     assert_eq!(flops, vec![0, 1i128 << 70, 2i128 << 70]);
     assert_eq!(ids, vec![5, 4]);
     assert_eq!(masks, vec![vec![true, false]]);
+}
+
+#[test]
+fn wandb_forwards_calls() {
+    let bridge = fake_bridge_object(true);
+    let mut wandb = Python::with_gil(|py| PyWandb::from_bridge(py, &bridge)).unwrap().unwrap();
+    wandb.init(&["t".into()], &[], "rl").unwrap();
+    wandb.log(r#"{"loss": NaN, "step": 2}"#, Some(2)).unwrap();
+    wandb.log("{}", None).unwrap();
+    wandb.finish(true).unwrap();
+    let calls = Python::with_gil(|py| {
+        let calls = bridge.getattr(py, "wandb").unwrap().getattr(py, "calls").unwrap();
+        py.import("json").unwrap().call_method1("dumps", (calls,)).unwrap().extract::<String>().unwrap()
+    });
+    assert_eq!(
+        calls,
+        r#"[["init", ["t"], [], "rl"], ["log", {"loss": NaN, "step": 2}, 2], ["log", {}, null], ["finish", true]]"#
+    );
+
+    let no_wandb = fake_bridge_object(false);
+    assert!(Python::with_gil(|py| PyWandb::from_bridge(py, &no_wandb)).unwrap().is_none());
 }

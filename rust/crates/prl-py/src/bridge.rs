@@ -99,7 +99,7 @@ impl<'py> IntoPyObject<'py> for PyBytesArg {
 }
 
 /// A Python exception as an error carrying its formatted traceback.
-fn python_error(py: Python<'_>, err: PyErr) -> anyhow::Error {
+pub(crate) fn python_error(py: Python<'_>, err: PyErr) -> anyhow::Error {
     let traceback = err
         .traceback(py)
         .and_then(|tb| tb.format().ok())

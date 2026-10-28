@@ -19,6 +19,7 @@ from renderers import RendererConfig
 
 from prime_rl.configs.eval import EvalConfig, SFTOnlineEvalConfig
 from prime_rl.configs.orchestrator import EnvConfig, OrchestratorConfig
+from prime_rl.monitors.wandb.bridge import WandbBridge
 from prime_rl.orchestrator.utils import intercept_vf_logging
 from prime_rl.utils.logger import get_logger, setup_logger
 from prime_rl.utils.pathing import write_resolved_config
@@ -45,6 +46,11 @@ class PyBridge:
             self._sources: dict[str, list[EnvConfig]] = {"train": config.train.source, "eval": eval_sources}
         else:
             self._sources = {"train": [], "eval": config.source}
+        # The W&B monitor, driven by the Rust monitors actor (``prl_monitors::WandbBridge``).
+        # Same output dir as the Python ``monitors.setup`` call of each process.
+        output_dir = config.run_dir if isinstance(config, EvalConfig) else config.output_dir
+        wandb = config.monitors.wandb
+        self.wandb = WandbBridge(wandb, output_dir, config) if wandb is not None else None
         self._streams: dict[tuple[str, str], Iterator[vf.Task]] = {}
         self._renderers: dict[tuple[str, str], Renderer] = {}
         self._echo_filters: dict[tuple[str, str], Callable[[vf.Trace], list]] = {}

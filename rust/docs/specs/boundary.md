@@ -74,6 +74,16 @@ Tests: `rust/crates/prl-py/tests/bridge.rs` (fake Python bridge object: round-tr
 traceback, i128 flop costs, bytes args).
 Eval sources with an unbounded taskset are an error in Python (`EvalEnv.start`); the Rust caller keeps that check.
 
-Planned / on request: wandb monitor calls (monitors), anything else a spec proves cannot be ported.
+### W&B (`PyBridge.wandb`)
+
+`PyBridge.wandb` is `prime_rl.monitors.wandb.bridge.WandbBridge(config.monitors.wandb, output_dir, config)` or `None`
+when `monitors.wandb` is unset (`output_dir` = `run_dir` for `EvalConfig`, else `output_dir`, as each Python process's
+`monitors.setup`). Methods (owner of the Python class: monitors): `init(train_env_names, eval_env_names,
+overview_flavor)`, `log(row_json, step | None)` (row may hold `NaN`/`Infinity`), `finish(paused)`.
+Rust: `prime_rl_orch_rs::wandb::PyWandb::from_bridge(py, &bridge) -> Option<Box<dyn prl_monitors::WandbBridge>>`,
+built in `run` with the GIL held and handed to the orchestrator. prl-monitors calls it from a blocking thread; each
+call takes the GIL. Test: `wandb_forwards_calls`.
+
+Planned / on request: anything else a spec proves cannot be ported.
 To add a method: Python method on `PyBridge` (plain args, JSON `bytes` result), trait method in `prl_types::Bridge`
 (core), impl in `prl-py/src/bridge.rs`, a row here.

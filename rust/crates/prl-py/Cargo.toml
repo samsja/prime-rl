@@ -16,6 +16,7 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 prl-types = { workspace = true }
 prl-config = { workspace = true }
+prl-monitors = { workspace = true }
 async-trait = { workspace = true }
 pyo3 = { workspace = true }
 tokio = { workspace = true }
