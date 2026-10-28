@@ -1,0 +1,46 @@
+# `uv run eval` config exercising fields no checked-in eval config sets.
+model = "Qwen/Qwen3-0.6B"
+group_size = 2
+dispatch_per_minute = 100
+
+[run]
+name = "eval-run"
+dir = "eval-dir"
+
+[resume]
+skip_checks = true
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+admin_base_url = ["http://localhost:8100/v1"]
+
+[concurrency]
+min_inflight = 8
+max_inflight = 64
+
+[control]
+port = 9100
+
+[heartbeat]
+url = "https://example.invalid/hb"
+
+[monitors.wandb]
+project = "p"
+
+[monitors]
+prime = "None"
+
+[[source]]
+name = "rt"
+env.taskset.id = "reverse-text"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"
+serve.address = "tcp://127.0.0.1:5000"
+sampling = { temperature = 0.5 }
+
+[[source]]
+env.taskset.id = "reverse-text"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"
+group_size = 4

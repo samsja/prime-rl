@@ -1,4 +1,5 @@
-//! The orchestrator config, extracted from the validated pydantic `OrchestratorConfig`.
+//! The orchestrator and eval configs, extracted from the validated pydantic objects
+//! (`OrchestratorConfig`, `EvalConfig`, `SFTOnlineEvalConfig`).
 //!
 //! Pydantic stays the only config schema and does all validation. The Python entrypoint
 //! passes the validated `OrchestratorConfig` object to Rust, which extracts it once at
@@ -14,12 +15,14 @@
 //! configs in plain Rust for tests.
 
 mod algorithm;
+mod eval;
 mod monitors;
 mod orchestrator;
 mod py;
 mod shared;
 
 pub use algorithm::*;
+pub use eval::*;
 pub use monitors::*;
 pub use orchestrator::*;
 pub use shared::*;

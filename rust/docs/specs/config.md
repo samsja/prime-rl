@@ -113,6 +113,18 @@ bridge it:
 Need another field? Ask config, or add it yourself: add the field to the struct and a
 check in `tests/extract.rs`.
 
+## Eval configs (`prl_config::eval`, for prl-eval)
+
+- `EvalConfig::extract` (`uv run eval`): `{ served: ServedEvalConfig<EvalSourceConfig>, model: String, run: RunConfig{name, dir}, output_dir, run_dir (property), resume: Option<EvalResumeConfig{skip_checks}>, log, monitors: EvalMonitorsConfig, dump }`.
+- `SFTOnlineEvalConfig::extract` (the sft online-eval process): `{ served: ServedEvalConfig<OnlineEvalSourceConfig>, intervals (property), skip_first_step, retrigger_on_resume, cancel_on_new_checkpoint, model: Option<String>, weight_broadcast: Option<WeightBroadcastConfig>, broadcasts_dir: Option<PathBuf>, max_steps, resume_step, output_dir, log, monitors, dump }`.
+- `ServedEvalConfig<S> { source: Vec<S>, client: ClientConfig, concurrency, dispatch_per_minute, control, heartbeat, env_addresses (property) }`. It is the shared Python base `ServedEvalConfig`.
+- `EvalSourceConfig { resolved_name, env_id, sampling: Value, group_size }`.
+  `EvalMonitorsConfig { wandb, file, prime: Option<PrimeEvalMonitorConfig{name}> }`.
+- Not extracted: `clean`, `dry_run`, `dashboard`, `select`, `group_size` (group level). The
+  Python entrypoint handles the first three. The last two are already merged into the sources.
+- The test loads every `uv run eval` TOML under configs/examples and each sft config's
+  `[eval]` block, plus `tools/extra/eval.toml` and `tools/extra/sft_online_eval.toml`.
+
 ## Python tests covering this config
 
 `tests/unit/test_configs.py` (pydantic validation) stays in Python. It is unchanged,

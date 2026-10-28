@@ -1,0 +1,25 @@
+# Online-eval process config (`SFTOnlineEvalConfig`), as the sft launcher writes it.
+model = "Qwen/Qwen3-0.6B"
+interval = 10
+skip_first_step = true
+retrigger_on_resume = true
+cancel_on_new_checkpoint = false
+max_steps = 100
+resume_step = 20
+
+[weight_broadcast]
+type = "nccl"
+inference_world_size = 2
+
+[[source]]
+name = "rt"
+interval = 5
+env.taskset.id = "reverse-text"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"
+
+[[source]]
+name = "rt-2"
+env.taskset.id = "reverse-text"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"

@@ -1,7 +1,8 @@
-//! Extract every orchestrator config under `configs/` and `examples/` (plus the variant
-//! TOMLs in `tools/extra/`) from the real pydantic objects. A renamed or removed pydantic
-//! field, or a new union variant, fails extraction here.
+//! Extract every orchestrator and eval config under `configs/` and `examples/` (plus the
+//! variant TOMLs in `tools/extra/`) from the real pydantic objects. A renamed or removed
+//! pydantic field, or a new union variant, fails extraction here.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 
 use pyo3::prelude::*;
@@ -28,21 +29,36 @@ sys.path.insert(0, str(root / "rust" / "crates" / "prl-config" / "tools"))
 
 type Loaded<'py> = Vec<(String, Bound<'py, PyAny>)>;
 
-/// `(path, OrchestratorConfig object)` for every loadable config, via `tools/load_configs.py`.
-fn load_all(py: Python<'_>) -> Loaded<'_> {
+/// `(path, config object)` of every loadable config of `kind` (`orchestrator`, `eval`,
+/// `sft_online_eval`), via `tools/load_configs.py`.
+fn load_all<'py>(py: Python<'py>, kind: &str) -> Loaded<'py> {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../..");
     let setup = CString::new(format!("ROOT = {root:?}\n{SETUP}")).unwrap();
     py.run(&setup, None, None).unwrap();
     let loader = PyModule::import(py, "load_configs").unwrap();
-    let (loaded, skipped): (Loaded<'_>, Vec<(String, String)>) =
+    let (mut loaded, skipped): (HashMap<String, Loaded<'_>>, Vec<(String, String)>) =
         loader.call_method0("load_all").unwrap().extract().unwrap();
     for (name, error) in &skipped {
         eprintln!("skipped {name}: {error}");
     }
-    loaded
+    loaded.remove(kind).unwrap()
 }
 
-fn by_name<'a>(configs: &'a [(String, OrchestratorConfig)], name: &str) -> &'a OrchestratorConfig {
+fn extract_all<'py, T: FromPyObject<'py>>(
+    loaded: &[(String, Bound<'py, PyAny>)],
+) -> Vec<(String, T)> {
+    loaded
+        .iter()
+        .map(|(name, obj)| {
+            (
+                name.clone(),
+                obj.extract().unwrap_or_else(|e| panic!("{name}: {e}")),
+            )
+        })
+        .collect()
+}
+
+fn by_name<'a, T>(configs: &'a [(String, T)], name: &str) -> &'a T {
     &configs
         .iter()
         .find(|(path, _)| path.ends_with(name))
@@ -54,16 +70,9 @@ fn by_name<'a>(configs: &'a [(String, OrchestratorConfig)], name: &str) -> &'a O
 fn extracts_every_config() {
     init_python();
     Python::with_gil(|py| {
-        let loaded = load_all(py);
+        let loaded = load_all(py, "orchestrator");
         assert!(loaded.len() >= 40, "only {} configs loaded", loaded.len());
-        let configs: Vec<(String, OrchestratorConfig)> = loaded
-            .iter()
-            .map(|(name, obj)| {
-                let config =
-                    OrchestratorConfig::extract(obj).unwrap_or_else(|e| panic!("{name}: {e}"));
-                (name.clone(), config)
-            })
-            .collect();
+        let configs: Vec<(String, OrchestratorConfig)> = extract_all(&loaded);
 
         for (name, config) in &configs {
             assert_eq!(
@@ -88,7 +97,7 @@ fn extracts_every_config() {
             assert_eq!(env_names, expected, "{name}");
         }
 
-        let a = by_name(&configs, "tools/extra/variants_a.toml");
+        let a = by_name(&configs, "tools/extra/orchestrator_a.toml");
         assert_eq!(
             a.inference_metrics_roles,
             Some(vec![InferenceRole::Prefill, InferenceRole::Decode])
@@ -163,7 +172,7 @@ fn extracts_every_config() {
         assert_eq!(eval.source[0].sampling["top_k"], 20);
         assert_eq!(eval.source[1].sampling["top_k"], -1);
 
-        let b = by_name(&configs, "tools/extra/variants_b.toml");
+        let b = by_name(&configs, "tools/extra/orchestrator_b.toml");
         assert_eq!(b.weight_broadcast.tag(), "nixl");
         assert_eq!(b.concurrency.max_inflight, None);
         assert_eq!(b.monitors.file, None);
@@ -205,5 +214,90 @@ fn extracts_every_config() {
                     .iter()
                     .any(|s| s.algo.sampling.source == ModelReference::Policy)
         );
+    });
+}
+
+#[test]
+fn extracts_every_eval_config() {
+    init_python();
+    Python::with_gil(|py| {
+        let loaded = load_all(py, "eval");
+        assert!(
+            loaded.len() >= 10,
+            "only {} eval configs loaded",
+            loaded.len()
+        );
+        let configs: Vec<(String, EvalConfig)> = extract_all(&loaded);
+        for (name, config) in &configs {
+            let run_dir = config.output_dir.join(config.run.dir.as_deref().unwrap());
+            assert_eq!(config.run_dir, run_dir, "{name}");
+            assert_eq!(
+                config.served.env_addresses.len(),
+                config.served.source.len(),
+                "{name}"
+            );
+        }
+
+        let e = by_name(&configs, "tools/extra/eval.toml");
+        assert_eq!(e.model, "Qwen/Qwen3-0.6B");
+        assert_eq!(e.run_dir, std::path::Path::new("outputs/eval-dir"));
+        assert_eq!(e.resume, Some(EvalResumeConfig { skip_checks: true }));
+        assert_eq!(e.served.client.api_key_var, "VLLM_API_KEY");
+        assert_eq!(e.served.concurrency.max_inflight, Some(64));
+        assert_eq!(e.served.dispatch_per_minute, Some(100));
+        assert_eq!(e.served.control.as_ref().unwrap().port, 9100);
+        assert_eq!(e.monitors.prime, None);
+        assert_eq!(
+            e.monitors.wandb.as_ref().unwrap().name.as_deref(),
+            Some("eval-run")
+        );
+        let names: Vec<&str> = e
+            .served
+            .source
+            .iter()
+            .map(|s| s.resolved_name.as_str())
+            .collect();
+        assert_eq!(names, ["rt", "reverse-text"]);
+        assert_eq!(e.served.source[0].sampling["temperature"], 0.5);
+        assert_eq!(e.served.source[1].group_size, 4);
+        assert_eq!(
+            e.served.env_addresses[&(Split::Eval, "rt".to_string())].as_deref(),
+            Some("tcp://127.0.0.1:5000")
+        );
+        assert_eq!(
+            e.served.env_addresses[&(Split::Eval, "reverse-text".to_string())],
+            None
+        );
+    });
+}
+
+#[test]
+fn extracts_every_sft_online_eval_config() {
+    init_python();
+    Python::with_gil(|py| {
+        let loaded = load_all(py, "sft_online_eval");
+        assert!(
+            loaded.len() >= 2,
+            "only {} sft online eval configs loaded",
+            loaded.len()
+        );
+        let configs: Vec<(String, SFTOnlineEvalConfig)> = extract_all(&loaded);
+
+        let s = by_name(&configs, "tools/extra/sft_online_eval.toml");
+        assert_eq!(s.model.as_deref(), Some("Qwen/Qwen3-0.6B"));
+        assert_eq!(s.intervals.get("rt"), Some(&5));
+        assert_eq!(s.intervals.get("rt-2"), Some(&10));
+        assert!(s.skip_first_step && s.retrigger_on_resume && !s.cancel_on_new_checkpoint);
+        assert_eq!(s.max_steps, Some(100));
+        assert_eq!(s.resume_step, Some(20));
+        assert_eq!(
+            s.weight_broadcast.as_ref().map(WeightBroadcastConfig::tag),
+            Some("nccl")
+        );
+        assert_eq!(
+            s.broadcasts_dir.as_deref(),
+            Some(std::path::Path::new("outputs/broadcasts"))
+        );
+        assert_eq!(s.served.source[0].interval, 5);
     });
 }
