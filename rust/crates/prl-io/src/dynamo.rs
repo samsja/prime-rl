@@ -42,6 +42,16 @@ fn invalid(message: impl Into<String>) -> DiscoveryError {
     DiscoveryError::Fatal(anyhow!(message.into()))
 }
 
+/// An http(s) URL with a host and no credentials, query or fragment.
+fn is_plain_http_url(url: &url::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|h| !h.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
 /// `parse_dynamo_worker`: the single bound worker serving `model_name`.
 fn parse_dynamo_worker(payload: &Value, model_name: &str, expected_admin_host: Option<&str>) -> Result<DynamoWorker, DiscoveryError> {
     if payload.get("protocol_version") != Some(&json!(1)) {
@@ -72,14 +82,7 @@ fn parse_dynamo_worker(payload: &Value, model_name: &str, expected_admin_host: O
             .and_then(Value::as_u64)
             .ok_or_else(|| invalid("instance_id must be a non-negative integer"))?;
         let url = url::Url::parse(&admin_base_url).map_err(|_| invalid("admin_base_url must be a valid URL"))?;
-        if !matches!(url.scheme(), "http" | "https")
-            || url.host_str().is_none_or(str::is_empty)
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.path() != "/"
-        {
+        if !is_plain_http_url(&url) || url.path() != "/" {
             return Err(invalid("admin_base_url must be an http(s) origin"));
         }
         if let Some(expected) = expected_admin_host {
@@ -144,7 +147,7 @@ pub struct DynamoAdminPlane {
     poll_interval: Duration,
     timeout: u64,
     skip_model_check: bool,
-    headers: IndexMap<String, String>,
+    headers: reqwest::header::HeaderMap,
     frontend_clients: Vec<AdminClient>,
     clients: Vec<AdminClient>,
     fingerprint: Option<(u64, String)>,
@@ -155,13 +158,7 @@ impl DynamoAdminPlane {
     pub(crate) fn new(config: &PolicyClientConfig, model_name: &str) -> Result<Self> {
         let discovery_url = resolve_dynamo_discovery_url(config)?;
         let parsed = url::Url::parse(&discovery_url).map_err(|_| anyhow!("dynamo.discovery_url must be a valid URL"))?;
-        if !matches!(parsed.scheme(), "http" | "https")
-            || parsed.host_str().is_none_or(str::is_empty)
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-        {
+        if !is_plain_http_url(&parsed) {
             bail!("dynamo.discovery_url must be an http(s) URL without credentials, query, or fragment");
         }
         Ok(Self {
@@ -171,7 +168,7 @@ impl DynamoAdminPlane {
             poll_interval: Duration::from_secs(1),
             timeout: config.wait_for_ready_timeout,
             skip_model_check: config.skip_model_check,
-            headers: discovery_headers(config),
+            headers: header_map(&discovery_headers(config))?,
             frontend_clients: vec![router_admin_client(config)?],
             clients: Vec::new(),
             fingerprint: None,
@@ -200,7 +197,7 @@ impl DynamoAdminPlane {
     async fn discover(&self) -> Result<DynamoWorker, DiscoveryError> {
         let timeout = self.worker_timeout();
         let http = reqwest::Client::builder()
-            .default_headers(header_map(&self.headers)?)
+            .default_headers(self.headers.clone())
             .timeout(timeout)
             .no_proxy()
             .build()
@@ -211,9 +208,15 @@ impl DynamoAdminPlane {
         parse_dynamo_worker(&payload, &self.model_name, Some(&self.discovery_host))
     }
 
+    async fn discover_within(&self, remaining: Duration) -> Result<DynamoWorker, DiscoveryError> {
+        tokio::time::timeout(remaining, self.discover())
+            .await
+            .unwrap_or_else(|_| Err(DiscoveryError::Retryable("Dynamo discovery timed out".into())))
+    }
+
     fn make_worker_client(&self, worker: &DynamoWorker) -> Result<AdminClient> {
         let builder = reqwest::Client::builder()
-            .default_headers(header_map(&self.headers)?)
+            .default_headers(self.headers.clone())
             .timeout(self.worker_timeout())
             .no_proxy();
         AdminClient::with_builder(&worker.admin_base_url, builder)
@@ -244,11 +247,7 @@ impl DynamoAdminPlane {
         let mut previous: Option<(u64, String)> = None;
         let mut last_error: Option<String> = None;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
-            let attempt = match tokio::time::timeout(remaining, self.discover()).await {
-                Err(_) => Err(DiscoveryError::Retryable("Dynamo discovery timed out".into())),
-                Ok(result) => result,
-            };
-            match attempt {
+            match self.discover_within(remaining).await {
                 Ok(worker) => {
                     let fingerprint = worker.fingerprint();
                     if previous.as_ref() == Some(&fingerprint) {
@@ -294,11 +293,7 @@ impl DynamoAdminPlane {
         let deadline = Instant::now() + Duration::from_secs(self.timeout);
         for attempt in 0..3 {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else { break };
-            let result = match tokio::time::timeout(remaining, self.discover()).await {
-                Err(_) => Err(DiscoveryError::Retryable("Dynamo discovery timed out".into())),
-                Ok(result) => result,
-            };
-            match result {
+            match self.discover_within(remaining).await {
                 Ok(worker) => {
                     let fingerprint = worker.fingerprint();
                     if &fingerprint == pinned {
