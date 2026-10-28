@@ -39,7 +39,7 @@ pub fn train_sampling(sampling: &TrainSampling, live_policy: bool) -> Map {
 /// `vf.SamplingConfig.model_validate(data).model_dump(mode="json")`: `extra_body` is
 /// layered under the top-level keys, `max_completion_tokens` becomes `max_tokens`; the
 /// declared fields come first (None when unset), then the provider keys in order.
-pub fn sampling_config(data: &Map) -> Map {
+fn sampling_config(data: &Map) -> Map {
     let mut normalized = Map::new();
     let extra_body = match data.get("extra_body") {
         Some(Value::Map(m)) => m.clone(),

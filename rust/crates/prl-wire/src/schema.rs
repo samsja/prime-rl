@@ -53,7 +53,6 @@ pub struct Model {
 
 #[derive(Debug, Deserialize)]
 pub struct Schemas {
-    pub root: String,
     pub models: HashMap<String, Model>,
 }
 
@@ -80,7 +79,6 @@ impl Schemas {
 /// Model names of the typed models (pydantic's parametrized names).
 pub const EPISODE: &str = "Episode[WireTaskData, State, WireAgentConfig]";
 pub const TRACE: &str = "Trace[WireTaskData, State, WireAgentConfig]";
-pub const MESSAGE_NODE: &str = "MessageNode";
 pub const TRACE_TASK: &str = "TraceTask[WireTaskData]";
 pub const AGENT_INFO: &str = "AgentInfo[WireAgentConfig]";
 
@@ -155,7 +153,7 @@ pub fn dump_model(map: &Map, model: &Model, exclude_none: bool) -> Value {
 }
 
 /// JSON mode of an untyped value: bytes become (UTF-8) strings.
-pub fn plain_json(value: &Value) -> Value {
+fn plain_json(value: &Value) -> Value {
     match value {
         Value::Bin(b) => Value::Str(String::from_utf8_lossy(b).into_owned()),
         Value::Array(items) => Value::Array(items.iter().map(plain_json).collect()),

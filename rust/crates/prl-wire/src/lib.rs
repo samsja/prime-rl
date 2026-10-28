@@ -8,7 +8,7 @@ pub mod ndarray;
 pub mod payload;
 pub mod protocol;
 pub mod sampling;
-pub mod schema;
+mod schema;
 pub mod value;
 
 pub use client::{EnvClient, EnvClientError, OnDelta};

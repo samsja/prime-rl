@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::model::Trace;
@@ -37,65 +37,34 @@ pub fn trace_payload_urls(trace: &Trace) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The payload reference of one branch: `trace.info["prime_rl_payload"]["branches"][str(index)]`
-/// and the server URL.
-pub fn branch_payload(trace: &Trace, branch_index: usize) -> Option<(&str, &Value)> {
-    let payload = trace.info.get(PAYLOAD_INFO_KEY)?;
-    let url = payload.get("url")?.as_str()?;
-    let reference = payload.get("branches")?.get(&branch_index.to_string())?;
-    Some((url, reference))
-}
-
-struct Deleter {
-    queue: Mutex<mpsc::Sender<String>>,
-    outstanding: Arc<(Mutex<usize>, Condvar)>,
-}
-
-fn deleter() -> &'static Deleter {
-    static DELETER: OnceLock<Deleter> = OnceLock::new();
+/// Fire-and-forget DELETE workers, started on first use.
+fn deleter() -> &'static Mutex<mpsc::Sender<String>> {
+    static DELETER: OnceLock<Mutex<mpsc::Sender<String>>> = OnceLock::new();
     DELETER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<String>();
         let rx = Arc::new(Mutex::new(rx));
-        let outstanding = Arc::new((Mutex::new(0usize), Condvar::new()));
         for _ in 0..DELETE_THREADS {
             let rx = rx.clone();
-            let outstanding = outstanding.clone();
             std::thread::Builder::new()
                 .name("payload-delete".into())
-                .spawn(move || loop {
-                    let url = match rx.lock().unwrap().recv() {
-                        Ok(url) => url,
-                        Err(_) => return,
-                    };
-                    // Best effort, like Python: a server that is gone keeps its blobs.
-                    let _ = http_delete(&url);
-                    let (count, done) = &*outstanding;
-                    *count.lock().unwrap() -= 1;
-                    done.notify_all();
+                .spawn(move || {
+                    while let Ok(url) = rx.lock().unwrap().recv() {
+                        // Best effort, like Python: a server that is gone keeps its blobs.
+                        let _ = http_delete(&url);
+                    }
                 })
                 .expect("spawn payload-delete thread");
         }
-        Deleter { queue: Mutex::new(tx), outstanding }
+        Mutex::new(tx)
     })
 }
 
 /// Free kept arrays on their env servers, without waiting (fire-and-forget DELETEs on
 /// background threads). Call only once nothing will read them again.
 pub fn delete_payloads(urls: impl IntoIterator<Item = String>) {
-    let deleter = deleter();
-    let queue = deleter.queue.lock().unwrap();
+    let queue = deleter().lock().unwrap();
     for url in urls {
-        *deleter.outstanding.0.lock().unwrap() += 1;
         queue.send(url).expect("payload-delete threads run forever");
-    }
-}
-
-/// Block until every queued DELETE has run.
-pub fn wait_for_deletes() {
-    let (count, done) = &*deleter().outstanding;
-    let mut count = count.lock().unwrap();
-    while *count > 0 {
-        count = done.wait(count).unwrap();
     }
 }
 
@@ -138,16 +107,8 @@ mod tests {
             paths.sort();
             paths
         });
-        let mut trace = Trace::from_value(
-            &crate::value::from_msgpack(&std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/episode_assembled.msgpack")).unwrap())
-                .unwrap()
-                .get("traces")
-                .unwrap()
-                .as_array()
-                .unwrap()[0],
-            "trace".into(),
-        )
-        .unwrap();
+        let minimal: Value = serde_json::from_str(r#"{"id": "t", "task": {"type": "T", "data": {}}, "agent": {"config": {}}, "timing": {"start": 0.0}}"#).unwrap();
+        let mut trace = Trace::from_value(&minimal, "trace".into()).unwrap();
         assert!(trace_payload_urls(&trace).is_empty());
         let reference = |id: &str| -> Value { [("id", Value::from(id)), ("fields", Value::Array(vec!["routed_experts".into()]))].into_iter().collect() };
         let branches: Value = [("0", reference("t-0")), ("1", reference("t-1"))].into_iter().collect();
@@ -155,9 +116,7 @@ mod tests {
         trace.info.insert(PAYLOAD_INFO_KEY.into(), [("url", Value::from(url.as_str())), ("branches", branches)].into_iter().collect());
         let urls = trace_payload_urls(&trace);
         assert_eq!(urls, [format!("{url}/t-0"), format!("{url}/t-1")]);
-        assert_eq!(branch_payload(&trace, 1).unwrap().1.get("id").unwrap().as_str(), Some("t-1"));
         delete_payloads(urls.into_iter().chain([format!("{url}/x")]));
-        wait_for_deletes();
         assert_eq!(server.join().unwrap(), ["DELETE /t-0 HTTP/1.1", "DELETE /t-1 HTTP/1.1", "DELETE /x HTTP/1.1"]);
     }
 }

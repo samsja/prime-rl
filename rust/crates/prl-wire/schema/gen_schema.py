@@ -134,6 +134,6 @@ def describe_model(cls: type[BaseModel]) -> dict:
     }
 
 
-root = model_name(WireEpisode)
-OUT.write_text(json.dumps({"root": root, "models": models}, indent=1) + "\n")
+model_name(WireEpisode)
+OUT.write_text(json.dumps({"models": models}, separators=(",", ":")) + "\n")
 print(f"wrote {len(models)} models to {OUT}", file=sys.stderr)

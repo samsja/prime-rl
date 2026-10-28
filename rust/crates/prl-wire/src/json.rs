@@ -63,7 +63,7 @@ pub fn write_f64(out: &mut Vec<u8>, f: f64) {
     format_shortest(out, buf.format_finite(f), -5..16);
 }
 
-pub fn write_f32(out: &mut Vec<u8>, f: f32) {
+fn write_f32(out: &mut Vec<u8>, f: f32) {
     if !f.is_finite() {
         out.extend_from_slice(b"null");
         return;
@@ -176,7 +176,7 @@ fn write_python(out: &mut String, value: &Value, sort_keys: bool) {
 
 /// Python's `repr(float)`: shortest round-trip digits, scientific notation (with a
 /// two-digit exponent) outside `1e-4 <= |x| < 1e16`.
-pub fn python_float_repr(f: f64) -> String {
+fn python_float_repr(f: f64) -> String {
     if f.is_nan() {
         return "NaN".into();
     }

@@ -13,7 +13,7 @@ use crate::ndarray::{self, NdError};
 use crate::schema::{self, SCHEMAS};
 use crate::value::{Map, Value};
 
-pub const TRACE_VERSION: i64 = 1;
+const TRACE_VERSION: i64 = 1;
 
 /// A wire value that does not validate into the model (pydantic `ValidationError`).
 #[derive(Debug, thiserror::Error)]
@@ -160,7 +160,7 @@ impl<'a> Fields<'a> {
 }
 
 /// `uuid.uuid4().hex`, the default id of episodes and traces.
-pub fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
@@ -252,7 +252,7 @@ impl Error {
         Error { type_: type_.into(), message: message.into(), status_code: None, traceback: None }
     }
 
-    pub fn from_value(value: &Value, path: String) -> VResult<Error> {
+    fn from_value(value: &Value, path: String) -> VResult<Error> {
         let f = Fields::of(value, path)?;
         Ok(Error {
             type_: f.string("type")?,
@@ -262,7 +262,7 @@ impl Error {
         })
     }
 
-    pub fn to_python(&self) -> Value {
+    fn to_python(&self) -> Value {
         map_value(vec![
             ("type", self.type_.as_str().into()),
             ("message", self.message.as_str().into()),
@@ -282,7 +282,7 @@ pub struct Usage {
 }
 
 impl Usage {
-    pub fn from_value(value: &Value, path: String) -> VResult<Usage> {
+    fn from_value(value: &Value, path: String) -> VResult<Usage> {
         let f = Fields::of(value, path)?;
         Ok(Usage {
             prompt_tokens: f.int("prompt_tokens")?,
@@ -293,7 +293,7 @@ impl Usage {
         })
     }
 
-    pub fn to_python(&self) -> Value {
+    fn to_python(&self) -> Value {
         map_value(vec![
             ("prompt_tokens", self.prompt_tokens.into()),
             ("completion_tokens", self.completion_tokens.into()),
@@ -340,12 +340,12 @@ pub struct TimeSpan {
 }
 
 impl TimeSpan {
-    pub fn from_value(value: &Value, path: String) -> VResult<TimeSpan> {
+    fn from_value(value: &Value, path: String) -> VResult<TimeSpan> {
         let f = Fields::of(value, path)?;
         Ok(TimeSpan { start: f.float_or("start", 0.0)?, end: f.float_or("end", 0.0)? })
     }
 
-    pub fn to_python(&self) -> Value {
+    fn to_python(&self) -> Value {
         map_value(vec![("start", self.start.into()), ("end", self.end.into())])
     }
 
@@ -384,7 +384,7 @@ pub struct Timing {
 }
 
 impl Timing {
-    pub fn from_value(value: &Value, path: String) -> VResult<Timing> {
+    fn from_value(value: &Value, path: String) -> VResult<Timing> {
         let f = Fields::of(value, path)?;
         let span = |key: &str| -> VResult<TimeSpan> {
             f.opt_of(key, TimeSpan::from_value).map(Option::unwrap_or_default)
@@ -417,7 +417,7 @@ impl Timing {
         })
     }
 
-    pub fn to_python(&self) -> Value {
+    fn to_python(&self) -> Value {
         let split = |s: &TimeSplit| map_value(vec![("duration", s.duration.into())]);
         map_value(vec![
             ("start", self.start.into()),
@@ -437,17 +437,6 @@ impl Timing {
         ])
     }
 
-    /// A phase span by name (`boot`, `setup`, `finalize`, `scoring`; `agent` as a span).
-    pub fn phase(&self, name: &str) -> Option<TimeSpan> {
-        Some(match name {
-            "boot" => self.boot.clone(),
-            "setup" => self.setup.clone(),
-            "agent" => TimeSpan { start: self.agent.start, end: self.agent.end },
-            "finalize" => self.finalize.clone(),
-            "scoring" => self.scoring.clone(),
-            _ => return None,
-        })
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -469,7 +458,7 @@ pub struct ParentLink {
 }
 
 impl ParentLink {
-    pub fn from_value(value: &Value, path: String) -> VResult<ParentLink> {
+    fn from_value(value: &Value, path: String) -> VResult<ParentLink> {
         let f = Fields::of(value, path)?;
         let node = f.int("node")?;
         if node < 0 {
@@ -478,7 +467,7 @@ impl ParentLink {
         Ok(ParentLink { node: node as usize, type_: f.string("type")? })
     }
 
-    pub fn to_python(&self) -> Value {
+    fn to_python(&self) -> Value {
         map_value(vec![("node", self.node.into()), ("type", self.type_.as_str().into())])
     }
 }
@@ -491,12 +480,12 @@ pub struct WeightVersionSpan {
 }
 
 impl WeightVersionSpan {
-    pub fn from_value(value: &Value, path: String) -> VResult<WeightVersionSpan> {
+    fn from_value(value: &Value, path: String) -> VResult<WeightVersionSpan> {
         let f = Fields::of(value, path)?;
         Ok(WeightVersionSpan { version: f.string("version")?, start: f.int("start")?, end: f.int("end")? })
     }
 
-    pub fn to_python(&self) -> Value {
+    fn to_python(&self) -> Value {
         map_value(vec![
             ("version", self.version.as_str().into()),
             ("start", self.start.into()),
@@ -525,7 +514,7 @@ pub struct ModelCall {
 }
 
 impl ModelCall {
-    pub fn from_value(value: &Value, path: String) -> VResult<ModelCall> {
+    fn from_value(value: &Value, path: String) -> VResult<ModelCall> {
         let f = Fields::of(value, path)?;
         Ok(ModelCall {
             node: f.opt_int("node")?.map(|n| n as usize),
@@ -541,7 +530,7 @@ impl ModelCall {
         })
     }
 
-    pub fn to_python(&self) -> Value {
+    fn to_python(&self) -> Value {
         map_value(vec![
             ("node", self.node.into()),
             ("model", self.model.clone().into()),
@@ -573,10 +562,6 @@ pub fn min_new_input_tokens<'a>(calls: impl IntoIterator<Item = &'a ModelCall>) 
 
 // ── message nodes ──────────────────────────────────────────────────────────
 
-/// Node fields that ride the msgpack wire but never reach disk (`EXCLUDE_FIELDS`).
-pub const WIRE_TENSOR_FIELDS: [&str; 3] = ["routed_experts", "sampling_mask", "top_logprobs"];
-/// Float streams a JSON record rounds (`graph.ROUNDED_STREAMS`).
-pub const ROUNDED_STREAMS: [&str; 5] = ["logprobs", "advantages", "reference_logprobs", "trainer_logprobs", "entropies"];
 pub const RECORD_FLOAT_DECIMALS: u32 = 4;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -612,7 +597,7 @@ fn opt_float_stream(f: &Fields, key: &str) -> VResult<Option<Vec<f32>>> {
 }
 
 impl MessageNode {
-    pub fn from_value(value: &Value, path: String) -> VResult<MessageNode> {
+    fn from_value(value: &Value, path: String) -> VResult<MessageNode> {
         let f = Fields::of(value, path)?;
         let stream_err = |key: &str| {
             let path = f.path(key);
@@ -693,41 +678,6 @@ impl MessageNode {
         map
     }
 
-    /// The node as the delta stream sends it (`dump(node, context={"token_arrays": True},
-    /// exclude=TRAINING_ARRAY_FIELDS)`): streams as `__nd__` dicts, no wire tensors.
-    pub fn to_wire(&self) -> Value {
-        let nd = |a: ndarray::NdArray| a.to_value();
-        let opt = |s: &Option<Vec<f32>>| s.as_ref().map_or(Value::Nil, |s| nd(ndarray::encode_f32(s)));
-        let mut map = Map::new();
-        map.insert("parent".into(), self.parent.into());
-        if !self.tools.is_empty() {
-            map.insert("tools".into(), Value::Array(self.tools.clone()));
-        }
-        map.insert("semantic_parents".into(), list_value(&self.semantic_parents, ParentLink::to_python));
-        map.insert("message".into(), self.message.clone());
-        map.insert("sampled".into(), self.sampled.into());
-        map.insert("timestamp".into(), self.timestamp.into());
-        map.insert("token_ids".into(), nd(ndarray::encode_i32(&self.token_ids)));
-        map.insert("mask".into(), nd(ndarray::encode_bool(&self.mask)));
-        map.insert("is_content".into(), nd(ndarray::encode_bool(&self.is_content)));
-        map.insert("logprobs".into(), nd(ndarray::encode_f32(&self.logprobs)));
-        map.insert("advantages".into(), opt(&self.advantages));
-        map.insert("reference_logprobs".into(), opt(&self.reference_logprobs));
-        map.insert("trainer_logprobs".into(), opt(&self.trainer_logprobs));
-        map.insert("entropies".into(), opt(&self.entropies));
-        map.insert(
-            "loss_weights".into(),
-            self.loss_weights.as_ref().map_or(Value::Nil, |w| {
-                Value::Map(w.iter().map(|(k, v)| (k.clone(), nd(ndarray::encode_f32(v)))).collect())
-            }),
-        );
-        map.insert(
-            "weight_versions".into(),
-            self.weight_versions.as_ref().map_or(Value::Nil, |w| list_value(w, WeightVersionSpan::to_python)),
-        );
-        Value::Map(map)
-    }
-
     /// `MessageNode.record_streams`: the per-token streams of a JSON record, appended after
     /// the node's other fields. Float streams in `ROUNDED_STREAMS` round to `float_decimals`.
     fn record_streams(&self, out: &mut Map, float_decimals: Option<u32>, exclude_none: bool) {
@@ -774,12 +724,6 @@ impl MessageNode {
     pub fn role(&self) -> &str {
         self.message.get("role").and_then(Value::as_str).unwrap_or_default()
     }
-
-    /// The message's text: a str content, or its text parts joined by newlines
-    /// (`types.content_text`).
-    pub fn content_text(&self) -> String {
-        content_text(self.message.get("content").unwrap_or(&Value::Nil))
-    }
 }
 
 /// `verifiers.v1.task.task_key` of task wire data (`WireTaskData`, python-mode dump).
@@ -790,22 +734,8 @@ pub fn task_hash(data: &Map) -> String {
     sha2::Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `types.content_text`: a str as-is, text parts joined by newlines, images dropped.
-pub fn content_text(content: &Value) -> String {
-    match content {
-        Value::Str(s) => s.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
-            .map(|p| p.get("text").and_then(Value::as_str).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
 /// `np.round(np.float64(x), decimals)`: scale, round half to even, unscale.
-pub fn round_stream_value(x: f64, decimals: Option<u32>) -> f64 {
+fn round_stream_value(x: f64, decimals: Option<u32>) -> f64 {
     match decimals {
         None => x,
         Some(d) => {
@@ -832,14 +762,6 @@ pub struct Branch<'a> {
 }
 
 impl<'a> Branch<'a> {
-    pub fn messages(&self) -> Vec<&'a Value> {
-        self.nodes.iter().map(|n| &n.message).collect()
-    }
-
-    pub fn tools(&self) -> &[Value] {
-        self.nodes.first().map_or(&[], |n| &n.tools)
-    }
-
     pub fn num_tokens(&self) -> usize {
         self.nodes.iter().map(|n| n.token_ids.len()).sum()
     }
@@ -848,12 +770,8 @@ impl<'a> Branch<'a> {
         self.nodes.iter().flat_map(|n| n.token_ids.iter().copied()).collect()
     }
 
-    pub fn sampled_mask(&self) -> Vec<bool> {
-        self.nodes.iter().flat_map(|n| n.mask.iter().copied()).collect()
-    }
-
     /// `Branch.spread`: a per-sampled-token node field widened onto the branch's tokens.
-    pub fn spread(&self, values: impl Fn(&MessageNode) -> Option<&[f32]>) -> Vec<f32> {
+    fn spread(&self, values: impl Fn(&MessageNode) -> Option<&[f32]>) -> Vec<f32> {
         let mut out = vec![0f32; self.nodes.iter().map(|n| n.mask.len()).sum()];
         let mut offset = 0;
         for node in &self.nodes {
@@ -887,39 +805,6 @@ impl<'a> Branch<'a> {
         self.spread_optional(|n| n.reference_logprobs.as_deref())
     }
 
-    pub fn trainer_logprobs(&self) -> Option<Vec<f32>> {
-        self.spread_optional(|n| n.trainer_logprobs.as_deref())
-    }
-
-    pub fn entropies(&self) -> Option<Vec<f32>> {
-        self.spread_optional(|n| n.entropies.as_deref())
-    }
-
-    /// One named loss-weight stream aligned to `token_ids`, or `None` when no node has it.
-    pub fn loss_weights(&self, name: &str) -> Result<Option<Vec<f32>>, String> {
-        fn stream<'n>(n: &'n MessageNode, name: &str) -> Option<&'n Vec<f32>> {
-            n.loss_weights.as_ref().and_then(|w| w.get(name))
-        }
-        if self.nodes.iter().all(|n| stream(n, name).is_none()) {
-            return Ok(None);
-        }
-        let mut out = Vec::with_capacity(self.num_tokens());
-        for node in &self.nodes {
-            match stream(node, name) {
-                None => out.extend(std::iter::repeat_n(0f32, node.token_ids.len())),
-                Some(w) if w.len() != node.token_ids.len() => {
-                    return Err(format!(
-                        "loss weight stream {name:?} must align with node token_ids: got {}, expected {}",
-                        w.len(),
-                        node.token_ids.len()
-                    ))
-                }
-                Some(w) => out.extend_from_slice(w),
-            }
-        }
-        Ok(Some(out))
-    }
-
     /// Per-token modality markers (0 text, 1 image, 2 video), `None` when none are present.
     pub fn mm_token_type_ids(&self) -> Option<Vec<i32>> {
         if self.mm_token_type_id_map.is_empty() {
@@ -933,11 +818,11 @@ impl<'a> Branch<'a> {
         types.iter().any(|&t| t != 0).then_some(types)
     }
 
-    pub fn usage(&self) -> Option<Usage> {
+    fn usage(&self) -> Option<Usage> {
         Usage::aggregate(self.calls.iter().filter_map(|c| c.usage.as_ref()))
     }
 
-    pub fn last_usage(&self) -> Option<&Usage> {
+    fn last_usage(&self) -> Option<&Usage> {
         self.calls.iter().rev().find_map(|c| c.usage.as_ref())
     }
 
@@ -968,7 +853,7 @@ pub struct TraceTask {
 }
 
 impl TraceTask {
-    pub fn from_value(value: &Value, path: String) -> VResult<TraceTask> {
+    fn from_value(value: &Value, path: String) -> VResult<TraceTask> {
         let f = Fields::of(value, path)?;
         match f.req("data")? {
             Value::Map(_) => {}
@@ -976,21 +861,6 @@ impl TraceTask {
         }
         let data = shared(&LAST_TASK_DATA, f.dict("data")?);
         Ok(TraceTask { type_: f.string("type")?, data, key: f.opt_string("key")?, hash: f.opt_string("hash")? })
-    }
-
-    pub fn to_python(&self) -> Value {
-        map_value(vec![
-            ("type", self.type_.as_str().into()),
-            ("data", Value::Map((*self.data).clone())),
-            ("key", self.key.clone().into()),
-            ("hash", self.hash.clone().into()),
-        ])
-    }
-
-    /// `Task.hash` of the data: `sha256(json.dumps(data.model_dump(mode="json",
-    /// exclude_none=True), sort_keys=True))`.
-    pub fn content_hash(&self) -> String {
-        task_hash(&self.data)
     }
 
     /// The JSON-mode dump of this task (`TraceTask[WireTaskData]`), its data dump cached
@@ -1027,7 +897,7 @@ pub struct AgentInfo {
 }
 
 impl AgentInfo {
-    pub fn from_value(value: &Value, path: String) -> VResult<AgentInfo> {
+    fn from_value(value: &Value, path: String) -> VResult<AgentInfo> {
         let f = Fields::of(value, path)?;
         Ok(AgentInfo {
             config: shared(&LAST_AGENT_CONFIG, f.req("config")?.clone()),
@@ -1053,14 +923,6 @@ impl AgentInfo {
         dumped
     }
 
-    pub fn to_python(&self) -> Value {
-        map_value(vec![
-            ("config", (*self.config).clone()),
-            ("runtime", self.runtime.clone()),
-            ("name", self.name.as_str().into()),
-            ("trainable", self.trainable.into()),
-        ])
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1092,11 +954,11 @@ pub struct Trace {
 }
 
 /// Stop conditions `Trace.is_truncated` counts as truncation.
-pub const TRUNCATION_STOP_CONDITIONS: [&str; 6] =
+const TRUNCATION_STOP_CONDITIONS: [&str; 6] =
     ["max_turns", "max_input_tokens", "max_output_tokens", "max_total_tokens", "max_turn_tokens", "compaction_failed"];
 
 impl Trace {
-    pub fn from_value(value: &Value, path: String) -> VResult<Trace> {
+    pub(crate) fn from_value(value: &Value, path: String) -> VResult<Trace> {
         let f = Fields::of(value, path)?;
         let mut mm = IndexMap::new();
         for (k, v) in f.dict("mm_token_type_id_map")? {
@@ -1160,19 +1022,15 @@ impl Trace {
         })
     }
 
-    /// The trace as a python-mode dump; `nodes` holds the node maps `node` builds.
-    fn to_python_with(&self, node: impl Fn(&MessageNode) -> Value) -> Value {
-        self.to_python_parts(node, true)
-    }
-
-    /// `with_shared = false` leaves `task` and `agent` null (the record path dumps them apart).
-    fn to_python_parts(&self, node: impl Fn(&MessageNode) -> Value, with_shared: bool) -> Value {
+    /// The trace as a python-mode dump with null `task` and `agent` (the record dumps those
+    /// shared subtrees apart) and `nodes` as `node` builds them.
+    fn to_python(&self, node: impl Fn(&MessageNode) -> Value) -> Value {
         let mut map = Map::new();
         map.insert("version".into(), self.version.into());
         map.insert("id".into(), self.id.as_str().into());
         map.insert("verifiers".into(), self.verifiers.clone());
-        map.insert("task".into(), if with_shared { self.task.to_python() } else { Value::Nil });
-        map.insert("agent".into(), if with_shared { self.agent.to_python() } else { Value::Nil });
+        map.insert("task".into(), Value::Nil);
+        map.insert("agent".into(), Value::Nil);
         map.insert("tools".into(), Value::Array(self.tools.clone()));
         map.insert("nodes".into(), list_value(&self.nodes, node));
         map.insert("calls".into(), list_value(&self.calls, ModelCall::to_python));
@@ -1213,15 +1071,9 @@ impl Trace {
         Value::Map(map)
     }
 
-    /// The trace as the env server's python-mode dump (nodes as streamed: `__nd__` streams,
-    /// no wire tensors).
-    pub fn to_wire(&self) -> Value {
-        self.to_python_with(MessageNode::to_wire)
-    }
-
     fn record_value(&self, float_decimals: Option<u32>, exclude_none: bool) -> Value {
         // the shared task and agent subtrees are dumped (and cached) on their own
-        let python = self.to_python_parts(|n| Value::Map(n.to_python_meta()), false);
+        let python = self.to_python(|n| Value::Map(n.to_python_meta()));
         let mut record = schema::dump_json(&python, &schema::Schema::Model { name: schema::TRACE.into() }, exclude_none);
         let map = record.as_map_mut().expect("trace record");
         put_at(map, 3, "task", self.task.record_value(exclude_none));
@@ -1255,7 +1107,7 @@ impl Trace {
     }
 
     /// Node ids that are no node's parent (`graph.leaves`).
-    pub fn leaves(&self) -> Vec<usize> {
+    fn leaves(&self) -> Vec<usize> {
         let mut has_child = vec![false; self.nodes.len()];
         for node in &self.nodes {
             if let Some(parent) = node.parent {
@@ -1317,7 +1169,7 @@ impl Trace {
         self.nodes.iter().filter(|n| n.sampled).count()
     }
 
-    pub fn usage(&self) -> Option<Usage> {
+    fn usage(&self) -> Option<Usage> {
         Usage::aggregate(self.calls.iter().filter_map(|c| c.usage.as_ref()))
     }
 
@@ -1355,43 +1207,6 @@ impl Trace {
             .find(|c| c.error.is_none())
             .is_some_and(|c| c.finish_reason.as_deref() == Some("length"))
     }
-
-    /// Messages on the final branch.
-    pub fn messages(&self) -> Vec<&Value> {
-        self.branches().last().map(|b| b.messages()).unwrap_or_default()
-    }
-
-    /// Every sampled assistant message, in order.
-    pub fn assistant_messages(&self) -> Vec<&Value> {
-        self.nodes.iter().filter(|n| n.sampled && n.role() == "assistant").map(|n| &n.message).collect()
-    }
-
-    /// The root agent's response, falling back to the last assistant message.
-    pub fn last_reply(&self) -> String {
-        if let Some(reply) = &self.root_reply {
-            return reply.trim().to_owned();
-        }
-        self.assistant_messages()
-            .last()
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_owned()
-    }
-
-    pub fn stop(&mut self, condition: &str, override_: bool) {
-        self.is_completed = true;
-        if override_ || self.stop_condition.is_none() {
-            self.stop_condition = Some(condition.to_owned());
-        }
-    }
-
-    pub fn drop_trace(&mut self, reason: &str) {
-        if self.dropped.is_none() {
-            self.dropped = Some(reason.to_owned());
-        }
-    }
 }
 
 // ── episodes ───────────────────────────────────────────────────────────────
@@ -1419,10 +1234,6 @@ impl PolicySpan {
             return Err("policy span end must be at least its start".into());
         }
         Ok(PolicySpan { start, end })
-    }
-
-    pub fn drift(&self) -> i64 {
-        self.end - self.start
     }
 
     fn to_python(&self) -> Value {
@@ -1574,36 +1385,29 @@ impl Episode {
         Episode::from_wire(&value)
     }
 
-    fn to_python_with(&self, trace: impl Fn(&Trace) -> Value) -> Value {
-        self.to_python_parts(trace, true)
-    }
-
-    fn to_python_parts(&self, trace: impl Fn(&Trace) -> Value, with_task: bool) -> Value {
+    /// The episode as a python-mode dump with a null `task` and no traces (the record dumps
+    /// those apart).
+    fn to_python(&self) -> Value {
         map_value(vec![
             ("id", self.id.as_str().into()),
             ("env", map_value(vec![("id", self.env.id.as_str().into()), ("name", self.env.name.clone().into())])),
-            ("task", if with_task { self.task.to_python() } else { Value::Nil }),
+            ("task", Value::Nil),
             ("group", self.group.as_ref().map_or(Value::Nil, |g| map_value(vec![("id", g.id.as_str().into())]))),
             ("run", self.run.as_ref().map_or(Value::Nil, RunInfo::to_python)),
             ("ok", self.ok.into()),
             ("is_timeout", self.is_timeout.into()),
             ("errors", list_value(&self.errors, Error::to_python)),
-            ("traces", list_value(&self.traces, trace)),
+            ("traces", Value::Array(vec![Value::Nil; self.traces.len()])),
             ("num_input_tokens", self.num_input_tokens().into()),
             ("num_output_tokens", self.num_output_tokens().into()),
             ("num_total_tokens", self.num_total_tokens().into()),
         ])
     }
 
-    /// The episode as a python-mode dump (traces as `Trace::to_wire`).
-    pub fn to_wire(&self) -> Value {
-        self.to_python_with(Trace::to_wire)
-    }
-
     /// `Episode.to_record(float_decimals)`: the JSON record (exclude_none) with per-token
     /// streams and without wire tensors.
     pub fn to_record(&self, float_decimals: Option<u32>) -> Value {
-        let python = self.to_python_parts(|_| Value::Nil, false);
+        let python = self.to_python();
         let mut record = schema::dump_model(python.as_map().unwrap(), SCHEMAS.model(schema::EPISODE), true);
         put_at(record.as_map_mut().expect("episode record"), 2, "task", self.task.record_value(true));
         let traces = record.get_mut("traces").and_then(Value::as_array_mut).expect("dumped episode has traces");
@@ -1626,11 +1430,6 @@ impl Episode {
         self.errors.last()
     }
 
-    pub fn usage(&self) -> Option<Usage> {
-        let usages: Vec<Usage> = self.traces.iter().filter_map(Trace::usage).collect();
-        Usage::aggregate(usages.iter())
-    }
-
     pub fn num_input_tokens(&self) -> i64 {
         self.traces.iter().map(Trace::num_input_tokens).sum()
     }
@@ -1641,18 +1440,5 @@ impl Episode {
 
     pub fn num_total_tokens(&self) -> i64 {
         self.traces.iter().map(Trace::num_total_tokens).sum()
-    }
-
-    pub fn num_turns(&self) -> usize {
-        self.traces.iter().map(Trace::num_turns).sum()
-    }
-
-    /// Traces grouped by agent name, in completion order.
-    pub fn by_agent(&self) -> IndexMap<&str, Vec<&Trace>> {
-        let mut grouped: IndexMap<&str, Vec<&Trace>> = IndexMap::new();
-        for trace in &self.traces {
-            grouped.entry(trace.agent.name.as_str()).or_default().push(trace);
-        }
-        grouped
     }
 }

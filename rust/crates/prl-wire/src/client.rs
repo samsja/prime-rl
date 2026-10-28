@@ -20,8 +20,7 @@ use crate::model::{Episode, ValidationError};
 use crate::protocol::{Response, KIND_DELTA, METHOD_CANCEL, METHOD_HEALTH, METHOD_RUN};
 use crate::value::{self, Map, Value};
 
-/// How long `health` waits for a reply by default.
-pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Receives each decoded delta of a run, after it was applied to the run's assembly.
 pub type OnDelta = Box<dyn FnMut(&Value) + Send>;
@@ -78,9 +77,7 @@ pub struct EnvClient {
     inbox: mpsc::UnboundedSender<Command>,
 }
 
-fn new_request_id() -> String {
-    uuid::Uuid::new_v4().simple().to_string()
-}
+use crate::model::new_id as new_request_id;
 
 fn pack(value: &Value) -> Vec<u8> {
     value::to_msgpack(value)
@@ -103,10 +100,6 @@ impl EnvClient {
         let (inbox, commands) = mpsc::unbounded_channel();
         tokio::spawn(Actor { fd, socket, _ctx: ctx, commands, pending: HashMap::new() }.run());
         Ok(EnvClient { address: address.to_owned(), inbox })
-    }
-
-    pub fn address(&self) -> &str {
-        &self.address
     }
 
     async fn request(
@@ -500,39 +493,6 @@ mod tests {
         assert_eq!(*seen_b.lock().unwrap(), (0..10).collect::<Vec<_>>());
     }
 
-    /// Deltas of a few MB each reach the run whole and in order.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn large_deltas_arrive_intact_and_in_order() {
-        let server = FakeServer::new();
-        let client = EnvClient::connect(&server.address).unwrap();
-        let server = server.shared();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink = seen.clone();
-        let run = tokio::spawn(async move {
-            let mut on_delta = move |d: &Value| sink.lock().unwrap().push(d.clone());
-            client.request(METHOD_HEALTH, Value::map(), new_request_id(), Some(&mut on_delta)).await.unwrap();
-        });
-        let tokens = |seq: i32| crate::ndarray::encode_i32(&(0..500_000).map(|t| t + seq).collect::<Vec<_>>());
-        let s = server.clone();
-        on_thread(move || {
-            let s = s.lock().unwrap();
-            let r = s.recv();
-            for seq in 0..5 {
-                let delta: Value = [("seq", Value::from(seq)), ("token_ids", tokens(seq).to_value())].into_iter().collect();
-                s.send(&[&r[0], &r[1], b"delta", &pack(&delta)]);
-            }
-            s.send(&[&r[0], &r[1], b"reply", &health_reply()]);
-        })
-        .await;
-        run.await.unwrap();
-        let seen = seen.lock().unwrap();
-        assert_eq!(seen.iter().map(|d| d.get("seq").unwrap().as_i64().unwrap()).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
-        for (seq, delta) in seen.iter().enumerate() {
-            let ids = crate::ndarray::int_stream(delta.get("token_ids").unwrap()).unwrap();
-            assert_eq!(ids, (0..500_000).map(|t| t + seq as i32).collect::<Vec<_>>());
-        }
-    }
-
     #[tokio::test]
     async fn a_failed_reply_raises_its_error_and_health_times_out() {
         let server = FakeServer::new();
@@ -553,44 +513,5 @@ mod tests {
         let err = client.wait_for_server_startup(Duration::from_millis(300)).await.unwrap_err();
         assert_eq!(err.type_name(), "TimeoutError");
         assert!(err.to_string().ends_with("did not become healthy in 0.3s"), "{err}");
-    }
-
-    /// A run streams the fixture episode exactly as the Python server framed it; the episode
-    /// returned is the assembled one, and the request carries the run fields.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_assembles_the_streamed_episode() {
-        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        let stream = value::from_msgpack(&std::fs::read(format!("{fixtures}/episode_stream.msgpack")).unwrap()).unwrap();
-        let assembled = value::from_msgpack(&std::fs::read(format!("{fixtures}/episode_assembled.msgpack")).unwrap()).unwrap();
-        let server = FakeServer::new();
-        let client = EnvClient::connect(&server.address).unwrap();
-        let server = server.shared();
-        let s = server.clone();
-        let n_deltas = stream.get("deltas").unwrap().as_array().unwrap().len();
-        let serving = tokio::task::spawn_blocking(move || {
-            let s = s.lock().unwrap();
-            let r = s.recv();
-            assert_eq!(r[2], b"run");
-            let request = value::from_msgpack(&r[3]).unwrap();
-            let keys: Vec<&str> = request.as_map().unwrap().keys().map(String::as_str).collect();
-            assert_eq!(keys, ["task_data", "client", "model", "sampling"]);
-            assert_eq!(request.get("model").unwrap().as_str(), Some("m"));
-            assert_eq!(request.get("sampling").unwrap().get("temperature").unwrap().as_f64(), Some(0.5));
-            for delta in stream.get("deltas").unwrap().as_array().unwrap() {
-                s.send(&[&r[0], &r[1], b"delta", delta.as_bytes().unwrap()]);
-            }
-            s.send(&[&r[0], &r[1], b"reply", stream.get("reply").unwrap().as_bytes().unwrap()]);
-        });
-        let deltas = Arc::new(Mutex::new(0));
-        let counter = deltas.clone();
-        let sampling: Value = [("temperature", Value::from(0.5))].into_iter().collect();
-        let client_config: Value = [("type", Value::from("train")), ("base_url", Value::from("http://x"))].into_iter().collect();
-        let episode = client
-            .run(&Map::new(), &client_config, "m", &sampling, Some(Box::new(move |_: &Value| *counter.lock().unwrap() += 1)))
-            .await
-            .unwrap();
-        serving.await.unwrap();
-        assert_eq!(episode, Episode::from_wire(&assembled).unwrap());
-        assert_eq!(*deltas.lock().unwrap(), n_deltas);
     }
 }

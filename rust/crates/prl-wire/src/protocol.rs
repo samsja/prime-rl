@@ -7,7 +7,6 @@ pub const METHOD_HEALTH: &str = "health";
 pub const METHOD_RUN: &str = "run";
 pub const METHOD_CANCEL: &str = "cancel";
 pub const KIND_DELTA: &[u8] = b"delta";
-pub const KIND_REPLY: &[u8] = b"reply";
 
 /// `BaseResponse` fields every reply carries, plus the run reply's.
 #[derive(Clone, Debug, Default)]
@@ -18,8 +17,6 @@ pub struct Response {
     pub head: Option<Map>,
     /// `RunResponse.traces`.
     pub traces: Vec<TraceSummary>,
-    /// `CancelResponse.cancelled`.
-    pub cancelled: bool,
 }
 
 impl Response {
@@ -46,7 +43,6 @@ impl Response {
             let count = |k: &str| summary.get(k).and_then(Value::as_u64).ok_or(format!("trace summary without {k}"));
             traces.push(TraceSummary { id: id.to_owned(), nodes: count("nodes")? as usize, calls: count("calls")? as usize });
         }
-        let cancelled = map.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
-        Ok(Response { success, error, head, traces, cancelled })
+        Ok(Response { success, error, head, traces })
     }
 }
