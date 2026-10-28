@@ -12,8 +12,9 @@
 //! - Train scheduling respects the dispatch gate `(progress_step - 1) - policy.version <=
 //!   TARGET_LAG`, read live from the `policy` and `progress_step` watches.
 //! - Results go to per-kind outboxes drained into the sink channels inside the select loop,
-//!   so commands (drain, overload) are served while a sink is busy; scheduling pauses while
-//!   an outbox is non-empty (the bounded-queue backpressure of Python's `out_q`).
+//!   so commands (drain, overload) are served while a sink is busy; results are handed over
+//!   with `try_send` before every scheduling pass, and scheduling pauses only while a sink
+//!   channel is full (the bounded-queue backpressure of Python's `out_q`).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -1165,6 +1166,27 @@ impl Dispatcher {
         }
     }
 
+    fn flush_outbox(
+        &mut self,
+        train_tx: Option<&mpsc::Sender<DispatchResult<Episode>>>,
+        eval_tx: Option<&mpsc::Sender<DispatchResult<Episode>>>,
+    ) -> Result<()> {
+        for (outbox, tx) in [(&mut self.train_out, train_tx), (&mut self.eval_out, eval_tx)] {
+            let Some(tx) = tx else { continue };
+            while let Some(result) = outbox.pop_front() {
+                match tx.try_send(result) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(result)) => {
+                        outbox.push_front(result);
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => bail!("sink channel closed"),
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run until stopped or cancelled.
     pub async fn run(mut self, inbox: DispatcherInbox, cancel: CancellationToken) -> Result<()> {
         let DispatcherInbox { mut cmd_rx, mut delta_rx, mut limit, mut overload } = inbox;
@@ -1177,6 +1199,9 @@ impl Dispatcher {
         let mut policy_rx = self.policy.clone();
         let far = tokio::time::Instant::now() + Duration::from_secs(86_400 * 365);
         loop {
+            // Hand results over without blocking first: the outbox only stays non-empty (and
+            // stops admissions) when a sink channel is genuinely full.
+            self.flush_outbox(train_tx.as_ref(), eval_tx.as_ref())?;
             self.fill(&mut tasks).await?;
             if self.draining && self.is_idle() {
                 self.idle_tx.send_replace(true);
