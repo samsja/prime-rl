@@ -51,6 +51,8 @@ in-tree only as the behavior reference and is deleted once Rust reaches parity.
 
 ## Bridge methods (`prime_rl.orchestrator.rust.PyBridge`)
 
+`PyBridge(config)` takes an `OrchestratorConfig` (sources: `train.source`, `eval.source`) or an `EvalConfig` /
+`SFTOnlineEvalConfig` (eval-only: `config.source`; `flop_cost_table` is orchestrator-only).
 `split` is `"train"` or `"eval"`; `env_name` is the source's `resolved_name`.
 
 | method | returns (JSON bytes) | Python behavior ported from |

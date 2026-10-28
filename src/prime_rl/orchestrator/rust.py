@@ -17,6 +17,7 @@ import verifiers.v1 as vf
 from pydantic import TypeAdapter
 from renderers import RendererConfig
 
+from prime_rl.configs.eval import EvalConfig, SFTOnlineEvalConfig
 from prime_rl.configs.orchestrator import EnvConfig, OrchestratorConfig
 from prime_rl.orchestrator.utils import intercept_vf_logging
 from prime_rl.utils.logger import get_logger, setup_logger
@@ -37,8 +38,13 @@ class PyBridge:
     """Callbacks from the Rust orchestrator into Python. Arguments are plain values; results
     are JSON-encoded ``bytes``."""
 
-    def __init__(self, config: OrchestratorConfig):
+    def __init__(self, config: OrchestratorConfig | EvalConfig | SFTOnlineEvalConfig):
         self.config = config
+        if isinstance(config, OrchestratorConfig):
+            eval_sources = config.eval.source if config.eval is not None else []
+            self._sources: dict[str, list[EnvConfig]] = {"train": config.train.source, "eval": eval_sources}
+        else:
+            self._sources = {"train": [], "eval": config.source}
         self._streams: dict[tuple[str, str], Iterator[vf.Task]] = {}
         self._renderers: dict[tuple[str, str], Renderer] = {}
         self._echo_filters: dict[tuple[str, str], Callable[[vf.Trace], list]] = {}
@@ -49,13 +55,7 @@ class PyBridge:
         hf_tqdm.set_lock(hf_tqdm.get_lock())
 
     def _source(self, split: str, env_name: str) -> EnvConfig:
-        if split == "train":
-            sources = self.config.train.source
-        elif split == "eval":
-            sources = self.config.eval.source if self.config.eval is not None else []
-        else:
-            raise ValueError(f"Unknown split {split!r}, expected 'train' or 'eval'")
-        for source in sources:
+        for source in self._sources[split]:
             if source.resolved_name == env_name:
                 return source
         raise KeyError(f"No {split} env named {env_name!r}")
@@ -87,7 +87,9 @@ class PyBridge:
 
     def flop_cost_table(self, max_len: int) -> bytes:
         """``[bin_cost([n]) for n in 0..=max_len]`` of the FlopCounter ``BatchPacker`` builds
-        for the trainer model. Entries are decimal strings: they can exceed 64 bits."""
+        for the trainer model. Entries are decimal strings: they can exceed 64 bits.
+        Orchestrator only."""
+        assert isinstance(self.config, OrchestratorConfig)
         import torch
 
         from prime_rl.configs.trainer import ModelConfig
