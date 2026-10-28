@@ -1,0 +1,32 @@
+[package]
+name = "prl-monitors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prl-types = { workspace = true }
+prl-wire = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
+tracing = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
+rand = { workspace = true }
+uuid = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
+zstd = "0.13"
+flate2 = "1"
+sha2 = "0.10"
+hex = "0.4"
+libc = "0.2"
+httpdate = "1"
+
+[dev-dependencies]
+tempfile = "3"
+zstd = "0.13"
+axum = { workspace = true }
