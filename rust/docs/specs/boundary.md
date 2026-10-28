@@ -13,7 +13,8 @@ Rust side of the call: `rust/crates/prl-py`). Core/monitors request bridge metho
   so `uv sync` / `uv run` rebuild the extension when Rust sources change.
 - `rust/.cargo/config.toml` sets `PYO3_PYTHON` to the project venv (`.venv/bin/python`) for plain cargo
   commands; maturin sets its own. `prl-py`'s build.rs gives its tests an rpath to libpython and the interpreter's
-  `PYTHONHOME` (uv's standalone Python does not find its stdlib when embedded), so `cargo test -p prl-py` just works.
+  `PYTHONHOME` + venv site-packages (uv's standalone Python does not find its stdlib when embedded); tests that embed
+  Python call `prime_rl_orch_rs::init_test_python()` first, then `cargo test -p prl-py` just works.
 - While crates are in flux, run Python with `uv run --no-sync ...`: a plain `uv run` rebuilds the extension
   (release) and fails if any workspace crate does not build.
 
@@ -34,7 +35,7 @@ in-tree only as the behavior reference and is deleted once Rust reaches parity.
    releases the GIL (`py.allow_threads`) and runs a multi-thread tokio runtime (`block_on`) on
    `prl_core::run(config: prl_config::OrchestratorConfig, bridge: Arc<dyn prl_types::Bridge>)` until the
    orchestrator exits. An `Err` is raised in Python as `RuntimeError(f"{err:#}")`; the process exits non-zero.
-   (Until prl-core lands, `run` is a stub that logs and returns.)
+   Rust logging: `prl_io::logging::setup_logger(log.level, log.json_logging)` (loguru-format lines, like the Python side).
 
 ## Threading and GIL rules
 
@@ -46,8 +47,10 @@ in-tree only as the behavior reference and is deleted once Rust reaches parity.
 - A Python exception becomes an `anyhow::Error` with context `PyBridge.<method> failed` and the formatted traceback.
 - Concurrent bridge calls are allowed; they serialize on the GIL (Python code releasing the GIL, e.g. dataset IO,
   can overlap). The bridge pre-seeds datasets' tqdm lock, as `Envs.start` does, for concurrent taskset loads.
-- Signals: while Python waits in `run`, Python signal handlers do not run. The Rust supervisor owns
-  SIGINT/SIGTERM (`tokio::signal`) and turns them into cancellation.
+- Signals: Python keeps its signal handlers. `prime_rl_orch_rs::run_until_signal(py, name, |shutdown| fut)` (used by
+  `run`, available to `run_eval` / `run_online_eval`) polls `check_signals` every 100 ms from the `block_on` future,
+  which runs on Python's main thread. A handler that raises (`KeyboardInterrupt`, a launcher's SIGTERM handler)
+  cancels `shutdown`; once the Rust side has stopped, the exception is re-raised in Python.
 
 ## Bridge methods (`prime_rl.orchestrator.rust.PyBridge`)
 
