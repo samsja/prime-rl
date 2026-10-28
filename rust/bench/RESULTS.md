@@ -14,7 +14,7 @@ run, against a fake world that does no real work:
   The orchestrator receives exactly what a real server streams.
   `--env real` uses real `env-server` pools for reverse-text with an in-process one-call
   harness (`prl_bench_harness.py`); the built-in `null` harness starts a Python program
-  per rollout and caps a worker at about 16 rollouts/s.
+  per rollout and caps a worker at about 8 rollouts/s.
 - **trainer**: `trainer_stub.py` speaks the ZMQ batch transport and the filesystem weight
   broadcast. It pulls each step's micro batches and immediately publishes the next policy
   version (sentinel files only).
