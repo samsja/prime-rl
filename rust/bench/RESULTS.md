@@ -27,7 +27,7 @@ only (Prime/W&B off). Measured over steps 5-12 (warmup: 4 steps; real-env rows: 
 the orchestrator process from `/proc`. "Loop lag" is `event_loop_lag/*`: the asyncio
 event-loop lag for Python, and the scheduling delay of the Rust runtime's equivalent probe.
 
-Versions: Python = `/home/ubuntu/prime-rl-orch-baseline` at `8acab25e4`. Rust = this branch
+Versions: Python = a checkout of `8acab25e4` (the branch point). Rust = this branch
 at `7b25613dd` (16k at 250 ms with and without file monitor), `0b9b9704f` (4k at 250 ms),
 `d2991ab7e` (16k at 50 ms, 65k, real env), `f38172da5` (4k at 50 ms, before the memory
 change), and before `f38172da5` (256, 1024; not affected by the fixes below).
@@ -128,7 +128,8 @@ The mock inference used under 15 % CPU in every run.
 ```
 cd rust/bench/tools && CARGO_TARGET_DIR=../../target/wire-bench cargo build --release && cd -
 uv run --no-sync python rust/bench/record_template.py rust/bench/template.msgpack   # once (committed)
-uv run --no-sync python rust/bench/run_matrix.py --inflight 256 1024 4096 16384 --env-latency-ms 250 --env-replicas 6
+uv run --no-sync python rust/bench/run_matrix.py --inflight 256 1024 4096 16384 --env-latency-ms 250 --env-replicas 6 \
+    --python-repo <checkout of 8acab25e4 with its .venv synced>
 uv run --no-sync python rust/bench/run_bench.py rust 2048 1024 --env real --env-replicas 8 --env-workers 2
 uv run --no-sync python rust/bench/run_bench.py rust 16384 16384 --env-latency-ms 250 --env-replicas 6 --no-file-monitor
 uv run --no-sync python rust/bench/run_bench.py env-load 4096 0 --env real --env-replicas 4 --env-workers 4

@@ -15,7 +15,7 @@ the orchestrator's metrics.jsonl, and appends one JSON line of results to
 <work-dir>/results.jsonl.
 
     uv run --no-sync python rust/bench/run_bench.py rust 1024 1024
-    uv run --no-sync python rust/bench/run_bench.py python 1024 1024 --env-replicas 6
+    uv run --no-sync python rust/bench/run_bench.py python 1024 1024 --python-repo ../prime-rl-main
     uv run --no-sync python rust/bench/run_bench.py env-load 4096 0   # env servers + mock only
 """
 
@@ -247,12 +247,14 @@ def main() -> None:
     parser.add_argument("--batch-port", type=int, default=18312)
     parser.add_argument("--load-seconds", type=int, default=30)
     parser.add_argument("--timeout", type=float, default=1800)
-    parser.add_argument("--python-repo", type=Path, default=Path("/home/ubuntu/prime-rl-orch-baseline"))
+    parser.add_argument("--python-repo", type=Path, help="checkout of the Python orchestrator (needed for `python`)")
     parser.add_argument("--rust-repo", type=Path, default=ROOT)
     parser.add_argument("--work-dir", type=Path, default=Path("/tmp/prl-orch-bench"))
     parser.add_argument("--tag", default="")
     parser.add_argument("--no-file-monitor", action="store_true", help="no monitors at all (no metrics.jsonl / traces)")
     args = parser.parse_args()
+    if args.impl == "python" and args.python_repo is None:
+        parser.error("python needs --python-repo")
 
     import tomllib
 

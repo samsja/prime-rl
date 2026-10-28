@@ -1,7 +1,7 @@
 """Run run_bench.py over a grid: each orchestrator at each max_inflight (batch size =
 max_inflight unless --batch-size is given). Results accumulate in <work-dir>/results.jsonl.
 
-    uv run --no-sync python rust/bench/run_matrix.py --inflight 256 1024 4096 16384
+    uv run --no-sync python rust/bench/run_matrix.py --inflight 256 1024 4096 16384 --python-repo ../prime-rl-main
 """
 
 import argparse
