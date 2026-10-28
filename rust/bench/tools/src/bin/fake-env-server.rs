@@ -140,6 +140,22 @@ fn main() {
         let fd = unsafe { AsyncFd::register_with_interest(ZmqFd(socket.get_fd().unwrap()), tokio::io::Interest::READABLE) }.unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Outgoing>();
         let ok: Vec<u8> = to_msgpack(&[("success", Value::Bool(true)), ("error", Value::Nil)].into_iter().collect());
+        // Runs received per 100 ms, as `<unix time> <count>` lines on stderr: the admission timeline.
+        let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        {
+            let received = received.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(100));
+                loop {
+                    tick.tick().await;
+                    let n = received.swap(0, std::sync::atomic::Ordering::Relaxed);
+                    if n > 0 {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+                        eprintln!("{now:.1} {n}");
+                    }
+                }
+            });
+        }
         loop {
             loop {
                 let frames = match socket.recv_multipart(zmq::DONTWAIT) {
@@ -149,6 +165,7 @@ fn main() {
                 };
                 let Ok([identity, request_id, method, payload]) = <[Vec<u8>; 4]>::try_from(frames) else { continue };
                 if method == b"run" {
+                    received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let (template, out_tx) = (template.clone(), out_tx.clone());
                     tokio::spawn(async move {
                         if !latency.is_zero() {

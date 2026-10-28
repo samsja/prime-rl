@@ -81,6 +81,8 @@ impl Schemas {
 pub const EPISODE: &str = "Episode[WireTaskData, State, WireAgentConfig]";
 pub const TRACE: &str = "Trace[WireTaskData, State, WireAgentConfig]";
 pub const MESSAGE_NODE: &str = "MessageNode";
+pub const TRACE_TASK: &str = "TraceTask[WireTaskData]";
+pub const AGENT_INFO: &str = "AgentInfo[WireAgentConfig]";
 
 /// `model_dump(mode="json")` of a python-mode value held under `schema`.
 pub fn dump_json(value: &Value, schema: &Schema, exclude_none: bool) -> Value {

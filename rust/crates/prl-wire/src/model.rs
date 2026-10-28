@@ -200,6 +200,43 @@ fn shared<T: PartialEq>(last: &'static std::thread::LocalKey<RefCell<Option<Arc<
     })
 }
 
+type DumpCache<T> = RefCell<Vec<(std::sync::Weak<T>, bool, Value)>>;
+
+thread_local! {
+    static AGENT_CONFIG_DUMPS: DumpCache<Value> = const { RefCell::new(Vec::new()) };
+    static TASK_DATA_DUMPS: DumpCache<Map> = const { RefCell::new(Vec::new()) };
+}
+
+/// The JSON-mode dump of a shared subtree, cached per `Arc` (and `exclude_none`) on this
+/// thread: records of an env's episodes dump the same agent config, a group's the same task.
+fn cached_dump<T>(cache: &'static std::thread::LocalKey<DumpCache<T>>, value: &Arc<T>, exclude_none: bool, dump: impl FnOnce(&T) -> Value) -> Value {
+    const ENTRIES: usize = 16;
+    cache.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, _, dumped)) =
+            cache.iter().find(|(weak, flag, _)| *flag == exclude_none && weak.upgrade().is_some_and(|a| Arc::ptr_eq(&a, value)))
+        {
+            return dumped.clone();
+        }
+        let dumped = dump(value);
+        if cache.len() == ENTRIES {
+            cache.remove(0);
+        }
+        cache.push((Arc::downgrade(value), exclude_none, dumped.clone()));
+        dumped
+    })
+}
+
+/// Put `key` at `index` of a dumped map: in place when the dump kept a placeholder for it,
+/// else inserted there (exclude_none dropped the placeholder).
+fn put_at(map: &mut Map, index: usize, key: &str, value: Value) {
+    if let Some(slot) = map.get_mut(key) {
+        *slot = value;
+    } else {
+        map.shift_insert(index.min(map.len()), key.to_owned(), value);
+    }
+}
+
 // ── small models ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -956,6 +993,23 @@ impl TraceTask {
         task_hash(&self.data)
     }
 
+    /// The JSON-mode dump of this task (`TraceTask[WireTaskData]`), its data dump cached
+    /// per shared `Arc` (a group's rollouts share it).
+    fn record_value(&self, exclude_none: bool) -> Value {
+        let python = map_value(vec![
+            ("type", self.type_.as_str().into()),
+            ("data", Value::Nil),
+            ("key", self.key.clone().into()),
+            ("hash", self.hash.clone().into()),
+        ]);
+        let mut dumped = schema::dump_json(&python, &schema::Schema::Model { name: schema::TRACE_TASK.into() }, exclude_none);
+        let data = cached_dump(&TASK_DATA_DUMPS, &self.data, exclude_none, |data| {
+            schema::dump_model(data, SCHEMAS.model("WireTaskData"), exclude_none)
+        });
+        put_at(dumped.as_map_mut().expect("task record"), 1, "data", data);
+        dumped
+    }
+
     /// `task.data.idx`.
     pub fn idx(&self) -> Option<i64> {
         self.data.get("idx").and_then(Value::as_i64)
@@ -981,6 +1035,22 @@ impl AgentInfo {
             name: f.string_or("name", "agent")?,
             trainable: f.boolean_or("trainable", true)?,
         })
+    }
+
+    /// The JSON-mode dump of this agent info, its config dump cached per shared `Arc`.
+    fn record_value(&self, exclude_none: bool) -> Value {
+        let python = map_value(vec![
+            ("config", Value::Nil),
+            ("runtime", self.runtime.clone()),
+            ("name", self.name.as_str().into()),
+            ("trainable", self.trainable.into()),
+        ]);
+        let mut dumped = schema::dump_json(&python, &schema::Schema::Model { name: schema::AGENT_INFO.into() }, exclude_none);
+        let config = cached_dump(&AGENT_CONFIG_DUMPS, &self.config, exclude_none, |config| {
+            schema::dump_json(config, SCHEMAS.field(schema::AGENT_INFO, "config"), exclude_none)
+        });
+        put_at(dumped.as_map_mut().expect("agent record"), 0, "config", config);
+        dumped
     }
 
     pub fn to_python(&self) -> Value {
@@ -1092,12 +1162,17 @@ impl Trace {
 
     /// The trace as a python-mode dump; `nodes` holds the node maps `node` builds.
     fn to_python_with(&self, node: impl Fn(&MessageNode) -> Value) -> Value {
+        self.to_python_parts(node, true)
+    }
+
+    /// `with_shared = false` leaves `task` and `agent` null (the record path dumps them apart).
+    fn to_python_parts(&self, node: impl Fn(&MessageNode) -> Value, with_shared: bool) -> Value {
         let mut map = Map::new();
         map.insert("version".into(), self.version.into());
         map.insert("id".into(), self.id.as_str().into());
         map.insert("verifiers".into(), self.verifiers.clone());
-        map.insert("task".into(), self.task.to_python());
-        map.insert("agent".into(), self.agent.to_python());
+        map.insert("task".into(), if with_shared { self.task.to_python() } else { Value::Nil });
+        map.insert("agent".into(), if with_shared { self.agent.to_python() } else { Value::Nil });
         map.insert("tools".into(), Value::Array(self.tools.clone()));
         map.insert("nodes".into(), list_value(&self.nodes, node));
         map.insert("calls".into(), list_value(&self.calls, ModelCall::to_python));
@@ -1145,8 +1220,12 @@ impl Trace {
     }
 
     fn record_value(&self, float_decimals: Option<u32>, exclude_none: bool) -> Value {
-        let python = self.to_python_with(|n| Value::Map(n.to_python_meta()));
+        // the shared task and agent subtrees are dumped (and cached) on their own
+        let python = self.to_python_parts(|n| Value::Map(n.to_python_meta()), false);
         let mut record = schema::dump_json(&python, &schema::Schema::Model { name: schema::TRACE.into() }, exclude_none);
+        let map = record.as_map_mut().expect("trace record");
+        put_at(map, 3, "task", self.task.record_value(exclude_none));
+        put_at(map, 4, "agent", self.agent.record_value(exclude_none));
         let nodes = record.get_mut("nodes").and_then(Value::as_array_mut).expect("dumped trace has nodes");
         for (node_record, node) in nodes.iter_mut().zip(&self.nodes) {
             node.record_streams(node_record.as_map_mut().expect("node record"), float_decimals, exclude_none);
@@ -1496,10 +1575,14 @@ impl Episode {
     }
 
     fn to_python_with(&self, trace: impl Fn(&Trace) -> Value) -> Value {
+        self.to_python_parts(trace, true)
+    }
+
+    fn to_python_parts(&self, trace: impl Fn(&Trace) -> Value, with_task: bool) -> Value {
         map_value(vec![
             ("id", self.id.as_str().into()),
             ("env", map_value(vec![("id", self.env.id.as_str().into()), ("name", self.env.name.clone().into())])),
-            ("task", self.task.to_python()),
+            ("task", if with_task { self.task.to_python() } else { Value::Nil }),
             ("group", self.group.as_ref().map_or(Value::Nil, |g| map_value(vec![("id", g.id.as_str().into())]))),
             ("run", self.run.as_ref().map_or(Value::Nil, RunInfo::to_python)),
             ("ok", self.ok.into()),
@@ -1520,8 +1603,9 @@ impl Episode {
     /// `Episode.to_record(float_decimals)`: the JSON record (exclude_none) with per-token
     /// streams and without wire tensors.
     pub fn to_record(&self, float_decimals: Option<u32>) -> Value {
-        let python = self.to_python_with(|_| Value::Nil);
+        let python = self.to_python_parts(|_| Value::Nil, false);
         let mut record = schema::dump_model(python.as_map().unwrap(), SCHEMAS.model(schema::EPISODE), true);
+        put_at(record.as_map_mut().expect("episode record"), 2, "task", self.task.record_value(true));
         let traces = record.get_mut("traces").and_then(Value::as_array_mut).expect("dumped episode has traces");
         for (slot, trace) in traces.iter_mut().zip(&self.traces) {
             *slot = trace.record_value(float_decimals, true);

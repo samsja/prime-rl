@@ -251,6 +251,7 @@ def main() -> None:
     parser.add_argument("--rust-repo", type=Path, default=ROOT)
     parser.add_argument("--work-dir", type=Path, default=Path("/tmp/prl-orch-bench"))
     parser.add_argument("--tag", default="")
+    parser.add_argument("--no-file-monitor", action="store_true", help="no monitors at all (no metrics.jsonl / traces)")
     args = parser.parse_args()
 
     import tomllib
@@ -267,6 +268,8 @@ def main() -> None:
     raw = tomllib.loads(orchestrator_toml(args, run_dir))
     # file monitor only: never create platform runs from a benchmark (Prime is on by default)
     raw["monitors"]["prime"] = None
+    if args.no_file_monitor:
+        raw["monitors"]["file"] = None
     (work / "orchestrator.json").write_text(json.dumps(raw))
     config = OrchestratorConfig.model_validate(raw)
     assert config.monitors.prime is None and config.monitors.wandb is None
