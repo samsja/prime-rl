@@ -247,65 +247,117 @@ impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Value {
 
 // ── msgpack ────────────────────────────────────────────────────────────────
 
-fn key_string(key: rmpv::Value) -> Result<String, DecodeError> {
-    Ok(match key {
-        rmpv::Value::String(s) => s.into_str().ok_or(DecodeError::InvalidUtf8)?,
-        rmpv::Value::Integer(i) => i.to_string(),
-        rmpv::Value::Boolean(b) => if b { "True".into() } else { "False".into() },
-        rmpv::Value::Nil => "None".into(),
-        rmpv::Value::F64(f) => f.to_string(),
-        other => return Err(DecodeError::UnsupportedKey(format!("{other}"))),
-    })
-}
-
-fn from_rmpv(value: rmpv::Value) -> Result<Value, DecodeError> {
-    Ok(match value {
-        rmpv::Value::Nil => Value::Nil,
-        rmpv::Value::Boolean(b) => Value::Bool(b),
-        rmpv::Value::Integer(i) => match i.as_i64() {
-            Some(v) => Value::Int(v),
-            None => Value::UInt(i.as_u64().expect("msgpack integer is i64 or u64")),
-        },
-        rmpv::Value::F32(f) => Value::F64(f as f64),
-        rmpv::Value::F64(f) => Value::F64(f),
-        // `raw=False`: str must be UTF-8
-        rmpv::Value::String(s) => Value::Str(s.into_str().ok_or(DecodeError::InvalidUtf8)?),
-        rmpv::Value::Binary(b) => Value::Bin(b),
-        rmpv::Value::Array(items) => {
-            Value::Array(items.into_iter().map(from_rmpv).collect::<Result<_, _>>()?)
-        }
-        rmpv::Value::Map(pairs) => {
-            let mut map = Map::with_capacity(pairs.len());
-            for (k, v) in pairs {
-                map.insert(key_string(k)?, from_rmpv(v)?);
-            }
-            Value::Map(map)
-        }
-        rmpv::Value::Ext(code, _) => return Err(DecodeError::UnsupportedExt(code)),
-    })
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
-    #[error("invalid msgpack: {0}")]
-    Msgpack(#[from] rmpv::decode::Error),
+    #[error("truncated msgpack data")]
+    Truncated,
+    #[error("reserved msgpack marker 0xc1")]
+    Reserved,
     #[error("invalid UTF-8 in msgpack str")]
     InvalidUtf8,
     #[error("unsupported msgpack map key {0}")]
     UnsupportedKey(String),
-    #[error("unsupported msgpack ext type {0}")]
-    UnsupportedExt(i8),
+    #[error("unsupported msgpack ext type")]
+    UnsupportedExt,
+    #[error("msgpack nesting too deep")]
+    TooDeep,
     #[error("trailing bytes after msgpack value")]
     Trailing,
 }
 
 /// `msgpack.unpackb(data, raw=False, strict_map_key=False)`.
-pub fn from_msgpack(mut data: &[u8]) -> Result<Value, DecodeError> {
-    let value = rmpv::decode::read_value(&mut data)?;
-    if !data.is_empty() {
+pub fn from_msgpack(data: &[u8]) -> Result<Value, DecodeError> {
+    let mut reader = Reader { data, pos: 0 };
+    let value = reader.value(0)?;
+    if reader.pos != data.len() {
         return Err(DecodeError::Trailing);
     }
-    from_rmpv(value)
+    Ok(value)
+}
+
+const MAX_DEPTH: usize = 512;
+
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
+        let end = self.pos.checked_add(n).filter(|&end| end <= self.data.len()).ok_or(DecodeError::Truncated)?;
+        let bytes = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(bytes)
+    }
+
+    fn uint(&mut self, n: usize) -> Result<u64, DecodeError> {
+        Ok(self.take(n)?.iter().fold(0u64, |acc, &b| acc << 8 | b as u64))
+    }
+
+    fn string(&mut self, n: usize) -> Result<String, DecodeError> {
+        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| DecodeError::InvalidUtf8)
+    }
+
+    fn value(&mut self, depth: usize) -> Result<Value, DecodeError> {
+        if depth > MAX_DEPTH {
+            return Err(DecodeError::TooDeep);
+        }
+        let marker = self.take(1)?[0];
+        Ok(match marker {
+            0x00..=0x7f => Value::Int(marker as i64),
+            0x80..=0x8f => self.map((marker & 0x0f) as usize, depth)?,
+            0x90..=0x9f => self.array((marker & 0x0f) as usize, depth)?,
+            0xa0..=0xbf => Value::Str(self.string((marker & 0x1f) as usize)?),
+            0xc0 => Value::Nil,
+            0xc2 => Value::Bool(false),
+            0xc3 => Value::Bool(true),
+            0xc4 => { let n = self.uint(1)? as usize; Value::Bin(self.take(n)?.to_vec()) }
+            0xc5 => { let n = self.uint(2)? as usize; Value::Bin(self.take(n)?.to_vec()) }
+            0xc6 => { let n = self.uint(4)? as usize; Value::Bin(self.take(n)?.to_vec()) }
+            0xc7..=0xc9 | 0xd4..=0xd8 => return Err(DecodeError::UnsupportedExt),
+            0xca => Value::F64(f32::from_bits(self.uint(4)? as u32) as f64),
+            0xcb => Value::F64(f64::from_bits(self.uint(8)?)),
+            0xcc => Value::Int(self.uint(1)? as i64),
+            0xcd => Value::Int(self.uint(2)? as i64),
+            0xce => Value::Int(self.uint(4)? as i64),
+            0xcf => Value::from(self.uint(8)?),
+            0xd0 => Value::Int(self.uint(1)? as u8 as i8 as i64),
+            0xd1 => Value::Int(self.uint(2)? as u16 as i16 as i64),
+            0xd2 => Value::Int(self.uint(4)? as u32 as i32 as i64),
+            0xd3 => Value::Int(self.uint(8)? as i64),
+            0xd9 => { let n = self.uint(1)? as usize; Value::Str(self.string(n)?) }
+            0xda => { let n = self.uint(2)? as usize; Value::Str(self.string(n)?) }
+            0xdb => { let n = self.uint(4)? as usize; Value::Str(self.string(n)?) }
+            0xdc => { let n = self.uint(2)? as usize; self.array(n, depth)? }
+            0xdd => { let n = self.uint(4)? as usize; self.array(n, depth)? }
+            0xde => { let n = self.uint(2)? as usize; self.map(n, depth)? }
+            0xdf => { let n = self.uint(4)? as usize; self.map(n, depth)? }
+            0xe0..=0xff => Value::Int(marker as i8 as i64),
+            0xc1 => return Err(DecodeError::Reserved),
+        })
+    }
+
+    fn array(&mut self, n: usize, depth: usize) -> Result<Value, DecodeError> {
+        let mut items = Vec::with_capacity(n.min(self.data.len() - self.pos));
+        for _ in 0..n {
+            items.push(self.value(depth + 1)?);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn map(&mut self, n: usize, depth: usize) -> Result<Value, DecodeError> {
+        let mut map = Map::with_capacity(n.min(self.data.len() - self.pos));
+        for _ in 0..n {
+            let key = match self.value(depth + 1)? {
+                Value::Str(s) => s,
+                Value::Int(i) => i.to_string(),
+                Value::UInt(u) => u.to_string(),
+                other => return Err(DecodeError::UnsupportedKey(format!("{other:?}"))),
+            };
+            map.insert(key, self.value(depth + 1)?);
+        }
+        Ok(Value::Map(map))
+    }
 }
 
 /// `msgpack.packb(value, use_bin_type=True)`: smallest encodings, float64 floats.
