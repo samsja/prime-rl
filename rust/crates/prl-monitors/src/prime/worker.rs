@@ -367,10 +367,9 @@ mod tests {
         }
     }
 
-    fn worker(
-        errors: Vec<ApiError>,
-        cooldown: Option<Duration>,
-    ) -> (UploadWorker<u32>, Arc<Mutex<Vec<Vec<u32>>>>) {
+    type Writes = Arc<Mutex<Vec<Vec<u32>>>>;
+
+    fn worker(errors: Vec<ApiError>, cooldown: Option<Duration>) -> (UploadWorker<u32>, Writes) {
         let writes = Arc::new(Mutex::new(Vec::new()));
         let sink = FakeSink {
             enabled: true,

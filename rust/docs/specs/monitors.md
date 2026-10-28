@@ -138,58 +138,65 @@ src/prime/*         platform client, RFT backend, upload worker, metrics + trace
 src/wandb.rs        WandbMonitor over the `WandbBridge` trait
 ```
 
-### 2.2 Public API
+### 2.2 Public API (as implemented)
 ```rust
-pub enum Scalar { Int(i64), Float(f64), Bool(bool), Str(String), Null }   // metrics.jsonl keeps ints as ints
-pub type Row = IndexMap<String, Scalar>;                                     // + From<prl_types::Metrics>
+pub use prl_types::{Metrics as Row, Scalar};          // ints stay ints in metrics.jsonl
+pub type EpisodeRef = Arc<prl_wire::Episode>;
 pub enum LiveEvent { Delta { delta: prl_wire::Value, dispatch: prl_wire::Value }, Done(String),
                      Pending { id: String, dispatch: prl_wire::Value }, Dispatched(String) }
-#[derive(Clone)] pub struct Monitors { tx: mpsc::Sender<MonitorMsg> }      // single channel => send order
+
+#[derive(Clone)] pub struct Monitors { .. }           // one bounded mpsc => processed in send order
 impl Monitors {
     async fn log_metrics(&self, row: Row, step: Option<u64>);
-    async fn log_episodes(&self, episodes: Vec<Arc<prl_wire::Episode>>, step: u64, kind: Kind, subset: Subset);
+    async fn log_episodes(&self, episodes: Vec<EpisodeRef>, step: u64, kind: Kind, subset: Subset);
     async fn log_annotations(&self, updates: Vec<prl_wire::Value>);
     async fn log_live(&self, events: Vec<LiveEvent>);
     async fn log_eval_plan(&self, env_name: String, step: u64, expected: u64);
-    async fn finalize(&self, paused: bool);                                  // awaits completion
+    async fn log_eval_epoch(&self, env_name: String, step: u64, episodes: Vec<EpisodeRef>);
+    async fn finalize(&self, paused: bool);            // awaits completion; stops the actor
 }
-pub struct MonitorsSetup { output_dir, producer: Option<String>, file: Option<FileMonitorConfig>,
-                           prime: Option<PrimeTrainSetup>, wandb: Option<Box<dyn WandbBridge>>, ... }
-pub async fn spawn(setup: MonitorsSetup, cancel: CancellationToken) -> Result<(Monitors, JoinHandle<Result<()>>)>;
-pub trait WandbBridge: Send + 'static {                   // implemented in prl-py over PyBridge (GIL, spawn_blocking)
-    fn init(&mut self, train_env_names: &[String], eval_env_names: &[String]) -> Result<()>;
-    fn log(&mut self, row_json: &str, step: Option<u64>) -> Result<()>;
-    fn finish(&mut self, paused: bool) -> Result<()>;
-}
-pub mod live { pub const STAGES: [&str; 8]; pub fn stage(trace: &Value) -> &'static str; }
-pub mod update { pub fn make_update(trace_id, info, branches) -> Value; }
-pub mod annotations { pub fn stamp_arrival(&mut [Episode], Kind, step); pub fn stamp_batch(&[..Episode], step) -> Vec<Value>; }
+pub struct MonitorsSetup { output_dir, producer: Option<String>, prime: Option<PrimeSetup>,
+                           wandb: Option<Box<dyn WandbBridge>>, file: Option<FileMonitorConfig>,
+                           train_env_names, eval_env_names, overview_flavor: String }
+impl MonitorsSetup { fn from_orchestrator(&prl_config::OrchestratorConfig, Option<Box<dyn WandbBridge>>) -> Self }
+pub enum PrimeSetup { Train { name, run: Option<PrimeTrainSetup> }, Eval(prime::eval::PrimeEvalSetup) }
+pub async fn spawn(MonitorsSetup, CancellationToken) -> Result<(Monitors, JoinHandle<Result<()>>)>;
+pub fn spawn_monitors(Vec<Box<dyn Monitor>>, CancellationToken) -> (Monitors, JoinHandle<Result<()>>);
+pub trait Monitor { name, log_metrics, log_episodes, log_annotations, log_live, log_eval_plan, log_eval_epoch, finalize, crash }
+pub trait WandbBridge: Send { fn init(&mut self, train: &[String], eval: &[String], flavor: &str) -> Result<()>;
+                              fn log(&mut self, row_json: &str, step: Option<u64>) -> Result<()>;
+                              fn finish(&mut self, paused: bool) -> Result<()>; }
+pub mod annotations { fn stamp_arrival(&mut [Episode], Kind, u64); fn stamp_batch(impl IntoIterator<Item=&Episode>, u64) -> Vec<Value>; }
+pub use file::live::{stage, STAGES};  pub mod file::update::make_update;
 ```
-Records come from `prl_wire::Episode::to_record(float_decimals)` / `to_json` (orjson byte-compatible, owned by wire);
-index rows, live lines and annotation lines are written with `prl_wire::json::to_vec` (orjson-compatible writer).
-`live_value` (ndarray decoding of live node fields) is `prl_wire::ndarray::live_value`.
-- `spawn` runs every monitor's `init` in setup order (prime, wandb, file) before returning; an init error is returned (crashes the run).
-- The actor is the single ordered consumer: it processes messages one at a time and fans out sequentially in registration order,
-  with the same warning on per-monitor failure. Blocking file I/O runs on `spawn_blocking` (state moved in and back, awaited before
-  the next message, so writes never interleave). W&B calls run on `spawn_blocking` holding the GIL via the bridge.
-- Prime uploads run on their own tokio tasks (samples / metrics workers) fed by bounded queues, like the SDK's uploader threads.
-- If the inbox closes or cancellation fires without `Finalize`, the actor finalizes as a crash: file streams are closed, prime reports
-  `crashed` (SDK atexit semantics), wandb `finish`.
+- `spawn` initializes monitors in Python's order (prime, wandb, file) on rank 0 only; an init error is returned (crashes the run).
+- The actor fans each message out sequentially; a failing monitor logs `Failed to log to {Name}: {e}` and is skipped.
+- File I/O runs on `spawn_blocking` with the monitor state moved in and back (writes never interleave). W&B calls run
+  on `spawn_blocking` through the bridge (GIL taken in prl-py). Prime uploads run on their own tokio tasks
+  (samples / metrics workers, bounded queue 256, 5 s put timeout, coalescing, strike/cooldown policy).
+- Cancel or inbox close without `Finalize`: queued messages are still handled, then `crash()`: prime reports `crashed`
+  (SDK atexit semantics; attached runs left to the launcher), the file monitor flushes without sealing, W&B is left to
+  Python's own atexit hook.
 
 ### 2.3 Python bridge (wandb)
-`src/prime_rl/orchestrator/rust_monitors.py: WandbBridge(config)` (owned by monitors; `PyBridge` exposes
-`wandb_init(train_env_names_json, eval_env_names_json)`, `wandb_log(row_json, step|None)`, `wandb_finish(paused)` delegating to it).
-It wraps the existing `WandbMonitor` (same init path, overview view, links, shared mode); `log` is `json.loads` + `WandbMonitor.log_metrics`.
-Only scalar rows cross the boundary (W&B ignores episodes; no tables are logged today).
+`src/prime_rl/monitors/wandb/bridge.py: WandbBridge(config, output_dir, run_config)` wraps the existing `WandbMonitor`
+(same init path, shared mode, overview view, links). `PyBridge.wandb` holds it (scaffold); prl-py's `PyWandb` implements
+the trait. Only scalar rows cross (JSON from the Python-`json.dumps`-compatible writer, NaN allowed).
 
-### 2.4 Needed from siblings
-- wire (agreed): `Episode::to_record/to_json`, `prl_wire::Value`, `prl_wire::json::to_vec`, `prl_wire::ndarray::live_value`;
-  episode accessors for annotations (trace.info, run.work.step, trace.timing.start, branches).
-- core: owns spawning (`prl_monitors::spawn`), sends `MonitorMsg`s; converts `prl_types::Metrics` into `Row` via `From`.
-- config: fields for `monitors.{file,prime,wandb}`, `model.name`, `max_steps`, `batch_size`, `seq_len`, per train source `env_id`/`group_size`/`resolved_name`.
-- scaffold: `PyBridge` delegates three wandb methods to `rust_monitors.WandbBridge`; prl-py implements `WandbBridge` trait.
+### 2.4 Tests
+- `tests/file_monitor.rs`: Python FileMonitor fixtures (`tests/fixtures/gen_file_monitor.py`) — stream chunks (sealed zstd,
+  byte-identical), `stream.index.jsonl`, annotation stream + index, live files (ndarray decoding, blank lines), pending,
+  `plan.json`, `metrics.jsonl` (modulo wall time); `stamp_batch` vs Python updates; relaunch numbering.
+- `tests/index_rows.rs`: 400 random records vs Python `index_row` (Python 3.12 compensated `sum`, int/float typing).
+- `tests/chunks.rs`: seekable zstd byte-identical to pyzstd; roll/seal/resume.
+- `tests/prime.rs`, `tests/prime_eval.rs`: mock platform (axum): request bodies/headers for create, metrics, traces multipart
+  (gzip, sha256 idempotency key, metadata JSON), finalize, crash, attach; eval evaluations/finalize/parent metrics;
+  `from_episodes` vs `prime_runs.metrics` fixture; run.json/links.json.
+- `tests/actor.rs`: ordering, failure containment, crash path; worker unit tests: strikes, rejections, cooldown, coalescing, drops.
 
-### 2.5 Known gaps (planned)
-- Legacy samples fallback (parquet to `/rft/samples` when Prime Traces is not enabled for the account): not ported; the traces sink logs
-  that traces are not enabled and retires (records are lost for such accounts, as with `traces_opt_out`). `PRIME_TRACES_OPT_OUT=1` errors at init.
-- `PrimeEvalMonitor` and `log_eval_epoch`: not used by the orchestrator, not ported.
+### 2.5 Known gaps vs Python
+- Legacy samples fallback (parquet / `/samples` when Prime Traces is not enabled for the account, or `PRIME_TRACES_OPT_OUT`):
+  not ported. Not-enabled accounts get a warning and no episode upload; opt-out errors at init.
+- `PRIME_CONTEXT` profile overlay of the prime CLI config (`~/.prime/environments/<ctx>.json`) is not read.
+- prime_runs `on_error="raise"` mode and fork handling: not applicable (the monitors never use them).
+- Log lines match the Python messages; the `Initializing {name} monitor (...)` config rendering is approximate.
