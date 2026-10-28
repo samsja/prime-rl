@@ -41,7 +41,7 @@ fn is_prime_inference(api_key_var: &str, base_url: &str) -> bool {
 
 /// `resolve_api_key`: the env var, falling back to the Prime CLI config for a pinference
 /// endpoint keyed by `PRIME_API_KEY`; `"EMPTY"` when unset.
-pub fn resolve_api_key(api_key_var: &str, base_url: &str) -> String {
+pub(crate) fn resolve_api_key(api_key_var: &str, base_url: &str) -> String {
     let mut key = std::env::var(api_key_var).ok().filter(|k| !k.is_empty());
     if key.is_none() && is_prime_inference(api_key_var, base_url) {
         key = load_prime_config().get("api_key").and_then(Value::as_str).map(str::to_owned);
@@ -51,7 +51,7 @@ pub fn resolve_api_key(api_key_var: &str, base_url: &str) -> String {
 
 /// `resolve_headers`: static headers, then set `headers_from_env` values, merged
 /// case-insensitively keeping the first spelling; plus the Prime team header for pinference.
-pub fn resolve_headers(
+pub(crate) fn resolve_headers(
     headers: &IndexMap<String, String>,
     headers_from_env: &IndexMap<String, String>,
     api_key_var: &str,
@@ -75,7 +75,7 @@ pub fn resolve_headers(
     resolved
 }
 
-pub fn header_map(headers: &IndexMap<String, String>) -> anyhow::Result<HeaderMap> {
+pub(crate) fn header_map(headers: &IndexMap<String, String>) -> anyhow::Result<HeaderMap> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
         map.insert(HeaderName::from_bytes(name.as_bytes())?, HeaderValue::from_str(value)?);
@@ -98,7 +98,7 @@ impl AdminClient {
     }
 
     /// Admin client over a custom reqwest builder (pool limits are applied here).
-    pub fn with_builder(base_url: &str, builder: reqwest::ClientBuilder) -> anyhow::Result<Self> {
+    pub(crate) fn with_builder(base_url: &str, builder: reqwest::ClientBuilder) -> anyhow::Result<Self> {
         let base = base_url.trim_end_matches('/');
         let base = base.strip_suffix("/v1").unwrap_or(base).trim_end_matches('/').to_owned();
         let http = builder.pool_max_idle_per_host(1).connect_timeout(Duration::from_secs(10)).build()?;
@@ -120,7 +120,7 @@ impl AdminClient {
         &self.base
     }
 
-    pub fn url(&self, path: &str) -> String {
+    fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
     }
 
@@ -135,7 +135,7 @@ impl AdminClient {
 
 /// `setup_admin_clients`: one admin client per `admin_base_url` (or `base_url`), carrying the
 /// resolved headers plus `Authorization: Bearer <key>` unless the key is `EMPTY`.
-pub fn setup_admin_clients(config: &ClientConfig) -> anyhow::Result<Vec<AdminClient>> {
+pub(crate) fn setup_admin_clients(config: &ClientConfig) -> anyhow::Result<Vec<AdminClient>> {
     let urls = match &config.admin_base_url {
         Some(urls) if !urls.is_empty() => urls.clone(),
         _ => vec![config.base_url.clone()],
@@ -144,7 +144,7 @@ pub fn setup_admin_clients(config: &ClientConfig) -> anyhow::Result<Vec<AdminCli
 }
 
 /// The admin client of `config.base_url` itself (the client-facing router).
-pub fn router_admin_client(config: &ClientConfig) -> anyhow::Result<AdminClient> {
+pub(crate) fn router_admin_client(config: &ClientConfig) -> anyhow::Result<AdminClient> {
     admin_client_for(config, &config.base_url)
 }
 
@@ -160,19 +160,19 @@ fn admin_client_for(config: &ClientConfig, url: &str) -> anyhow::Result<AdminCli
 /// A tenacity policy: `stop_after_delay(max_delay) | stop_after_attempt(max_attempts)`,
 /// `wait_exponential(multiplier=1, min=1, max=10)`, `reraise=True`.
 #[derive(Debug, Clone, Copy)]
-pub struct RetryPolicy {
-    pub max_delay: Duration,
-    pub max_attempts: u32,
+pub(crate) struct RetryPolicy {
+    pub(crate) max_delay: Duration,
+    pub(crate) max_attempts: u32,
 }
 
 impl RetryPolicy {
     /// Seconds slept after the `attempt`-th failure (1-based).
-    pub fn wait(attempt: u32) -> Duration {
+    fn wait(attempt: u32) -> Duration {
         let exp = 2f64.powi(attempt as i32 - 1);
         Duration::from_secs_f64(exp.clamp(1.0, 10.0))
     }
 
-    pub async fn run<T, E, F, Fut>(&self, retryable: impl Fn(&E) -> bool, mut call: F) -> Result<T, E>
+    pub(crate) async fn run<T, E, F, Fut>(&self, retryable: impl Fn(&E) -> bool, mut call: F) -> Result<T, E>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, E>>,
@@ -195,12 +195,12 @@ impl RetryPolicy {
 }
 
 /// Per-attempt read timeout for admin ops (sized for `/pause`, which drains in-flight requests).
-pub const ADMIN_TIMEOUT_S: f64 = 300.0;
+pub(crate) const ADMIN_TIMEOUT_S: f64 = 300.0;
 /// `/update_weights` runs a collective receive across all DP workers.
-pub const UPDATE_WEIGHTS_TIMEOUT_S: f64 = 720.0;
+pub(crate) const UPDATE_WEIGHTS_TIMEOUT_S: f64 = 720.0;
 
 /// Admin ops retry transient server errors (5xx) and transport failures, never 4xx.
-pub fn is_retryable_admin_error(error: &reqwest::Error) -> bool {
+pub(crate) fn is_retryable_admin_error(error: &reqwest::Error) -> bool {
     match error.status() {
         Some(status) => status.as_u16() >= 500,
         None => !error.is_builder(),
@@ -208,7 +208,7 @@ pub fn is_retryable_admin_error(error: &reqwest::Error) -> bool {
 }
 
 /// LoRA loads also retry 404 (adapter files not yet visible on NFS) and 500.
-pub fn is_retryable_lora_error(error: &reqwest::Error) -> bool {
+pub(crate) fn is_retryable_lora_error(error: &reqwest::Error) -> bool {
     match error.status() {
         Some(status) => matches!(status.as_u16(), 404 | 500),
         None => !error.is_builder(),
@@ -217,17 +217,17 @@ pub fn is_retryable_lora_error(error: &reqwest::Error) -> bool {
 
 /// Query and JSON body of an admin POST.
 #[derive(Debug, Clone, Default)]
-pub struct AdminRequest {
-    pub query: Vec<(&'static str, String)>,
-    pub json: Option<Value>,
+pub(crate) struct AdminRequest {
+    pub(crate) query: Vec<(&'static str, String)>,
+    pub(crate) json: Option<Value>,
 }
 
 impl AdminRequest {
-    pub fn json(json: Value) -> Self {
+    pub(crate) fn json(json: Value) -> Self {
         Self { query: Vec::new(), json: Some(json) }
     }
 
-    pub fn query(query: Vec<(&'static str, String)>) -> Self {
+    pub(crate) fn query(query: Vec<(&'static str, String)>) -> Self {
         Self { query, json: None }
     }
 
@@ -243,20 +243,20 @@ impl AdminRequest {
 }
 
 /// One admin POST attempt with a bounded (per-attempt) timeout; non-2xx is an error.
-pub async fn admin_post_once(client: &AdminClient, path: &str, request: &AdminRequest, timeout_s: f64) -> Result<(), reqwest::Error> {
+pub(crate) async fn admin_post_once(client: &AdminClient, path: &str, request: &AdminRequest, timeout_s: f64) -> Result<(), reqwest::Error> {
     let builder = request.apply(client.post(path)).timeout(Duration::from_secs_f64(timeout_s));
     builder.send().await?.error_for_status()?;
     Ok(())
 }
 
 /// `_admin_post`: retried POST, total budget `2 * timeout_s` or 10 attempts.
-pub async fn admin_post(client: &AdminClient, path: &str, request: &AdminRequest, timeout_s: f64) -> Result<(), reqwest::Error> {
+pub(crate) async fn admin_post(client: &AdminClient, path: &str, request: &AdminRequest, timeout_s: f64) -> Result<(), reqwest::Error> {
     let policy = RetryPolicy { max_delay: Duration::from_secs_f64(2.0 * timeout_s), max_attempts: 10 };
     policy.run(is_retryable_admin_error, || admin_post_once(client, path, request, timeout_s)).await
 }
 
 /// `_post_all`: POST `path` to every engine concurrently; each engine's request time in seconds.
-pub async fn post_all(clients: &[AdminClient], path: &str, request: &AdminRequest, timeout_s: f64) -> Result<Vec<f64>, reqwest::Error> {
+pub(crate) async fn post_all(clients: &[AdminClient], path: &str, request: &AdminRequest, timeout_s: f64) -> Result<Vec<f64>, reqwest::Error> {
     futures::future::try_join_all(clients.iter().map(|client| async move {
         let start = Instant::now();
         admin_post(client, path, request, timeout_s).await?;

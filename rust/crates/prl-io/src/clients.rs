@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use indexmap::IndexMap;
 use prl_config::{ClientConfig, FrozenModelConfig, InferenceRole, PolicyClientConfig};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::dynamo::DynamoAdminPlane;
@@ -49,65 +49,25 @@ pub enum ClientType {
     ChatCompletions,
 }
 
-/// `verifiers.v1` client timeouts as dumped by pydantic.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct VfClientTimeout {
-    pub connect: Option<f64>,
-    pub read: Option<f64>,
-    pub write: Option<f64>,
-    pub pool: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct VfTrainExtras {
-    /// `renderers.RendererConfig` dump; null auto-resolves from the model.
-    pub renderer: Value,
-    pub renderer_model_name: Option<String>,
-    pub multiplex: u64,
-}
-
-/// `EvalClientConfig` / `TrainClientConfig` with `model_dump(mode="json")` field names.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct VfClientConfig {
-    pub base_url: String,
-    pub api_key_var: String,
-    pub headers: IndexMap<String, String>,
-    pub headers_from_env: IndexMap<String, String>,
-    pub timeout: VfClientTimeout,
-    #[serde(rename = "type")]
-    pub type_: &'static str,
-    #[serde(flatten)]
-    pub train: Option<VfTrainExtras>,
-}
-
-/// `setup_client`: the v1 client config env servers use to reach this endpoint.
-pub fn setup_client(
-    config: &ClientConfig,
-    client_type: ClientType,
-    renderer: Option<&Value>,
-    renderer_model_name: Option<&str>,
-) -> VfClientConfig {
+/// `setup_client`: the v1 client config (`EvalClientConfig` / `TrainClientConfig`
+/// `model_dump(mode="json")`) env servers use to reach this endpoint.
+fn setup_client(config: &ClientConfig, client_type: ClientType, renderer: Option<&Value>, renderer_model_name: Option<&str>) -> Value {
     let t = &config.timeout;
-    let (type_, train) = match client_type {
-        ClientType::Renderer => (
-            "train",
-            Some(VfTrainExtras {
-                renderer: renderer.cloned().unwrap_or(Value::Null),
-                renderer_model_name: renderer_model_name.map(str::to_owned),
-                multiplex: 256,
-            }),
-        ),
-        ClientType::ChatCompletions => ("eval", None),
-    };
-    VfClientConfig {
-        base_url: config.base_url.clone(),
-        api_key_var: config.api_key_var.clone(),
-        headers: config.headers.clone(),
-        headers_from_env: config.headers_from_env.clone(),
-        timeout: VfClientTimeout { connect: t.connect, read: t.read, write: t.write, pool: t.pool },
-        type_,
-        train,
+    let mut client = json!({
+        "base_url": config.base_url,
+        "api_key_var": config.api_key_var,
+        "headers": config.headers,
+        "headers_from_env": config.headers_from_env,
+        "timeout": {"connect": t.connect, "read": t.read, "write": t.write, "pool": t.pool},
+        "type": "eval",
+    });
+    if client_type == ClientType::Renderer {
+        client["type"] = "train".into();
+        client["renderer"] = renderer.cloned().unwrap_or(Value::Null);
+        client["renderer_model_name"] = renderer_model_name.into();
+        client["multiplex"] = 256.into();
     }
+    client
 }
 
 // ── data plane ────────────────────────────────────────────────────────────────
@@ -162,7 +122,7 @@ struct Logprob {
 
 /// One float per `prompt_logprobs` entry: the first listed token's logprob, 0.0 for the
 /// leading (context-free) token and missing values.
-pub fn parse_prompt_logprobs(body: &[u8]) -> Result<Vec<f64>> {
+fn parse_prompt_logprobs(body: &[u8]) -> Result<Vec<f64>> {
     let response: GenerateTokensResponse = serde_json::from_slice(body).context("invalid /inference/v1/generate response")?;
     Ok(response
         .prompt_logprobs
@@ -176,8 +136,9 @@ pub fn parse_prompt_logprobs(body: &[u8]) -> Result<Vec<f64>> {
 /// external API for frozen models).
 #[derive(Debug, Clone)]
 pub struct InferenceClient {
-    pub train_client: VfClientConfig,
-    pub eval_client: VfClientConfig,
+    /// v1 client configs for env-server requests.
+    pub train_client: Value,
+    pub eval_client: Value,
     pub model_name: String,
     scorer: PrefillScorer,
     /// Router admin client; only managed routed deployments (`admin_base_url` set) have one.
@@ -242,7 +203,7 @@ pub async fn connect_frozen_client(config: &FrozenModelConfig, renderer: Option<
 
 /// Wait until every client's `/health` responds (`check_health`). With `quiet`, the periodic
 /// waiting lines log at debug (engines fronted by a router).
-pub async fn check_health(clients: &[AdminClient], interval: u64, log_interval: u64, timeout: u64, quiet: bool) -> Result<()> {
+pub(crate) async fn check_health(clients: &[AdminClient], interval: u64, log_interval: u64, timeout: u64, quiet: bool) -> Result<()> {
     futures::future::try_join_all(clients.iter().map(|client| check_health_one(client, interval, log_interval, timeout, quiet))).await?;
     Ok(())
 }
@@ -283,7 +244,7 @@ async fn check_health_one(client: &AdminClient, interval: u64, log_interval: u64
 }
 
 /// Check that `model_name` is served by every client (`maybe_check_has_model`).
-pub async fn maybe_check_has_model(clients: &[AdminClient], model_name: &str, skip_model_check: bool) -> Result<()> {
+pub(crate) async fn maybe_check_has_model(clients: &[AdminClient], model_name: &str, skip_model_check: bool) -> Result<()> {
     if skip_model_check {
         return Ok(());
     }
@@ -318,7 +279,7 @@ pub async fn maybe_check_has_model(clients: &[AdminClient], model_name: &str, sk
 }
 
 /// One-shot readiness check of an endpoint with transient clients (`check_inference_ready`).
-pub async fn check_inference_ready(config: &ClientConfig, model_name: &str) -> Result<()> {
+async fn check_inference_ready(config: &ClientConfig, model_name: &str) -> Result<()> {
     StandardAdminPlane::new(config, None)?.wait_for_ready(model_name).await
 }
 
@@ -328,16 +289,16 @@ pub async fn check_inference_ready(config: &ClientConfig, model_name: &str) -> R
 /// match the GPU rank order of NCCL/NIXL initialization and the metrics role list.
 #[derive(Debug, Clone)]
 pub struct StandardAdminPlane {
-    pub clients: Vec<AdminClient>,
+    clients: Vec<AdminClient>,
     /// P/D role of each client; prefill engines pause before decode engines.
-    pub roles: Option<Vec<InferenceRole>>,
+    roles: Option<Vec<InferenceRole>>,
     router_clients: Vec<AdminClient>,
     skip_model_check: bool,
     wait_for_ready_timeout: u64,
 }
 
 impl StandardAdminPlane {
-    pub fn new(config: &ClientConfig, roles: Option<Vec<InferenceRole>>) -> Result<Self> {
+    fn new(config: &ClientConfig, roles: Option<Vec<InferenceRole>>) -> Result<Self> {
         let clients = setup_admin_clients(config)?;
         // When admin URLs bypass a router, also health-check the client-facing endpoint.
         let router_clients = if config.admin_base_url.as_ref().is_some_and(|urls| !urls.is_empty()) {
@@ -354,7 +315,7 @@ impl StandardAdminPlane {
         })
     }
 
-    pub async fn wait_for_ready(&self, model_name: &str) -> Result<()> {
+    async fn wait_for_ready(&self, model_name: &str) -> Result<()> {
         let timeout = self.wait_for_ready_timeout;
         tokio::try_join!(
             check_health(&self.clients, 1, 30, timeout, !self.router_clients.is_empty()),
@@ -363,7 +324,7 @@ impl StandardAdminPlane {
         maybe_check_has_model(&self.clients, model_name, self.skip_model_check).await
     }
 
-    pub async fn initialize_nccl(&self, host: &str, port: u16, timeout: u64, inference_world_size: u64) -> Result<()> {
+    async fn initialize_nccl(&self, host: &str, port: u16, timeout: u64, inference_world_size: u64) -> Result<()> {
         let n = self.clients.len() as u64;
         let gpus_per_server = inference_world_size / n;
         tracing::info!(
@@ -388,7 +349,7 @@ impl StandardAdminPlane {
         Ok(())
     }
 
-    pub async fn update_weights(
+    async fn update_weights(
         &self,
         weight_dir: Option<&Path>,
         step: u64,
@@ -400,7 +361,7 @@ impl StandardAdminPlane {
 
 /// `AdminPlane.update_weights`: pause (prefill first), `on_paused`, `/update_weights` on every
 /// engine, and resume even when the transfer failed.
-pub async fn update_engines(
+pub(crate) async fn update_engines(
     clients: &[AdminClient],
     roles: Option<&[InferenceRole]>,
     weight_dir: Option<&Path>,
@@ -424,7 +385,7 @@ pub async fn update_engines(
 
 /// `_pause_engines`: prefill engines first (a paused decode never pulls the KV blocks a
 /// draining prefill still holds), then the rest; `POST /pause?mode=keep&clear_cache=false`.
-pub async fn pause_engines(clients: &[AdminClient], step: u64, roles: Option<&[InferenceRole]>) -> Result<Vec<f64>> {
+async fn pause_engines(clients: &[AdminClient], step: u64, roles: Option<&[InferenceRole]>) -> Result<Vec<f64>> {
     tracing::debug!("Pausing inference engines to update weights to policy v{step}");
     if let Some(roles) = roles {
         anyhow::ensure!(roles.len() == clients.len(), "got {} roles for {} admin clients", roles.len(), clients.len());
@@ -444,7 +405,7 @@ pub async fn pause_engines(clients: &[AdminClient], step: u64, roles: Option<&[I
 }
 
 /// `_resume_engines`: idempotent, so transient failures are retried.
-pub async fn resume_engines(clients: &[AdminClient]) -> Result<Vec<f64>> {
+async fn resume_engines(clients: &[AdminClient]) -> Result<Vec<f64>> {
     let times = post_all(clients, "/resume", &AdminRequest::default(), crate::http::ADMIN_TIMEOUT_S).await?;
     tracing::debug!("All inference engines resumed");
     Ok(times)
@@ -507,12 +468,12 @@ impl AdminPlane {
 }
 
 /// Per-attempt and total bounds for `/load_lora_adapter`.
-pub const LORA_LOAD_READ_TIMEOUT_S: f64 = 30.0;
-pub const LORA_LOAD_TOTAL_TIMEOUT_S: f64 = 120.0;
+const LORA_LOAD_READ_TIMEOUT_S: f64 = 30.0;
+const LORA_LOAD_TOTAL_TIMEOUT_S: f64 = 120.0;
 
 /// Load a LoRA adapter on every engine (`load_lora_adapter`), retrying 404/500 (NFS propagation)
 /// and transport errors. The prefix cache is salted per weight version, so it is not reset.
-pub async fn load_lora_adapter(clients: &[AdminClient], lora_name: &str, lora_path: &Path, step: u64) -> Result<()> {
+pub(crate) async fn load_lora_adapter(clients: &[AdminClient], lora_name: &str, lora_path: &Path, step: u64) -> Result<()> {
     let policy = RetryPolicy { max_delay: Duration::from_secs_f64(LORA_LOAD_TOTAL_TIMEOUT_S), max_attempts: 10 };
     let path = lora_path.to_string_lossy().into_owned();
     futures::future::try_join_all(clients.iter().map(|client| {
@@ -534,7 +495,7 @@ pub async fn load_lora_adapter(clients: &[AdminClient], lora_name: &str, lora_pa
 }
 
 /// Configure every vLLM worker for NIXL + ModelExpress pulls (`init_nixl_broadcast`).
-pub async fn init_nixl_broadcast(
+pub(crate) async fn init_nixl_broadcast(
     clients: &[AdminClient],
     host: &str,
     port: u16,
@@ -560,4 +521,40 @@ pub async fn init_nixl_broadcast(
     }))
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renderer_client_matches_pydantic_dump() {
+        let config = ClientConfig {
+            base_url: "http://worker-a:8000/v1".into(),
+            api_key_var: "VLLM_API_KEY".into(),
+            headers: [("X-Test".to_string(), "test".to_string())].into_iter().collect(),
+            headers_from_env: [("X-Token".to_string(), "PROVIDER_TOKEN".to_string())].into_iter().collect(),
+            timeout: prl_config::ClientTimeoutConfig { connect: Some(30.0), read: Some(12.0), write: None, pool: None },
+            wait_for_ready_timeout: 3600,
+            skip_model_check: false,
+            admin_base_url: None,
+        };
+        let renderer = json!({"name": "qwen3-vl", "thinking_retention": null, "add_vision_id": false, "image_cache_max": 256});
+        // setup_client(config, "renderer", Qwen3VLRendererConfig(), "Qwen/Qwen3-VL-4B-Instruct").model_dump(mode="json")
+        let expected = json!({
+            "base_url": "http://worker-a:8000/v1", "api_key_var": "VLLM_API_KEY",
+            "headers": {"X-Test": "test"}, "headers_from_env": {"X-Token": "PROVIDER_TOKEN"},
+            "timeout": {"connect": 30.0, "read": 12.0, "write": null, "pool": null},
+            "type": "train", "renderer": renderer, "renderer_model_name": "Qwen/Qwen3-VL-4B-Instruct", "multiplex": 256,
+        });
+        assert_eq!(setup_client(&config, ClientType::Renderer, Some(&renderer), Some("Qwen/Qwen3-VL-4B-Instruct")), expected);
+        let chat = setup_client(&config, ClientType::ChatCompletions, None, None);
+        assert_eq!((chat["type"].as_str(), chat.get("renderer")), (Some("eval"), None));
+    }
+
+    #[test]
+    fn prompt_logprobs_take_the_first_token_and_zero_the_leading_one() {
+        let body = br#"{"prompt_logprobs": [null, {"11": {"logprob": -0.7}}, {"12": {"logprob": -0.3}, "5": {"logprob": -9.0}}]}"#;
+        assert_eq!(parse_prompt_logprobs(body).unwrap(), vec![0.0, -0.7, -0.3]);
+    }
 }
