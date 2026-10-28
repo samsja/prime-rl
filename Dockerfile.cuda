@@ -258,10 +258,18 @@ ENV HF_HUB_ETAG_TIMEOUT=500
 ENV HF_HUB_DOWNLOAD_TIMEOUT=300
 
 FROM python-builder AS application-builder
+# A Rust toolchain builds the orchestrator extension (packages/prime-rl-orch-rs); it stays in this stage.
+ARG RUST_VERSION=1.97.1
+RUN apt-get update && apt-get install -y --no-install-recommends curl build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION}
+ENV PATH="/root/.cargo/bin:$PATH" CARGO_TARGET_DIR=/build/cargo-target
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md /app/
 COPY src /app/src
 COPY packages /app/packages
+COPY rust /app/rust
 COPY deps /app/deps
 COPY configs /app/configs
 COPY examples /app/examples
@@ -271,6 +279,8 @@ ARG VERIFIERS_PRETEND_VERSION
 ARG RENDERERS_PRETEND_VERSION
 ARG PYDANTIC_CONFIG_PRETEND_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/build/cargo-target \
     eval "$(bash /app/scripts/docker-editable-pretend-versions.sh --shell /app)" \
     && uv run --no-project --python /usr/bin/python3.12 /build/docker_application.py /app /out/app
 
