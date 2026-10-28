@@ -1,0 +1,3 @@
+{"version":1,"trace_id":"trace00","info":{"effective":true,"ship":{"step":2,"time":1793176355.6395235}},"branches":[{"index":0,"advantages":[0.0,0.0,0.7,0.7]}]}
+{"version":1,"trace_id":"trace01","info":{"effective":true,"ship":{"step":2,"time":1793176355.6395235},"advantage":0.25},"branches":[{"index":0,"advantages":[0.0,0.0,0.7,0.7]}]}
+{"version":1,"trace_id":"trace02","info":{"effective":true,"ship":{"step":2,"time":1793176355.6395235}},"branches":[{"index":0,"advantages":[0.0,0.0,0.7,0.7]}]}

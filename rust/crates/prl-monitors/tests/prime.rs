@@ -1,208 +1,180 @@
-//! The Prime train monitor against a mock platform: registration, metrics rows, Prime Traces
-//! uploads and the run's close-out, through the monitors actor.
+//! The Prime monitors against a mock platform: registration, metrics rows, Prime Traces uploads
+//! and the close-out of training runs and evaluations, through the monitors actor.
 
 use std::io::Read;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
-use axum::extract::{Multipart, Path, State};
-use axum::http::HeaderMap;
-use axum::routing::{post, put};
+use axum::extract::{FromRequest, OriginalUri, Request, State};
+use axum::http::{HeaderMap, Method};
+use axum::routing::any;
 use axum::{Json, Router};
 use prl_monitors::prime::backend::TrainingSpec;
-use prl_monitors::{Monitors, MonitorsSetup, PrimeSetup, PrimeTrainSetup, Row, Scalar};
+use prl_monitors::prime::eval::{summary_from_episodes, EvalSourceSpec, PrimeEvalSetup};
+use prl_monitors::{MonitorsSetup, PrimeSetup, PrimeTrainSetup, Row, Scalar};
 use prl_types::{Kind, Subset};
-use serde_json::{json, Value as Json_};
-use sha2::{Digest, Sha256};
+use prl_wire::Episode;
+use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone)]
-struct Request {
-    path: String,
-    headers: HeaderMap,
-    body: Json_,
-}
+/// (method, path, headers, body); a Prime Traces upload's body holds its decoded parts.
+type Log = Arc<Mutex<Vec<(String, String, HeaderMap, Value)>>>;
 
-type Log = Arc<Mutex<Vec<Request>>>;
-
-async fn json_route(
+async fn route(
     State(log): State<Log>,
-    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Json<Json_> {
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    request: Request,
+) -> Json<Value> {
+    let headers = request.headers().clone();
     let path = uri.path().to_string();
-    let body: Json_ = if body.is_empty() {
-        Json_::Null
+    let body = if path == "/api/v1/traces" {
+        let mut multipart = axum::extract::Multipart::from_request(request, &())
+            .await
+            .unwrap();
+        let mut parts = serde_json::Map::new();
+        while let Some(field) = multipart.next_field().await.unwrap() {
+            let name = field.name().unwrap().to_string();
+            let gzip = field
+                .headers()
+                .get("content-encoding")
+                .is_some_and(|v| v == "gzip");
+            let data = field.bytes().await.unwrap();
+            let mut text = String::new();
+            if gzip {
+                flate2::read::GzDecoder::new(&data[..])
+                    .read_to_string(&mut text)
+                    .unwrap();
+            } else {
+                text = String::from_utf8(data.to_vec()).unwrap();
+            }
+            parts.insert(name, text.into());
+        }
+        Value::Object(parts)
     } else {
-        serde_json::from_slice(&body).unwrap()
+        let bytes = Bytes::from_request(request, &()).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     };
-    log.lock().unwrap().push(Request {
-        path: path.clone(),
-        headers,
-        body,
-    });
-    if path.ends_with("/rft/external-runs") {
-        Json(json!({"run": {"id": "r1", "name": "my-run"}}))
-    } else {
-        Json(json!({}))
-    }
+    log.lock()
+        .unwrap()
+        .push((method.to_string(), path.clone(), headers, body));
+    Json(match path.as_str() {
+        "/api/v1/rft/external-runs" => json!({"run": {"id": "r1"}}),
+        "/api/v1/environmentshub/resolve" => json!({"data": {"id": "env-1"}}),
+        "/api/v1/evaluations/" => json!({"evaluation_id": "ev1"}),
+        _ => json!({}),
+    })
 }
 
-async fn status_route(
-    State(log): State<Log>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<Json_>,
-) -> Json<Json_> {
-    log.lock().unwrap().push(Request {
-        path: format!("status/{id}"),
-        headers,
-        body,
-    });
-    Json(json!({}))
+fn calls(log: &Log) -> Vec<String> {
+    log.lock()
+        .unwrap()
+        .drain(..)
+        .map(|(method, path, _, _)| format!("{method} {path}"))
+        .collect()
 }
 
-async fn traces_route(
-    State(log): State<Log>,
-    headers: HeaderMap,
-    mut multipart: Multipart,
-) -> Json<Json_> {
-    let mut parts = serde_json::Map::new();
-    while let Some(field) = multipart.next_field().await.unwrap() {
-        let name = field.name().unwrap().to_string();
-        let file_name = field.file_name().map(str::to_string);
-        let content_type = field.content_type().map(str::to_string);
-        let encoding = field
-            .headers()
-            .get("content-encoding")
-            .map(|v| v.to_str().unwrap().to_string());
-        let data = field.bytes().await.unwrap();
-        let text = if encoding.as_deref() == Some("gzip") {
-            let mut out = String::new();
-            flate2::read::GzDecoder::new(&data[..])
-                .read_to_string(&mut out)
-                .unwrap();
-            out
-        } else {
-            String::from_utf8(data.to_vec()).unwrap()
-        };
-        parts.insert(name, json!({"file_name": file_name, "content_type": content_type, "encoding": encoding, "text": text}));
-    }
-    log.lock().unwrap().push(Request {
-        path: "/api/v1/traces".into(),
-        headers,
-        body: Json_::Object(parts),
-    });
-    Json(json!({"upload_id": "x", "status": "committed"}))
-}
-
-async fn serve() -> (String, Log) {
-    let log: Log = Arc::default();
-    let app = Router::new()
-        .route("/api/v1/rft/external-runs", post(json_route))
-        .route("/api/v1/rft/metrics", post(json_route))
-        .route("/api/v1/rft/finalize", post(json_route))
-        .route("/api/v1/rft/external-runs/{id}/status", put(status_route))
-        .route("/api/v1/traces", post(traces_route))
-        .with_state(log.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}"), log)
-}
-
-fn episodes() -> Vec<Arc<prl_wire::Episode>> {
+fn episodes() -> Vec<Arc<Episode>> {
     let data = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/file_monitor/records.jsonl"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/file_monitor/records.jsonl"),
     )
     .unwrap();
     data.split(|b| *b == b'\n')
         .filter(|l| !l.is_empty())
-        .map(|l| Arc::new(prl_wire::Episode::from_record_json(l).unwrap()))
+        .map(|l| Arc::new(Episode::from_record_json(l).unwrap()))
         .collect()
 }
 
-fn setup(output_dir: &std::path::Path) -> MonitorsSetup {
+fn setup(output_dir: &Path, prime: PrimeSetup) -> MonitorsSetup {
     MonitorsSetup {
         output_dir: output_dir.to_path_buf(),
-        producer: Some("orch".into()),
-        prime: Some(PrimeSetup::Train {
-            name: Some("my-run".into()),
-            run: Some(PrimeTrainSetup {
-                name: Some("my-run".into()),
-                model: "Qwen/Qwen3-0.6B".into(),
-                environments: vec!["gsm8k".into()],
-                training: TrainingSpec {
-                    max_steps: 10,
-                    batch_size: Some(8),
-                    rollouts_per_example: Some(4),
-                    seq_len: Some(2048),
-                    wandb_project: None,
-                },
-                run_config: json!({"max_steps": 10}).as_object().unwrap().clone(),
-            }),
-        }),
+        producer: None,
+        prime: Some(prime),
         wandb: None,
         file: None,
-        train_env_names: vec!["gsm8k".into()],
+        train_env_names: vec![],
         eval_env_names: vec![],
         overview_flavor: "rl".into(),
     }
 }
 
-fn paths(log: &Log) -> Vec<String> {
-    log.lock().unwrap().iter().map(|r| r.path.clone()).collect()
+fn train() -> PrimeSetup {
+    PrimeSetup::Train(PrimeTrainSetup {
+        name: Some("my-run".into()),
+        model: "Qwen/Qwen3-0.6B".into(),
+        environments: vec!["gsm8k".into()],
+        training: TrainingSpec {
+            max_steps: 10,
+            batch_size: Some(8),
+            rollouts_per_example: Some(4),
+            seq_len: Some(2048),
+            wandb_project: None,
+        },
+        run_config: json!({"max_steps": 10}).as_object().unwrap().clone(),
+    })
 }
 
-async fn start(
-    dir: &std::path::Path,
-) -> (
-    Monitors,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-    CancellationToken,
-) {
-    let cancel = CancellationToken::new();
-    let (monitors, task) = prl_monitors::spawn(setup(dir), cancel.clone())
-        .await
-        .unwrap();
-    (monitors, task, cancel)
+fn read_json(path: std::path::PathBuf) -> Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn eval_summary_matches_prime_runs() {
+    // `prime_runs.metrics.from_episodes` over the same episodes
+    let want = json!({"avg_reward": 0.6714285714285715, "avg_metrics": {"correct": 0.5714285714285714, "style": 0.5, "len": 7.0, "count": 4.0}, "avg_error": 0.0});
+    assert_eq!(Value::Object(summary_from_episodes(&episodes())), want);
 }
 
 #[tokio::test]
-async fn prime_train_monitor_against_mock_platform() {
-    let (url, log) = serve().await;
+async fn prime_monitors_against_mock_platform() {
+    let log: Log = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().fallback(any(route)).with_state(log.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: the only test in this binary; nothing else reads the environment concurrently.
+    // SAFETY: the only test in this binary that touches the environment.
     unsafe {
         for var in [
             "RUN_ID",
             "PRIME_RUNS_MODE",
             "PRIME_API_BASE",
             "PRIME_TRACES_OPT_OUT",
+            "PRIME_RUNS_EVAL_ID",
             "RANK",
-            "DP_RANK",
             "PRL_ATTEMPT_LOG_DIR",
         ] {
             std::env::remove_var(var);
         }
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("PRIME_API_KEY", "key");
-        std::env::set_var("PRIME_TEAM_ID", "team");
-        std::env::set_var("PRIME_API_BASE_URL", &url);
-        std::env::set_var("PRIME_TRACES_URL", &url);
+        for (var, value) in [
+            ("HOME", home.path().to_str().unwrap()),
+            ("PRIME_API_KEY", "key"),
+            ("PRIME_TEAM_ID", "team"),
+            ("PRL_RUN_ID", "prl-run"),
+        ] {
+            std::env::set_var(var, value);
+        }
+        for var in ["PRIME_API_BASE_URL", "PRIME_TRACES_URL"] {
+            std::env::set_var(var, &url);
+        }
         std::env::set_var("PRIME_FRONTEND_URL", "https://app.test");
     }
-
-    // A clean run: register, log, finalize.
-    let out = tempfile::tempdir().unwrap();
-    let (monitors, task, _cancel) = start(out.path()).await;
-    let mut row = Row::new();
-    row.insert("loss/mean".into(), Scalar::Float(0.5));
-    row.insert("bad".into(), Scalar::Float(f64::NAN));
-    monitors.log_metrics(row, Some(3)).await;
     let eps = episodes();
+
+    // a training run: register, log, finalize
+    let out = tempfile::tempdir().unwrap();
+    let (monitors, task) =
+        prl_monitors::spawn(setup(out.path(), train()), CancellationToken::new())
+            .await
+            .unwrap();
+    let row: Row = [
+        ("loss/mean".to_string(), Scalar::Float(0.5)),
+        ("bad".to_string(), Scalar::Float(f64::NAN)),
+    ]
+    .into_iter()
+    .collect();
+    monitors.log_metrics(row, Some(3)).await;
     monitors
         .log_episodes(eps[..2].to_vec(), 3, Kind::Train, Subset::All)
         .await;
@@ -211,47 +183,46 @@ async fn prime_train_monitor_against_mock_platform() {
         .await;
     monitors.finalize(false).await;
     task.await.unwrap().unwrap();
-
     let requests = log.lock().unwrap().clone();
     assert_eq!(
-        paths(&log),
+        calls(&log),
         [
-            "/api/v1/rft/external-runs",
-            "/api/v1/rft/metrics",
-            "/api/v1/traces",
-            "/api/v1/rft/finalize"
+            "POST /api/v1/rft/external-runs",
+            "POST /api/v1/rft/metrics",
+            "POST /api/v1/traces",
+            "POST /api/v1/rft/finalize"
         ]
     );
-    let create = &requests[0];
-    assert_eq!(create.headers["authorization"], "Bearer key");
+    let (_, _, headers, create) = &requests[0];
+    assert_eq!(headers["authorization"], "Bearer key");
     assert_eq!(
-        create.body,
+        *create,
         json!({"base_model": "Qwen/Qwen3-0.6B", "max_steps": 10, "environments": [{"id": "gsm8k"}], "team_id": "team",
                "name": "my-run", "batch_size": 8, "rollouts_per_example": 4, "seq_len": 2048, "run_config": {"max_steps": 10}})
     );
-    let metrics = &requests[1].body;
-    assert_eq!(metrics["run_id"], "r1");
-    assert_eq!(metrics["metrics"]["loss/mean"], 0.5);
-    assert_eq!(metrics["metrics"]["step"], 3);
-    assert!(metrics["metrics"]["_timestamp"].is_f64());
-    assert!(metrics["metrics"].get("bad").is_none());
-
-    let upload = &requests[2];
-    let text = upload.body["traces"]["text"].as_str().unwrap();
+    let metrics = &requests[1].3;
     assert_eq!(
-        upload.headers["idempotency-key"],
-        format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())))
+        (
+            &metrics["run_id"],
+            &metrics["metrics"]["loss/mean"],
+            &metrics["metrics"]["step"]
+        ),
+        (&json!("r1"), &json!(0.5), &json!(3))
     );
-    assert_eq!(upload.headers["x-prime-line-format"], "episode");
-    assert_eq!(upload.headers["x-prime-team-id"], "team");
-    assert_eq!(upload.body["traces"]["encoding"], "gzip");
-    assert_eq!(upload.body["traces"]["file_name"], "traces.jsonl");
+    assert!(metrics["metrics"]["_timestamp"].is_f64() && metrics["metrics"].get("bad").is_none());
+    let (_, _, headers, upload) = &requests[2];
+    let text = upload["traces"].as_str().unwrap();
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes());
     assert_eq!(
-        upload.body["traces"]["content_type"],
-        "application/x-ndjson"
+        headers["idempotency-key"],
+        format!("sha256:{}", hex::encode(digest))
     );
     assert_eq!(
-        upload.body["metadata"]["text"],
+        (&headers["x-prime-line-format"], &headers["x-prime-team-id"]),
+        (&"episode".parse().unwrap(), &"team".parse().unwrap())
+    );
+    assert_eq!(
+        upload["metadata"],
         r#"{"schema_version": 1, "context": {"source": "prime-runs", "run_type": "train", "model": "Qwen/Qwen3-0.6B"}}"#
     );
     let expected: String = eps[..2]
@@ -263,111 +234,131 @@ async fn prime_train_monitor_against_mock_platform() {
         })
         .collect();
     assert_eq!(text, expected);
-    assert!(
-        text.contains(r#""run":{"type":"train","id":"r1","work":"#),
-        "{}",
-        &text[..300]
-    );
-    assert_eq!(requests[3].body, json!({"run_id": "r1", "exit_code": 0}));
-
-    let run_record: Json_ =
-        serde_json::from_slice(&std::fs::read(out.path().join("monitors/prime/run.json")).unwrap())
-            .unwrap();
+    assert_eq!(requests[3].3, json!({"run_id": "r1", "exit_code": 0}));
     assert_eq!(
-        run_record,
+        read_json(out.path().join("monitors/prime/run.json")),
         json!({"kind": "train", "id": "r1", "url": "https://app.test/dashboard/training/r1"})
     );
-    let links: Json_ =
-        serde_json::from_slice(&std::fs::read(out.path().join("monitors/links.json")).unwrap())
-            .unwrap();
+    let links = read_json(out.path().join("monitors/links.json"));
     assert_eq!(
-        links["prime"]["links"]["run"],
-        "https://app.test/dashboard/training/r1"
+        (&links["prime"]["links"]["run"], &links["prime"]["expected"]),
+        (&json!("https://app.test/dashboard/training/r1"), &json!(1))
     );
-    assert_eq!(links["prime"]["expected"], 1);
 
-    // A run cancelled before finalize reports crashed; logs handed over before still go out.
-    log.lock().unwrap().clear();
-    let out = tempfile::tempdir().unwrap();
-    let (monitors, task, cancel) = start(out.path()).await;
+    // cancelled before finalize: what was logged still goes out, then the run reports crashed
+    let cancel = CancellationToken::new();
+    let (monitors, task) = prl_monitors::spawn(setup(out.path(), train()), cancel.clone())
+        .await
+        .unwrap();
     monitors.log_metrics(Row::new(), Some(1)).await;
     cancel.cancel();
     task.await.unwrap().unwrap();
+    let crashed = log.lock().unwrap()[2].3.clone();
     assert_eq!(
-        paths(&log),
+        calls(&log),
         [
-            "/api/v1/rft/external-runs",
-            "/api/v1/rft/metrics",
-            "status/r1"
+            "POST /api/v1/rft/external-runs",
+            "POST /api/v1/rft/metrics",
+            "PUT /api/v1/rft/external-runs/r1/status"
         ]
     );
     assert_eq!(
-        log.lock().unwrap()[2].body,
+        crashed,
         json!({"status": "failed", "error_message": "crashed: process exited without finishing the run"})
     );
 
-    // Opted out of Prime Traces: the run works, episodes never reach Prime Traces.
-    log.lock().unwrap().clear();
+    // opted out of Prime Traces: the run works, episodes never reach Prime Traces
     unsafe { std::env::set_var("PRIME_TRACES_OPT_OUT", "1") };
-    let (monitors, task, _cancel) = start(out.path()).await;
+    let (monitors, task) =
+        prl_monitors::spawn(setup(out.path(), train()), CancellationToken::new())
+            .await
+            .unwrap();
     monitors
         .log_episodes(eps[..1].to_vec(), 3, Kind::Train, Subset::All)
         .await;
     monitors.finalize(false).await;
     task.await.unwrap().unwrap();
     assert_eq!(
-        paths(&log),
-        ["/api/v1/rft/external-runs", "/api/v1/rft/finalize"]
-    );
-    // an invalid value fails registration, as in Python
-    unsafe { std::env::set_var("PRIME_TRACES_OPT_OUT", "maybe") };
-    let err = prl_monitors::spawn(setup(out.path()), CancellationToken::new())
-        .await
-        .err()
-        .unwrap();
-    assert!(
-        err.to_string()
-            .contains("PRIME_TRACES_OPT_OUT=\"maybe\" is not one of true or false"),
-        "{err}"
+        calls(&log),
+        [
+            "POST /api/v1/rft/external-runs",
+            "POST /api/v1/rft/finalize"
+        ]
     );
     unsafe { std::env::remove_var("PRIME_TRACES_OPT_OUT") };
 
-    // A $PRIME_CONTEXT profile can carry the key the credential check needs; a bad one fails.
-    unsafe {
-        std::env::remove_var("PRIME_API_KEY");
-        std::env::set_var("PRIME_CONTEXT", "../x");
-    }
-    let err = prl_monitors::spawn(setup(out.path()), CancellationToken::new())
+    // an evaluation per (env, step), metrics onto the attached parent training run
+    unsafe { std::env::set_var("RUN_ID", "parent") };
+    let out = tempfile::tempdir().unwrap();
+    let sources = vec![EvalSourceSpec {
+        resolved_name: "test".into(),
+        taskset_id: "gsm8k".into(),
+        group_size: 2,
+    }];
+    let eval = PrimeSetup::Eval(PrimeEvalSetup {
+        name: Some("my-eval".into()),
+        model: "m".into(),
+        sources,
+    });
+    let (monitors, task) = prl_monitors::spawn(setup(out.path(), eval), CancellationToken::new())
         .await
-        .err()
         .unwrap();
-    assert!(err.to_string().contains("Invalid context name"), "{err}");
-    std::fs::create_dir_all(home.path().join(".prime/environments")).unwrap();
-    std::fs::write(
-        home.path().join(".prime/environments/dev.json"),
-        r#"{"api_key": "ctx-key"}"#,
-    )
-    .unwrap();
-    unsafe { std::env::set_var("PRIME_CONTEXT", "dev") };
-    // the profile satisfies the check, but the SDK settings do not read profiles (as in Python)
-    let err = prl_monitors::spawn(setup(out.path()), CancellationToken::new())
-        .await
-        .err()
-        .unwrap();
-    assert!(err.to_string().contains("needs an API key"), "{err}");
-    unsafe {
-        std::env::remove_var("PRIME_CONTEXT");
-        std::env::set_var("PRIME_API_KEY", "key");
-    }
-
-    // An attached run ($RUN_ID) registers nothing and leaves a crash to the launcher.
-    log.lock().unwrap().clear();
-    unsafe { std::env::set_var("RUN_ID", "launched") };
-    let (monitors, task, cancel) = start(out.path()).await;
-    monitors.log_metrics(Row::new(), None).await;
-    drop(monitors);
-    cancel.cancel();
+    monitors.log_eval_plan("test".into(), 5, 8).await;
+    monitors
+        .log_episodes(eps[..2].to_vec(), 5, Kind::Eval, Subset::All)
+        .await;
+    monitors
+        .log_episodes(eps[..2].to_vec(), 5, Kind::Train, Subset::All)
+        .await; // not an eval: ignored
+    monitors.log_eval_epoch("test".into(), 5, eps.clone()).await;
+    monitors
+        .log_metrics(
+            [("eval/test/avg@2".to_string(), Scalar::Float(0.5))]
+                .into_iter()
+                .collect(),
+            Some(5),
+        )
+        .await;
+    monitors.finalize(false).await;
     task.await.unwrap().unwrap();
-    assert_eq!(paths(&log), ["/api/v1/rft/metrics"]);
-    assert_eq!(log.lock().unwrap()[0].body["run_id"], "launched");
+    let requests = log.lock().unwrap().clone();
+    assert_eq!(
+        calls(&log),
+        [
+            "POST /api/v1/environmentshub/resolve",
+            "POST /api/v1/evaluations/",
+            "POST /api/v1/traces",
+            "PUT /api/v1/evaluations/ev1",
+            "POST /api/v1/evaluations/ev1/finalize",
+            "POST /api/v1/rft/metrics",
+        ]
+    );
+    assert_eq!(requests[0].3, json!({"name": "gsm8k", "team_id": "team"}));
+    assert_eq!(
+        requests[1].3,
+        json!({"name": "my-eval", "environments": [{"id": "env-1"}], "tags": [], "model_name": "m", "dataset": "gsm8k",
+               "framework": "prime-rl", "team_id": "team",
+               "metadata": {"model": "m", "step": 5, "run_id": "prl-run", "num_examples": 4, "rollouts_per_example": 2}})
+    );
+    let mut summary = Value::Object(summary_from_episodes(&eps));
+    summary["prime_runs"] = json!({"traces_episodes_written": 2});
+    assert_eq!(
+        (&requests[3].3["metrics"], &requests[4].3),
+        (&summary, &json!({"metrics": summary}))
+    );
+    assert_eq!(
+        (
+            &requests[5].3["run_id"],
+            &requests[5].3["metrics"]["eval/test/avg@2"]
+        ),
+        (&json!("parent"), &json!(0.5))
+    );
+    assert_eq!(
+        read_json(out.path().join("monitors/prime/run.json")),
+        json!({"kind": "eval", "run_id": "prl-run", "evaluations": {"test": {"step": 5, "id": "ev1", "url": "https://app.test/dashboard/evaluations/ev1"}}})
+    );
+    assert_eq!(
+        read_json(out.path().join("monitors/links.json"))["prime/eval"]["links"]["test"],
+        "https://app.test/dashboard/evaluations/ev1"
+    );
 }

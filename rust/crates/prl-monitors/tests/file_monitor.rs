@@ -1,127 +1,121 @@
-//! The Rust file monitor against the Python one: same inputs, byte-identical outputs
-//! (fixtures from `tests/fixtures/gen_file_monitor.py`).
+//! The Rust file monitor against the Python one: the same inputs give byte-identical outputs.
+//! `tests/fixtures/file_monitor` holds the inputs and the tree the Python `FileMonitor` wrote
+//! for them (chunk size 8000, so the stream rolls and seals).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use prl_monitors::file::{FileMonitor, FileMonitorConfig};
-use prl_monitors::{LiveEvent, Row, Scalar};
-use prl_types::{Kind, Subset};
-use prl_wire::Value;
+use prl_monitors::file::FileMonitor;
+use prl_monitors::{FileMonitorConfig, LiveEvent, Row, Scalar};
+use prl_types::Subset;
+use prl_wire::{Episode, Value};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/file_monitor")
 }
 
-fn json_lines(name: &str) -> Vec<(Vec<u8>, Value)> {
+fn lines(name: &str) -> Vec<Vec<u8>> {
     fs::read(fixtures().join(name))
         .unwrap()
         .split(|b| *b == b'\n')
         .filter(|l| !l.is_empty())
-        .map(|l| (l.to_vec(), serde_json::from_slice(l).unwrap()))
+        .map(<[u8]>::to_vec)
         .collect()
+}
+
+fn episodes() -> Vec<Arc<Episode>> {
+    lines("records.jsonl")
+        .iter()
+        .map(|l| Arc::new(Episode::from_record_json(l).unwrap()))
+        .collect()
+}
+
+fn config(chunk_bytes: u64) -> FileMonitorConfig {
+    FileMonitorConfig {
+        path: "metrics.jsonl".into(),
+        chunk_bytes,
+        compress: true,
+        float_decimals: Some(4),
+    }
 }
 
 fn live_events() -> Vec<LiveEvent> {
-    let raw =
+    let events =
         prl_wire::value::from_msgpack(&fs::read(fixtures().join("live_events.msgpack")).unwrap())
             .unwrap();
-    raw.into_array()
+    events
+        .into_array()
         .unwrap()
         .into_iter()
         .map(|event| {
-            let s = |k: &str| event.get(k).and_then(Value::as_str).map(str::to_string);
-            if let Some(id) = s("done") {
-                LiveEvent::Done(id)
-            } else if let Some(id) = s("dispatched") {
-                LiveEvent::Dispatched(id)
-            } else if let Some(id) = s("pending") {
+            let field = |k: &str| event.get(k).cloned().unwrap_or_default();
+            let id = |k: &str| event.get(k).and_then(Value::as_str).map(str::to_string);
+            if let Some(trace) = id("done") {
+                LiveEvent::Done(trace)
+            } else if let Some(dispatch_id) = id("dispatched") {
+                LiveEvent::Dispatched(dispatch_id)
+            } else if let Some(dispatch_id) = id("pending") {
                 LiveEvent::Pending {
-                    id,
-                    dispatch: event.get("dispatch").unwrap().clone(),
+                    id: dispatch_id,
+                    dispatch: field("dispatch"),
                 }
             } else {
                 LiveEvent::Delta {
-                    delta: event.get("delta").unwrap().clone(),
-                    dispatch: event.get("dispatch").unwrap().clone(),
+                    delta: field("delta"),
+                    dispatch: field("dispatch"),
                 }
             }
         })
         .collect()
 }
 
-/// Every file under `dir`, relative path -> bytes.
-fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut out = Vec::new();
+/// Every file under `dir`: relative path -> bytes, with each metrics row's wall time blanked.
+fn tree(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for entry in fs::read_dir(&d).unwrap() {
-            let path = entry.unwrap().path();
+        for path in fs::read_dir(&d).unwrap().map(|e| e.unwrap().path()) {
             if path.is_dir() {
                 stack.push(path);
-            } else {
-                out.push((
-                    path.strip_prefix(dir).unwrap().to_path_buf(),
-                    fs::read(&path).unwrap(),
-                ));
+                continue;
             }
+            let mut text = String::from_utf8_lossy(&fs::read(&path).unwrap()).into_owned();
+            if path.ends_with("metrics.jsonl") {
+                text = text
+                    .lines()
+                    .map(|line| {
+                        let start = line.find("\"time\": ").unwrap() + 8;
+                        format!(
+                            "{}T{}\n",
+                            &line[..start],
+                            &line[start + line[start..].find(',').unwrap()..]
+                        )
+                    })
+                    .collect();
+            }
+            files.push((path.strip_prefix(dir).unwrap().to_path_buf(), text));
         }
     }
-    out.sort();
-    out
-}
-
-/// metrics.jsonl with each row's `"time": <float>` blanked: wall time differs between runs.
-fn without_time(data: &[u8]) -> String {
-    String::from_utf8(data.to_vec())
-        .unwrap()
-        .lines()
-        .map(|line| {
-            let start = line.find("\"time\": ").unwrap() + 8;
-            let end = start + line[start..].find(',').unwrap();
-            format!("{}T{}\n", &line[..start], &line[end..])
-        })
-        .collect()
-}
-
-fn episodes() -> Vec<Arc<prl_wire::Episode>> {
-    json_lines("records.jsonl")
-        .into_iter()
-        .map(|(line, _)| Arc::new(prl_wire::Episode::from_record_json(&line).unwrap()))
-        .collect()
-}
-
-#[test]
-fn records_round_trip() {
-    for ((line, _), episode) in json_lines("records.jsonl").into_iter().zip(episodes()) {
-        assert_eq!(episode.to_json(Some(4)), line);
-    }
+    files.sort();
+    files
 }
 
 #[test]
 fn file_monitor_matches_python() {
-    let records = episodes();
-    let updates: Vec<Value> = json_lines("updates.jsonl")
-        .into_iter()
-        .map(|(_, u)| u)
+    let episodes = episodes();
+    let updates: Vec<Value> = lines("updates.jsonl")
+        .iter()
+        .map(|l| serde_json::from_slice(l).unwrap())
         .collect();
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("run");
-    let config = FileMonitorConfig {
-        chunk_bytes: 8000,
-        ..Default::default()
-    };
-    let mut monitor = FileMonitor::init(config, &out, Some("orch".into())).unwrap();
+    let mut monitor = FileMonitor::init(config(8000), &out, Some("orch".into())).unwrap();
+    monitor.log_episodes(&episodes[..4], Subset::All).unwrap();
     monitor
-        .log_episodes(&records[..4], 2, Kind::Train, Subset::All)
+        .log_episodes(&episodes[..2], Subset::Effective)
         .unwrap();
-    monitor
-        .log_episodes(&records[..2], 2, Kind::Train, Subset::Effective)
-        .unwrap();
-    monitor
-        .log_episodes(&records[4..], 3, Kind::Eval, Subset::All)
-        .unwrap();
+    monitor.log_episodes(&episodes[4..], Subset::All).unwrap();
     monitor.log_annotations(&updates).unwrap();
     monitor.log_live(&live_events()).unwrap();
     monitor.log_eval_plan("gsm8k", 2, 64).unwrap();
@@ -151,61 +145,29 @@ fn file_monitor_matches_python() {
         .unwrap();
     monitor.finalize().unwrap();
 
-    let want = tree(&fixtures().join("run"));
-    let got = tree(&out);
-    let names = |t: &[(PathBuf, Vec<u8>)]| t.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
-    assert_eq!(names(&got), names(&want));
+    let (got, want) = (tree(&out), tree(&fixtures().join("run")));
+    assert_eq!(
+        got.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        want.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
     for ((path, got), (_, want)) in got.iter().zip(&want) {
-        if path.ends_with("metrics.jsonl") {
-            assert_eq!(without_time(got), without_time(want));
-        } else {
-            assert!(
-                got == want,
-                "{} differs:\n got: {}\nwant: {}",
-                path.display(),
-                String::from_utf8_lossy(got),
-                String::from_utf8_lossy(want)
-            );
-        }
+        assert!(
+            got == want,
+            "{} differs:\n got: {got}\nwant: {want}",
+            path.display()
+        );
     }
-}
-
-#[test]
-fn relaunch_continues_index_numbering() {
-    let records = episodes();
-    let dir = tempfile::tempdir().unwrap();
-    for _ in 0..2 {
-        let mut monitor =
-            FileMonitor::init(FileMonitorConfig::default(), dir.path(), None).unwrap();
-        monitor
-            .log_episodes(&records[..2], 1, Kind::Train, Subset::All)
-            .unwrap();
-        monitor.finalize().unwrap();
-    }
-    let index =
-        fs::read_to_string(dir.path().join("monitors/file/traces/stream.index.jsonl")).unwrap();
-    let lines: Vec<i64> = index
-        .lines()
-        .map(|l| {
-            serde_json::from_str::<serde_json::Value>(l).unwrap()["line"]
-                .as_i64()
-                .unwrap()
-        })
-        .collect();
-    assert_eq!(lines, [1, 2, 3, 4]);
 }
 
 #[test]
 fn stamp_batch_matches_python() {
-    let episodes: Vec<prl_wire::Episode> = json_lines("records.jsonl")
-        .into_iter()
-        .map(|(line, _)| prl_wire::Episode::from_record_json(&line).unwrap())
-        .collect();
-    let want = json_lines("updates.jsonl");
-    let got = prl_monitors::annotations::stamp_batch(&episodes[..3], 2);
-    assert_eq!(got.len(), want.len());
-    for (mut update, (want_line, want_value)) in got.into_iter().zip(want) {
+    let episodes: Vec<Episode> = episodes().into_iter().map(Arc::unwrap_or_clone).collect();
+    let updates = prl_monitors::annotations::stamp_batch(&episodes[..3], 2);
+    let want = lines("updates.jsonl");
+    assert_eq!(updates.len(), want.len());
+    for (mut update, want) in updates.into_iter().zip(want) {
         // the ship time is wall time: take Python's
+        let want_value: Value = serde_json::from_slice(&want).unwrap();
         let time = want_value
             .get("info")
             .unwrap()
@@ -222,27 +184,29 @@ fn stamp_batch_matches_python() {
             .insert("time", time);
         assert_eq!(
             String::from_utf8(prl_wire::json::to_vec(&update)).unwrap(),
-            String::from_utf8(want_line).unwrap()
+            String::from_utf8(want).unwrap()
         );
     }
 }
 
 #[test]
-fn stamp_arrival_keeps_key_positions() {
-    let (line, _) = json_lines("records.jsonl").remove(1);
-    let mut episodes = vec![prl_wire::Episode::from_record_json(&line).unwrap()];
-    prl_monitors::annotations::stamp_arrival(&mut episodes, Kind::Eval, 7);
-    let info = &episodes[0].traces[0].info;
-    let keys: Vec<&str> = info.keys().map(String::as_str).collect();
-    assert_eq!(keys, ["advantage", "kind", "dispatch", "arrival"]);
-    assert_eq!(info["kind"].as_str(), Some("eval"));
-    assert_eq!(
-        info["dispatch"].get("step").and_then(Value::as_i64),
-        Some(1)
-    );
-    assert_eq!(
-        info["dispatch"].get("time").and_then(Value::as_f64),
-        Some(1001.0)
-    );
-    assert_eq!(info["arrival"].get("step").and_then(Value::as_i64), Some(7));
+fn relaunch_continues_index_numbering() {
+    let episodes = episodes();
+    let dir = tempfile::tempdir().unwrap();
+    for _ in 0..2 {
+        let mut monitor = FileMonitor::init(config(1 << 20), dir.path(), None).unwrap();
+        monitor.log_episodes(&episodes[..2], Subset::All).unwrap();
+        monitor.finalize().unwrap();
+    }
+    let index =
+        fs::read_to_string(dir.path().join("monitors/file/traces/stream.index.jsonl")).unwrap();
+    let lines: Vec<i64> = index
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["line"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(lines, [1, 2, 3, 4]);
 }
