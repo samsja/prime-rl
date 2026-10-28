@@ -329,6 +329,11 @@ impl MonitorsSetup {
     }
 }
 
+/// Python's `repr` of an optional string, for the config reprs in init log lines.
+fn py_repr(value: Option<&str>) -> String {
+    value.map_or("None".into(), |v| format!("'{v}'"))
+}
+
 /// Construct and initialize every configured monitor (only on rank 0), then start the actor.
 pub async fn spawn(
     setup: MonitorsSetup,
@@ -353,13 +358,19 @@ pub async fn spawn(
         let output_dir = setup.output_dir;
         match setup.prime {
             Some(PrimeSetup::Train(train)) => {
-                tracing::info!("Initializing prime monitor");
+                tracing::info!(
+                    "Initializing prime monitor (name={})",
+                    py_repr(train.name.as_deref())
+                );
                 monitors.push(Box::new(
                     prime::PrimeTrainMonitor::init(train, output_dir.clone()).await?,
                 ));
             }
             Some(PrimeSetup::Eval(eval)) => {
-                tracing::info!("Initializing prime monitor");
+                tracing::info!(
+                    "Initializing prime monitor (name={})",
+                    py_repr(eval.name.as_deref())
+                );
                 monitors.push(Box::new(
                     prime::eval::PrimeEvalMonitor::init(eval, output_dir.clone()).await?,
                 ));
@@ -380,7 +391,13 @@ pub async fn spawn(
             ));
         }
         if let Some(config) = setup.file {
-            tracing::info!("Initializing file monitor");
+            tracing::info!(
+                "Initializing file monitor (path=PosixPath({}) chunk_bytes={} compress={} float_decimals={})",
+                py_repr(config.path.to_str()),
+                config.chunk_bytes,
+                if config.compress { "True" } else { "False" },
+                config.float_decimals.map_or("None".into(), |d| d.to_string()),
+            );
             monitors.push(Box::new(
                 file::FileMonitorActor::init(config, output_dir, setup.producer).await?,
             ));
