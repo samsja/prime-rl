@@ -16,14 +16,12 @@ pydantic object directly through pyo3.
 - Outputs: same metric keys, same monitor outputs (wandb, prime platform, file traces), same checkpoint format
   (`progress.pt` stays `torch.load`-able), same console log lines.
 - Launcher: `uv run rl ...` is unchanged; the `orchestrator @ config.json` entrypoint runs the Rust orchestrator.
-  End-to-end parity is checked against a checkout of 8acab25e4 with `rust/tools/e2e_compare.py`.
 
 ## Layout
 
 ```
 rust/
   Cargo.toml                 workspace, members = ["crates/*"]
-  docs/specs/<area>.md       behavior inventory + Rust design, one per area
   crates/
     prl-config     pyo3 extraction of OrchestratorConfig / EvalConfig / SFTOnlineEvalConfig
     prl-wire       verifiers v1 wire types, msgpack + orjson-compatible codecs, ZMQ EnvClient, payload refs
@@ -36,7 +34,6 @@ rust/
                    periodic logger, supervisor (`prl_core::run`)
     prl-eval       `uv run eval` and online eval on the core actors
     prl-py         pyo3 extension module `prime_rl_orch_rs`
-  tools/, bench/   e2e parity compare, throughput benchmark
 packages/prime-rl-orch-rs/   maturin python package (uv workspace member) building prl-py
 ```
 
@@ -52,9 +49,11 @@ prl-eval -> prl-py`.
   from the live pydantic object at startup. Derived values (`resolved_name`, `env_addresses`, ...) are read off the
   Python object; sub-configs Rust only forwards are `model_dump`ed. There is no schema copy and no validation in
   Rust. A test extracts every config under `configs/` and `examples/`, so a renamed pydantic field fails CI.
-- The bridge (`PyBridge` in `rust_bridge.py`, see `docs/specs/boundary.md`) covers what has no Rust equivalent:
-  taskset loading, the W&B monitor, the NIXL agent, FLOP cost tables, and the opsd/echo renderer hooks. Calls run
-  on `spawn_blocking` with the GIL.
+- The bridge (`PyBridge` in `rust_bridge.py`) covers what has no Rust equivalent: taskset loading, the W&B
+  monitor, the NIXL agent, FLOP cost tables, and the opsd/echo renderer hooks. Calls take plain arguments, return
+  JSON `bytes`, and run on `spawn_blocking` with the GIL; a Python exception becomes an error with its traceback.
+- Python keeps its signal handlers: the main thread polls them while Rust runs, and a handler that raises
+  (Ctrl-C, a launcher's SIGTERM handler) cancels the run, then re-raises once Rust has stopped.
 - Everything else is native Rust: HTTP via `reqwest`, ZMQ via the `zmq` crate (vendored libzmq), HTTP server via
   `axum`.
 
@@ -101,7 +100,7 @@ exiting early fails the run (`_on_component_done` semantics). Draining starts in
 final batch (`dispatcher.drain()` returns the train cancellations directly). When the dispatcher reports
 `idle`, the supervisor stops it, lets the eval pipeline consume its closed channel, waits for the final
 broadcast, saves the final checkpoint, finalizes the monitors, and tears down within `SHUTDOWN_TIMEOUT`
-(300 s, then process exit). prl-py cancels a `shutdown` token on SIGINT.
+(300 s, then process exit).
 
 ## Working rules
 
