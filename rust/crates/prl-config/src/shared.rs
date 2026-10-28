@@ -75,23 +75,11 @@ pub struct ModelConfig {
     pub client: PolicyClientConfig,
 }
 
-/// `TokenizerConfig`. `name` and `trust_remote_code` are filled from the model by the
-/// config validator, so they are set in practice.
-#[derive(Debug, Clone, PartialEq, FromPyObject)]
-pub struct TokenizerConfig {
-    pub name: Option<String>,
-    pub trust_remote_code: Option<bool>,
-    /// Jinja2 template string or path to a template file.
-    pub chat_template: Option<String>,
-}
-
 /// `LogConfig`.
 #[derive(Debug, Clone, PartialEq, FromPyObject)]
 pub struct LogConfig {
     pub level: String,
-    pub vf_level: String,
     pub json_logging: bool,
-    pub log_data: bool,
     /// Seconds between periodic logs.
     pub interval: f64,
 }
@@ -186,8 +174,6 @@ pub enum WeightBroadcastConfig {
 }
 
 impl WeightBroadcastConfig {
-    pub const TAGS: &'static [&'static str] = &["filesystem", "nccl", "nixl"];
-
     /// The `type` tag.
     pub fn tag(&self) -> &'static str {
         match self {
@@ -213,7 +199,7 @@ impl<'py> FromPyObject<'py> for WeightBroadcastConfig {
             "filesystem" => obj.extract().map(Self::Filesystem),
             "nccl" => obj.extract().map(Self::Nccl),
             "nixl" => obj.extract().map(Self::Nixl),
-            other => Err(unknown_tag("WeightBroadcastConfig", other, Self::TAGS)),
+            other => Err(unknown_tag("WeightBroadcastConfig", other)),
         }
     }
 }
@@ -232,23 +218,12 @@ pub enum TransportConfig {
     Zmq(ZMQTransportConfig),
 }
 
-impl TransportConfig {
-    pub const TAGS: &'static [&'static str] = &["filesystem", "zmq"];
-
-    pub fn tag(&self) -> &'static str {
-        match self {
-            Self::Filesystem => "filesystem",
-            Self::Zmq(_) => "zmq",
-        }
-    }
-}
-
 impl<'py> FromPyObject<'py> for TransportConfig {
     fn extract_bound(obj: &Bound<'py, PyAny>) -> PyResult<Self> {
         match tag(obj, "type")?.as_str() {
             "filesystem" => Ok(Self::Filesystem),
             "zmq" => obj.extract().map(Self::Zmq),
-            other => Err(unknown_tag("TransportConfig", other, Self::TAGS)),
+            other => Err(unknown_tag("TransportConfig", other)),
         }
     }
 }

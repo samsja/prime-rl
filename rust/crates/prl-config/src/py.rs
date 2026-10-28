@@ -31,10 +31,8 @@ pub(crate) fn tag(obj: &Bound<'_, PyAny>, discriminator: &str) -> PyResult<Strin
     obj.getattr(discriminator)?.extract()
 }
 
-pub(crate) fn unknown_tag(union: &str, tag: &str, known: &[&str]) -> PyErr {
-    PyValueError::new_err(format!(
-        "unknown {union} {tag:?}, expected one of {known:?}"
-    ))
+pub(crate) fn unknown_tag(union: &str, tag: &str) -> PyErr {
+    PyValueError::new_err(format!("unknown {union} {tag:?}"))
 }
 
 /// A Rust enum for a pydantic `Literal[...]` of strings, extracted from the `str`.
@@ -47,18 +45,10 @@ macro_rules! str_enum {
         }
 
         impl $name {
-            pub const VALUES: &'static [&'static str] = &[$($value),+];
-
             pub fn as_str(&self) -> &'static str {
                 match self {
                     $(Self::$variant => $value),+
                 }
-            }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(self.as_str())
             }
         }
 
@@ -67,7 +57,7 @@ macro_rules! str_enum {
                 let value: String = obj.extract()?;
                 match value.as_str() {
                     $($value => Ok(Self::$variant),)+
-                    other => Err($crate::py::unknown_tag(stringify!($name), other, Self::VALUES)),
+                    other => Err($crate::py::unknown_tag(stringify!($name), other)),
                 }
             }
         }

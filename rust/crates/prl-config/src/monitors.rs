@@ -8,11 +8,6 @@ use pyo3::prelude::*;
 #[derive(Debug, Clone, PartialEq, FromPyObject)]
 pub struct WandbMonitorConfig {
     pub project: String,
-    pub entity: Option<String>,
-    pub name: Option<String>,
-    pub group: Option<String>,
-    pub tags: Option<Vec<String>>,
-    pub offline: bool,
 }
 
 /// `FileMonitorConfig`: metrics JSONL and episode trace streams under the output dir.

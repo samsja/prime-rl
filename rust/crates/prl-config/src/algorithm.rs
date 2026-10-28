@@ -47,7 +47,7 @@ impl<'py> FromPyObject<'py> for ModelReference {
             let value: String = obj.extract()?;
             return match value.as_str() {
                 "policy" => Ok(Self::Policy),
-                other => Err(unknown_tag("ModelReference", other, &["policy"])),
+                other => Err(unknown_tag("ModelReference", other)),
             };
         }
         Ok(Self::Frozen(Box::new(obj.extract()?)))
@@ -100,11 +100,7 @@ impl<'py> FromPyObject<'py> for LengthPenaltyConfig {
         match tag(obj, "type")?.as_str() {
             "linear" => obj.extract().map(Self::Linear),
             "linear-subagent" => obj.extract().map(Self::LinearSubagent),
-            other => Err(unknown_tag(
-                "LengthPenaltyConfig",
-                other,
-                &["linear", "linear-subagent"],
-            )),
+            other => Err(unknown_tag("LengthPenaltyConfig", other)),
         }
     }
 }
@@ -205,18 +201,6 @@ pub enum AlgoParams {
 }
 
 impl AlgoParams {
-    pub const TAGS: &'static [&'static str] = &[
-        "grpo",
-        "echo",
-        "max_rl",
-        "rae",
-        "hierarchical_grpo",
-        "opd",
-        "opsd",
-        "sft",
-        "debug",
-    ];
-
     /// The algorithm's `type`.
     pub fn tag(&self) -> &'static str {
         match self {
@@ -245,7 +229,7 @@ impl<'py> FromPyObject<'py> for AlgoParams {
             "opsd" => obj.extract().map(Self::Opsd),
             "sft" => Ok(Self::Sft),
             "debug" => obj.extract().map(Self::Debug),
-            other => Err(unknown_tag("AlgoConfig", other, Self::TAGS)),
+            other => Err(unknown_tag("AlgoConfig", other)),
         }
     }
 }

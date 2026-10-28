@@ -11,7 +11,7 @@ use crate::monitors::TrainMonitorsConfig;
 use crate::py::{model_dump, model_dump_exclude_none, str_enum, tag, to_json, unknown_tag};
 use crate::shared::{
     CheckpointConfig, ControlConfig, GCConfig, HeartbeatConfig, LogConfig, ModelConfig,
-    ResumeConfig, TokenizerConfig, TransportConfig, WeightBroadcastConfig,
+    ResumeConfig, TransportConfig, WeightBroadcastConfig,
 };
 
 str_enum!(
@@ -83,11 +83,7 @@ impl<'py> FromPyObject<'py> for TaskSamplerConfig {
         match tag(obj, "type")?.as_str() {
             "standard" => Ok(Self::Standard),
             "difficulty_pool" => obj.extract().map(Self::DifficultyPool),
-            other => Err(unknown_tag(
-                "TaskSamplerConfig",
-                other,
-                &["standard", "difficulty_pool"],
-            )),
+            other => Err(unknown_tag("TaskSamplerConfig", other)),
         }
     }
 }
@@ -109,11 +105,7 @@ impl<'py> FromPyObject<'py> for AdmissionGateConfig {
     fn extract_bound(obj: &Bound<'py, PyAny>) -> PyResult<Self> {
         match tag(obj, "type")?.as_str() {
             "advantage_range" => obj.extract().map(Self::AdvantageRange),
-            other => Err(unknown_tag(
-                "AdmissionGateConfig",
-                other,
-                &["advantage_range"],
-            )),
+            other => Err(unknown_tag("AdmissionGateConfig", other)),
         }
     }
 }
@@ -186,7 +178,6 @@ pub struct ConcurrencyConfig {
 pub struct OrchestratorConfig {
     pub model: ModelConfig,
     pub train: TrainConfig,
-    pub tokenizer: TokenizerConfig,
     /// `renderers.RendererConfig` dump (`name` plus the renderer's options), forwarded to
     /// the env server with the policy's renderer client.
     pub renderer: Value,
@@ -219,8 +210,6 @@ pub struct OrchestratorConfig {
     /// `serve.address`, or None when the launcher spawns the server (which publishes its
     /// address file). Train sources first, then eval.
     pub env_addresses: IndexMap<(Split, String), Option<String>>,
-    /// `OrchestratorConfig.any_policy_sourced`.
-    pub any_policy_sourced: bool,
     /// The whole config as `model_dump(mode="json")`: the run config monitors upload.
     pub dump: Value,
     /// The whole config as `model_dump(exclude_none=True, mode="json")`: the run config the
@@ -252,7 +241,6 @@ impl<'py> FromPyObject<'py> for OrchestratorConfig {
         Ok(Self {
             model: attr("model")?.extract()?,
             train: attr("train")?.extract()?,
-            tokenizer: attr("tokenizer")?.extract()?,
             renderer: model_dump(&attr("renderer")?)?,
             eval: attr("eval")?.extract()?,
             log: attr("log")?.extract()?,
@@ -279,7 +267,6 @@ impl<'py> FromPyObject<'py> for OrchestratorConfig {
             heartbeat: attr("heartbeat")?.extract()?,
             control: attr("control")?.extract()?,
             env_addresses: attr("env_addresses")?.extract()?,
-            any_policy_sourced: attr("any_policy_sourced")?.extract()?,
             dump: model_dump(obj)?,
             prime_run_config: model_dump_exclude_none(obj)?,
             reprs: ConfigReprs {
