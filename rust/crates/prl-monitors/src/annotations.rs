@@ -61,7 +61,7 @@ pub fn stamp_batch<'a>(episodes: impl IntoIterator<Item = &'a Episode>, step: u6
                     ))
                 })
                 .collect();
-            updates.push(make_update(&trace.id, Some(info), branches));
+            updates.push(make_update(&trace.id, info, branches));
         }
     }
     updates

@@ -14,7 +14,6 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
 tracing = { workspace = true }
 reqwest = { workspace = true, features = ["multipart"] }
@@ -29,10 +28,5 @@ libc = "0.2"
 httpdate = "1"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
-zstd = "0.13"
 axum = { workspace = true, features = ["multipart"] }
-flate2 = "1"
-sha2 = "0.10"
-hex = "0.4"

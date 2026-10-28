@@ -1,29 +1,33 @@
-//! The platform HTTP layer shared by the Prime monitors: settings (`prime_traces.core.Config`
-//! and `prime_runs.Config`), error mapping (`prime_traces.core.client.raise_for_response`), and
-//! the authenticated platform client with its per-call retry policy (`prime_runs._http`).
+//! The platform HTTP layer of the Prime monitors: settings (`prime_traces.core.Config` and
+//! `prime_runs.Config`), the error classification the SDK branches on, and the authenticated
+//! platform client with its retry policy (`prime_runs._http`).
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde_json::Value as Json;
 
-pub const DEFAULT_BASE_URL: &str = "https://api.primeintellect.ai";
-pub const DEFAULT_TRACES_URL: &str = "https://api.primeintellect.ai";
-pub const DEFAULT_FRONTEND_URL: &str = "https://app.primeintellect.ai";
+const DEFAULT_BASE_URL: &str = "https://api.primeintellect.ai";
 pub const USER_AGENT: &str = "prime-runs/0.1.4 prime-rl-rust";
-pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
-pub const PUBLIC_API_PATH: &str = "/api/v1";
-pub const INTERNAL_API_PATH: &str = "/api/internal";
-const BACKOFF_BASE_S: f64 = 1.0;
-const BACKOFF_CAP_S: f64 = 30.0;
-const RETRY_AFTER_CAP_S: f64 = 60.0;
+const MAX_ATTEMPTS: u32 = 5;
 
 /// Env vars, then `~/.prime/config.json`.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct Settings {
     file: serde_json::Map<String, Json>,
+}
+
+fn prime_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".prime")
+}
+
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 fn strip_api_v1(url: &str) -> String {
@@ -31,33 +35,20 @@ fn strip_api_v1(url: &str) -> String {
     url.strip_suffix("/api/v1").unwrap_or(url).to_string()
 }
 
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty())
-}
-
 impl Settings {
     pub fn load() -> Self {
-        let path = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
-            .join(".prime/config.json");
-        let file = std::fs::read(&path)
+        let file = std::fs::read(prime_dir().join("config.json"))
             .ok()
-            .and_then(|data| serde_json::from_slice::<Json>(&data).ok())
-            .and_then(|v| match v {
-                Json::Object(m) => Some(m),
-                _ => None,
-            })
+            .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_default();
         Settings { file }
     }
 
     /// `prime_sandboxes.Config`: the config file with the prime CLI's `$PRIME_CONTEXT` profile
-    /// (`~/.prime/environments/<context>.json`) laid over it. Only the monitors' credential
-    /// check reads it; the SDK settings (`load`) do not overlay the profile.
+    /// laid over it. Only the monitors' credential check reads it, as in Python.
     pub fn load_with_context() -> Result<Self, ApiError> {
         let mut settings = Settings::load();
-        let Some(context) = env_nonempty("PRIME_CONTEXT") else {
+        let Some(context) = env("PRIME_CONTEXT") else {
             return Ok(settings);
         };
         if context.to_lowercase() == "production" {
@@ -77,29 +68,25 @@ impl Settings {
                 "Invalid context name: {context:?}"
             )));
         }
-        let path = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
-            .join(".prime/environments")
+        let path = prime_dir()
+            .join("environments")
             .join(format!("{context}.json"));
-        if !path.exists() {
-            return Err(ApiError::Configuration(format!(
-                "Context file not found: {}",
-                path.display()
-            )));
+        let data = std::fs::read(&path).map_err(|_| {
+            ApiError::Configuration(format!("Context file not found: {}", path.display()))
+        })?;
+        match serde_json::from_slice(&data) {
+            Ok(Json::Object(overlay)) => settings.file.extend(overlay),
+            Ok(_) => {
+                return Err(ApiError::Configuration(format!(
+                    "Invalid context '{context}': expected a JSON object"
+                )))
+            }
+            Err(e) => {
+                return Err(ApiError::Configuration(format!(
+                    "Failed to load context '{context}': {e}"
+                )))
+            }
         }
-        let overlay = std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|data| serde_json::from_slice::<Json>(&data).map_err(|e| e.to_string()))
-            .map_err(|e| {
-                ApiError::Configuration(format!("Failed to load context '{context}': {e}"))
-            })?;
-        let Json::Object(overlay) = overlay else {
-            return Err(ApiError::Configuration(format!(
-                "Invalid context '{context}': expected a JSON object"
-            )));
-        };
-        settings.file.extend(overlay);
         Ok(settings)
     }
 
@@ -112,7 +99,7 @@ impl Settings {
     }
 
     pub fn api_key(&self) -> String {
-        env_nonempty("PRIME_API_KEY")
+        env("PRIME_API_KEY")
             .or_else(|| self.file_str("api_key"))
             .unwrap_or_default()
     }
@@ -120,45 +107,45 @@ impl Settings {
     /// An explicitly empty `$PRIME_TEAM_ID` means personal scope.
     pub fn team_id(&self) -> Option<String> {
         match std::env::var("PRIME_TEAM_ID") {
-            Ok(v) => Some(v).filter(|v| !v.is_empty()),
+            Ok(team) => Some(team).filter(|t| !t.is_empty()),
             Err(_) => self.file_str("team_id"),
         }
     }
 
     pub fn base_url(&self) -> String {
-        let url = env_nonempty("PRIME_API_BASE_URL")
-            .or_else(|| env_nonempty("PRIME_BASE_URL"))
-            .or_else(|| self.file_str("base_url"))
-            .unwrap_or_else(|| DEFAULT_BASE_URL.into());
-        strip_api_v1(&url)
+        let url = env("PRIME_API_BASE_URL")
+            .or_else(|| env("PRIME_BASE_URL"))
+            .or_else(|| self.file_str("base_url"));
+        strip_api_v1(&url.unwrap_or_else(|| DEFAULT_BASE_URL.into()))
     }
 
+    /// Never the base URL: only production serves Prime Traces on the API domain.
     pub fn traces_url(&self) -> String {
-        let url = env_nonempty("PRIME_TRACES_URL")
-            .or_else(|| self.file_str("traces_url"))
-            .unwrap_or_else(|| DEFAULT_TRACES_URL.into());
-        strip_api_v1(&url)
+        strip_api_v1(
+            &env("PRIME_TRACES_URL")
+                .or_else(|| self.file_str("traces_url"))
+                .unwrap_or_else(|| DEFAULT_BASE_URL.into()),
+        )
     }
 
     pub fn frontend_url(&self) -> String {
-        env_nonempty("PRIME_FRONTEND_URL")
-            .or_else(|| self.file_str("frontend_url"))
-            .unwrap_or_else(|| DEFAULT_FRONTEND_URL.into())
+        let url = env("PRIME_FRONTEND_URL").or_else(|| self.file_str("frontend_url"));
+        url.unwrap_or_else(|| "https://app.primeintellect.ai".into())
             .trim_end_matches('/')
             .to_string()
     }
 
     /// `$PRIME_TRACES_OPT_OUT` > config `traces_opt_out` > off.
     pub fn traces_opt_out(&self) -> Result<bool, ApiError> {
-        if let Some(v) = std::env::var("PRIME_TRACES_OPT_OUT")
+        if let Some(value) = std::env::var("PRIME_TRACES_OPT_OUT")
             .ok()
             .filter(|v| !v.trim().is_empty())
         {
-            return match v.trim().to_lowercase().as_str() {
+            return match value.trim().to_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => Ok(true),
                 "0" | "false" | "no" | "off" => Ok(false),
                 _ => Err(ApiError::Configuration(format!(
-                    "PRIME_TRACES_OPT_OUT={v:?} is not one of true or false"
+                    "PRIME_TRACES_OPT_OUT={value:?} is not one of true or false"
                 ))),
             };
         }
@@ -168,59 +155,25 @@ impl Settings {
                 "1" | "true" | "yes" | "on"
             ),
             Some(Json::Bool(b)) => *b,
-            Some(Json::Number(n)) => n.as_f64() != Some(0.0),
             _ => false,
         })
     }
 }
 
-/// Errors of the platform and traces APIs, classified the way the SDK branches on them.
+/// An error of the platform or traces APIs, or one raised before any request.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ApiError {
     #[error("{0}")]
     Configuration(String),
+    /// A non-2xx response; `code` is the service's error code.
     #[error("{message}")]
-    Unauthorized {
-        message: String,
-        code: Option<String>,
-    },
-    #[error("Payment required. Check billing status.")]
-    PaymentRequired { code: Option<String> },
-    #[error("{message}")]
-    Forbidden {
-        message: String,
-        code: Option<String>,
-    },
-    #[error("{message}")]
-    NotFound {
-        message: String,
-        code: Option<String>,
-    },
-    #[error("{message}")]
-    ValidationRejected {
-        message: String,
-        code: Option<String>,
-    },
-    #[error("{message}")]
-    Conflict {
-        message: String,
-        code: Option<String>,
-    },
-    #[error("{message}")]
-    Retryable {
+    Http {
         status: u16,
-        message: String,
         code: Option<String>,
+        message: String,
         retry_after: Option<f64>,
     },
-    #[error("{message}")]
-    Api {
-        status: Option<u16>,
-        message: String,
-        code: Option<String>,
-    },
-    #[error("{message}")]
-    Timeout { message: String, ambiguous: bool },
+    /// No response to interpret; `ambiguous` when the request may have reached the service.
     #[error("{message}")]
     Transport { message: String, ambiguous: bool },
     #[error("Line {line} is {size} bytes, exceeding the {limit} byte single-line limit. Oversized lines are rejected locally rather than split.")]
@@ -232,48 +185,22 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    pub fn kind(&self) -> &'static str {
+    /// The Python exception class, for messages.
+    fn kind(&self) -> &'static str {
         match self {
             ApiError::Configuration(_) => "ConfigurationError",
-            ApiError::Unauthorized { .. } => "UnauthorizedError",
-            ApiError::PaymentRequired { .. } => "PaymentRequiredError",
-            ApiError::Forbidden { .. } => "ForbiddenError",
-            ApiError::NotFound { .. } => "NotFoundError",
-            ApiError::ValidationRejected { .. } => "ValidationRejectedError",
-            ApiError::Conflict { .. } => "LineFormatConflictError",
-            ApiError::Retryable { .. } => "RetryableAPIError",
-            ApiError::Api { .. } => "APIError",
-            ApiError::Timeout { .. } => "APITimeoutError",
+            ApiError::Http { status: 400, .. } => "ValidationRejectedError",
+            ApiError::Http { status: 401, .. } => "UnauthorizedError",
+            ApiError::Http { status: 403, .. } => "ForbiddenError",
+            ApiError::Http { status: 404, .. } => "NotFoundError",
+            ApiError::Http { status: 409, .. } => "LineFormatConflictError",
+            ApiError::Http {
+                status: 429 | 502 | 503 | 504,
+                ..
+            } => "RetryableAPIError",
+            ApiError::Http { .. } => "APIError",
             ApiError::Transport { .. } => "TransportError",
             ApiError::TraceTooLarge { .. } => "TraceTooLargeError",
-        }
-    }
-
-    pub fn status(&self) -> Option<u16> {
-        match self {
-            ApiError::Unauthorized { .. } => Some(401),
-            ApiError::PaymentRequired { .. } => Some(402),
-            ApiError::Forbidden { .. } => Some(403),
-            ApiError::NotFound { .. } => Some(404),
-            ApiError::ValidationRejected { .. } => Some(400),
-            ApiError::Conflict { .. } => Some(409),
-            ApiError::Retryable { status, .. } => Some(*status),
-            ApiError::Api { status, .. } => *status,
-            _ => None,
-        }
-    }
-
-    pub fn code(&self) -> Option<&str> {
-        match self {
-            ApiError::Unauthorized { code, .. }
-            | ApiError::PaymentRequired { code }
-            | ApiError::Forbidden { code, .. }
-            | ApiError::NotFound { code, .. }
-            | ApiError::ValidationRejected { code, .. }
-            | ApiError::Conflict { code, .. }
-            | ApiError::Retryable { code, .. }
-            | ApiError::Api { code, .. } => code.as_deref(),
-            _ => None,
         }
     }
 
@@ -281,7 +208,10 @@ impl ApiError {
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
-            ApiError::Retryable { .. } | ApiError::Timeout { .. } | ApiError::Transport { .. }
+            ApiError::Http {
+                status: 429 | 502 | 503 | 504,
+                ..
+            } | ApiError::Transport { .. }
         )
     }
 
@@ -289,25 +219,16 @@ impl ApiError {
     pub fn is_record_rejection(&self) -> bool {
         matches!(
             self,
-            ApiError::TraceTooLarge { .. }
-                | ApiError::ValidationRejected { .. }
-                | ApiError::Conflict { .. }
-        ) || matches!(
-            self,
-            ApiError::Api {
-                status: Some(413 | 422),
+            ApiError::Http {
+                status: 400 | 409 | 413 | 422,
                 ..
-            }
+            } | ApiError::TraceTooLarge { .. }
         )
     }
 
-    /// An error from the platform (`prime_traces.exceptions.APIError` and subclasses), as
-    /// opposed to one raised before any request.
+    /// An error from the platform, as opposed to one raised before any request.
     pub fn is_api_error(&self) -> bool {
-        !matches!(
-            self,
-            ApiError::Configuration(_) | ApiError::TraceTooLarge { .. }
-        )
+        matches!(self, ApiError::Http { .. } | ApiError::Transport { .. })
     }
 
     /// `f"{type(exc).__name__}: {exc}"`.
@@ -315,41 +236,63 @@ impl ApiError {
         format!("{}: {self}", self.kind())
     }
 
-    fn retry_after(&self) -> Option<f64> {
-        match self {
-            ApiError::Retryable { retry_after, .. } => *retry_after,
-            _ => None,
-        }
-    }
-
-    pub fn from_reqwest(err: &reqwest::Error, what: &str) -> ApiError {
+    pub fn transport(err: &reqwest::Error, what: &str) -> ApiError {
         // connection setup never reached the service; anything later may have
-        let ambiguous = !err.is_connect() && !err.is_builder();
-        if err.is_timeout() {
-            ApiError::Timeout {
-                message: format!("{what} timed out: {err}"),
-                ambiguous,
-            }
-        } else {
-            ApiError::Transport {
-                message: format!("{what} failed: {err}"),
-                ambiguous,
-            }
+        ApiError::Transport {
+            message: format!("{what} failed: {err}"),
+            ambiguous: !err.is_connect() && !err.is_builder(),
         }
     }
-}
 
-/// Seconds to wait before retrying `attempt` (0-based): Retry-After wins (capped), else
-/// jittered exponential backoff.
-pub fn retry_delay(error: &ApiError, attempt: u32) -> Duration {
-    if let Some(delay) = error.retry_after() {
-        return Duration::from_secs_f64(delay.min(RETRY_AFTER_CAP_S));
+    /// The error of a non-2xx response: the service envelope's code and message, FastAPI's
+    /// `detail`, or the raw text.
+    pub fn from_response(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> Option<ApiError> {
+        if status.is_success() {
+            return None;
+        }
+        let status = status.as_u16();
+        let text = String::from_utf8_lossy(body);
+        let fallback = if text.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            text.into_owned()
+        };
+        let (code, message) = match serde_json::from_slice::<Json>(body) {
+            Ok(Json::Object(obj)) => match (obj.get("error"), obj.get("detail")) {
+                (Some(Json::Object(error)), _) => (
+                    error.get("code").and_then(Json::as_str).map(str::to_string),
+                    error
+                        .get("message")
+                        .and_then(Json::as_str)
+                        .filter(|m| !m.is_empty())
+                        .map_or_else(|| format!("HTTP {status}"), str::to_string),
+                ),
+                (_, Some(Json::String(detail))) if !detail.is_empty() => (None, detail.clone()),
+                (_, Some(detail)) if !detail.is_null() => (None, detail.to_string()),
+                _ => (None, fallback),
+            },
+            _ => (None, fallback),
+        };
+        let message = match status {
+            401 if message != format!("HTTP {status}") => {
+                format!("API key unauthorized ({message}). Check PRIME_API_KEY and its scopes.")
+            }
+            401 => "API key unauthorized. Check PRIME_API_KEY and its scopes.".into(),
+            402 => "Payment required. Check billing status.".into(),
+            400 | 403 | 404 | 409 | 429 | 502 | 503 | 504 => message,
+            _ => format!("HTTP {status}: {message}"),
+        };
+        Some(ApiError::Http {
+            status,
+            code,
+            message,
+            retry_after: retry_after(headers),
+        })
     }
-    let base = (BACKOFF_BASE_S * 2f64.powi(attempt as i32)).min(BACKOFF_CAP_S);
-    Duration::from_secs_f64(base * (0.5 + rand::random::<f64>()))
 }
 
-fn parse_retry_after(headers: &HeaderMap) -> Option<f64> {
+/// Retry-After in either form: delta-seconds or an HTTP date.
+fn retry_after(headers: &HeaderMap) -> Option<f64> {
     let value = headers.get("retry-after")?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse::<f64>() {
         return Some(seconds.max(0.0));
@@ -357,251 +300,158 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<f64> {
     let target = httpdate::parse_http_date(value).ok()?;
     Some(
         target
-            .duration_since(std::time::SystemTime::now())
+            .duration_since(SystemTime::now())
             .map_or(0.0, |d| d.as_secs_f64()),
     )
 }
 
-/// `(code, message)` from an error body: the service envelope, FastAPI's `detail`, or raw text.
-fn extract_error(status: StatusCode, body: &[u8]) -> (Option<String>, String) {
-    let text = String::from_utf8_lossy(body).into_owned();
-    let fallback = if text.is_empty() {
-        format!("HTTP {}", status.as_u16())
-    } else {
-        text.clone()
-    };
-    let Ok(Json::Object(obj)) = serde_json::from_slice::<Json>(body) else {
-        return (None, fallback);
-    };
-    if let Some(Json::Object(error)) = obj.get("error") {
-        let code = error.get("code").and_then(Json::as_str).map(str::to_string);
-        let message = error
-            .get("message")
-            .and_then(Json::as_str)
-            .filter(|m| !m.is_empty())
-            .map_or_else(|| format!("HTTP {}", status.as_u16()), str::to_string);
-        return (code, message);
+/// Seconds to wait before retrying `attempt` (0-based): Retry-After wins (capped at 60 s),
+/// else jittered exponential backoff (1 s doubling, capped at 30 s).
+pub fn retry_delay(error: &ApiError, attempt: u32) -> Duration {
+    if let ApiError::Http {
+        retry_after: Some(delay),
+        ..
+    } = error
+    {
+        return Duration::from_secs_f64(delay.min(60.0));
     }
-    match obj.get("detail") {
-        Some(Json::String(s)) if !s.is_empty() => (None, s.clone()),
-        Some(d) if !d.is_null() && d != &Json::Bool(false) => (None, d.to_string()),
-        _ => (None, fallback),
-    }
+    Duration::from_secs_f64(2f64.powi(attempt as i32).min(30.0) * (0.5 + rand::random::<f64>()))
 }
 
-/// Map a non-2xx response to a typed error.
-pub fn error_for_response(
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Option<ApiError> {
-    if status.is_success() {
-        return None;
-    }
-    let s = status.as_u16();
-    let (code, message) = extract_error(status, body);
-    Some(match s {
-        401 => {
-            let detail = if message != format!("HTTP {s}") {
-                format!(" ({message})")
-            } else {
-                String::new()
-            };
-            ApiError::Unauthorized {
-                message: format!(
-                    "API key unauthorized{detail}. Check PRIME_API_KEY and its scopes."
-                ),
-                code,
-            }
-        }
-        402 => ApiError::PaymentRequired { code },
-        403 => ApiError::Forbidden { message, code },
-        404 => ApiError::NotFound { message, code },
-        400 => ApiError::ValidationRejected { message, code },
-        409 => ApiError::Conflict { message, code },
-        429 | 502 | 503 | 504 => ApiError::Retryable {
-            status: s,
-            message,
-            code,
-            retry_after: parse_retry_after(headers),
-        },
-        _ => ApiError::Api {
-            status: Some(s),
-            message: format!("HTTP {s}: {message}"),
-            code,
-        },
-    })
-}
-
-/// `(origin, api_path)` for a base URL that is a platform origin or one of its API roots.
-pub fn split_api_root(base_url: &str) -> (String, &'static str) {
-    let (scheme_host, path) = match base_url.find("://") {
-        Some(i) => match base_url[i + 3..].find('/') {
-            Some(j) => base_url.split_at(i + 3 + j),
-            None => (base_url, ""),
-        },
-        None => (base_url, ""),
-    };
-    let path = path
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('/');
-    let mut api_path = PUBLIC_API_PATH;
-    let mut origin_path = path;
-    for (suffix, candidate) in [
-        ("/api/internal/rft", INTERNAL_API_PATH),
-        ("/api/internal", INTERNAL_API_PATH),
-        ("/api/v1/rft", PUBLIC_API_PATH),
-        ("/api/v1", PUBLIC_API_PATH),
+/// `(origin, api_path)` for a base URL that is a platform origin or one of its API roots: the
+/// internal RFT root a hosted run's launcher injects maps to `/api/internal`.
+fn split_api_root(base_url: &str) -> (String, &'static str) {
+    let base_url = base_url.trim_end_matches('/');
+    for (suffix, api_path) in [
+        ("/api/internal/rft", "/api/internal"),
+        ("/api/internal", "/api/internal"),
+        ("/api/v1/rft", "/api/v1"),
+        ("/api/v1", "/api/v1"),
     ] {
-        if let Some(stripped) = path.strip_suffix(suffix) {
-            origin_path = stripped;
-            api_path = candidate;
-            break;
+        if let Some(origin) = base_url.strip_suffix(suffix) {
+            return (origin.to_string(), api_path);
         }
     }
-    (
-        format!("{scheme_host}{origin_path}")
-            .trim_end_matches('/')
-            .to_string(),
-        api_path,
-    )
+    (base_url.to_string(), "/api/v1")
 }
 
-/// Authenticated platform API client with the SDK's retry policy: connect errors and 429 are
-/// replayed for every method; ambiguous failures (502/503/504, a lost response) only when the
-/// call is idempotent.
+pub fn http_client(
+    headers: HeaderMap,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, ApiError> {
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .user_agent(USER_AGENT)
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|e| ApiError::Configuration(format!("http client: {e}")))
+}
+
+pub fn header(value: &str) -> Result<HeaderValue, ApiError> {
+    HeaderValue::from_str(value)
+        .map_err(|e| ApiError::Configuration(format!("invalid header value: {e}")))
+}
+
+/// Authenticated platform API client: connect errors and 429 are replayed for every call,
+/// ambiguous failures (502/503/504, a lost response) only for idempotent ones.
 #[derive(Clone)]
 pub struct PlatformClient {
     http: reqwest::Client,
-    pub api_prefix: String,
-    pub internal: bool,
-    max_attempts: u32,
+    api_prefix: String,
 }
 
 impl PlatformClient {
-    pub fn new(api_key: &str, base_url: &str, read_timeout: Duration) -> Result<Self, ApiError> {
+    pub fn new(api_key: &str, base_url: &str) -> Result<Self, ApiError> {
         let (origin, api_path) = split_api_root(base_url);
-        let internal = api_path == INTERNAL_API_PATH;
         let mut headers = HeaderMap::new();
-        let bearer = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|e| ApiError::Configuration(format!("invalid API key header: {e}")))?;
-        headers.insert(reqwest::header::AUTHORIZATION, bearer);
-        if internal {
-            headers.insert(
-                "x-api-key",
-                HeaderValue::from_str(api_key)
-                    .map_err(|e| ApiError::Configuration(e.to_string()))?,
-            );
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            header(&format!("Bearer {api_key}"))?,
+        );
+        if api_path == "/api/internal" {
+            // the internal router reads a hosted run's own token from this header
+            headers.insert("x-api-key", header(api_key)?);
         }
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .user_agent(USER_AGENT)
-            .connect_timeout(Duration::from_secs(10))
-            .read_timeout(read_timeout)
-            .build()
-            .map_err(|e| ApiError::Configuration(format!("http client: {e}")))?;
         Ok(PlatformClient {
-            http,
+            http: http_client(headers, Duration::from_secs(60))?,
             api_prefix: format!("{origin}{api_path}"),
-            internal,
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
         })
     }
 
-    /// Send one request, retrying transient failures; returns the JSON body (`{}` when empty).
-    /// `idempotent` defaults to `method != POST`.
-    pub async fn request(
+    /// Send one request, retrying transient failures; the JSON body (`{}` when empty).
+    async fn request(
         &self,
         method: Method,
         path: &str,
         body: Option<&Json>,
-        idempotent: Option<bool>,
+        idempotent: bool,
     ) -> Result<Json, ApiError> {
         let url = format!("{}{path}", self.api_prefix);
         let what = format!("{method} {path}");
-        let replayable = idempotent.unwrap_or(method != Method::POST);
+        // an empty mapping sends no body
         let payload = body
-            .filter(|b| !is_empty_json(b))
-            .map(|b| serde_json::to_vec(b).expect("JSON body"));
-        for attempt in 0..self.max_attempts {
-            let mut req = self.http.request(method.clone(), &url);
+            .filter(|b| b.as_object().is_none_or(|m| !m.is_empty()))
+            .map(|b| b.to_string());
+        let mut attempt = 0;
+        loop {
+            let mut request = self.http.request(method.clone(), &url);
             if let Some(payload) = &payload {
-                req = req
+                request = request
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .body(payload.clone());
             }
-            let (error, ambiguous) = match req.send().await {
-                Err(e) => {
-                    let error = ApiError::from_reqwest(&e, &what);
-                    let ambiguous = matches!(
-                        error,
-                        ApiError::Timeout {
-                            ambiguous: true,
-                            ..
-                        } | ApiError::Transport {
-                            ambiguous: true,
-                            ..
-                        }
-                    );
-                    (error, ambiguous)
-                }
+            let error = match request.send().await {
+                Err(e) => ApiError::transport(&e, &what),
                 Ok(response) => {
-                    let status = response.status();
-                    let headers = response.headers().clone();
+                    let (status, headers) = (response.status(), response.headers().clone());
                     let bytes = response
                         .bytes()
                         .await
-                        .map_err(|e| ApiError::from_reqwest(&e, &what))?;
-                    match error_for_response(status, &headers, &bytes) {
-                        None => return decode(&what, status, &bytes),
-                        Some(error @ ApiError::Retryable { status, .. }) => (error, status != 429),
+                        .map_err(|e| ApiError::transport(&e, &what))?;
+                    match ApiError::from_response(status, &headers, &bytes) {
+                        None if bytes.is_empty() => return Ok(Json::Object(Default::default())),
+                        None => {
+                            return match serde_json::from_slice(&bytes) {
+                                Ok(Json::Object(m)) => Ok(Json::Object(m)),
+                                Ok(other) => Ok(serde_json::json!({ "data": other })),
+                                Err(_) => Err(ApiError::Http {
+                                    status: status.as_u16(),
+                                    code: None,
+                                    message: format!("{what} returned non-JSON ({status})"),
+                                    retry_after: None,
+                                }),
+                            }
+                        }
+                        Some(error) if error.is_transient() => error,
                         Some(error) => return Err(error),
                     }
                 }
             };
-            if attempt + 1 == self.max_attempts || (ambiguous && !replayable) {
+            let ambiguous = match &error {
+                ApiError::Http { status, .. } => *status != 429,
+                ApiError::Transport { ambiguous, .. } => *ambiguous,
+                _ => true,
+            };
+            attempt += 1;
+            if attempt == MAX_ATTEMPTS || (ambiguous && !idempotent) {
                 return Err(error);
             }
-            tokio::time::sleep(retry_delay(&error, attempt)).await;
+            tokio::time::sleep(retry_delay(&error, attempt - 1)).await;
         }
-        unreachable!("the loop returns on its last attempt")
     }
 
     pub async fn get(&self, path: &str) -> Result<Json, ApiError> {
-        self.request(Method::GET, path, None, None).await
+        self.request(Method::GET, path, None, true).await
     }
+
     pub async fn post(&self, path: &str, body: &Json, idempotent: bool) -> Result<Json, ApiError> {
-        self.request(Method::POST, path, Some(body), Some(idempotent))
+        self.request(Method::POST, path, Some(body), idempotent)
             .await
     }
+
     pub async fn put(&self, path: &str, body: &Json) -> Result<Json, ApiError> {
-        self.request(Method::PUT, path, Some(body), None).await
-    }
-}
-
-/// `encode_json(json_body) if json_body else None`: an empty mapping sends no body.
-fn is_empty_json(value: &Json) -> bool {
-    matches!(value, Json::Object(m) if m.is_empty())
-}
-
-fn decode(what: &str, status: StatusCode, body: &[u8]) -> Result<Json, ApiError> {
-    if body.is_empty() {
-        return Ok(Json::Object(Default::default()));
-    }
-    match serde_json::from_slice::<Json>(body) {
-        Ok(Json::Object(m)) => Ok(Json::Object(m)),
-        Ok(other) => Ok(serde_json::json!({ "data": other })),
-        Err(_) => Err(ApiError::Api {
-            status: Some(status.as_u16()),
-            message: format!(
-                "{what} returned non-JSON ({}): {:?}",
-                status.as_u16(),
-                String::from_utf8_lossy(&body[..body.len().min(200)])
-            ),
-            code: None,
-        }),
+        self.request(Method::PUT, path, Some(body), true).await
     }
 }
 
@@ -613,47 +463,35 @@ mod tests {
     fn api_roots() {
         assert_eq!(
             split_api_root("https://api.x.ai"),
-            ("https://api.x.ai".into(), PUBLIC_API_PATH)
+            ("https://api.x.ai".into(), "/api/v1")
         );
         assert_eq!(
             split_api_root("https://api.x.ai/api/v1/rft/"),
-            ("https://api.x.ai".into(), PUBLIC_API_PATH)
+            ("https://api.x.ai".into(), "/api/v1")
         );
         assert_eq!(
             split_api_root("https://x.ai/api/internal/rft"),
-            ("https://x.ai".into(), INTERNAL_API_PATH)
-        );
-        assert_eq!(
-            split_api_root("http://localhost:8000/p/api/internal"),
-            ("http://localhost:8000/p".into(), INTERNAL_API_PATH)
-        );
-        assert_eq!(
-            split_api_root("https://rft.host"),
-            ("https://rft.host".into(), PUBLIC_API_PATH)
+            ("https://x.ai".into(), "/api/internal")
         );
     }
 
     #[test]
-    fn response_mapping() {
-        let h = HeaderMap::new();
-        let err = error_for_response(
-            StatusCode::FORBIDDEN,
-            &h,
-            br#"{"error":{"code":"service_not_enabled","message":"off"}}"#,
+    fn response_errors() {
+        let mut headers = HeaderMap::new();
+        let forbidden = br#"{"error":{"code":"service_not_enabled","message":"off"}}"#;
+        let err = ApiError::from_response(StatusCode::FORBIDDEN, &headers, forbidden).unwrap();
+        assert_eq!(err.describe(), "ForbiddenError: off");
+        let err = ApiError::from_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &headers,
+            br#"{"detail":"bad"}"#,
         )
         .unwrap();
-        assert!(
-            matches!(&err, ApiError::Forbidden { code: Some(c), message } if c == "service_not_enabled" && message == "off")
-        );
-        let err = error_for_response(StatusCode::UNPROCESSABLE_ENTITY, &h, br#"{"detail":"bad"}"#)
-            .unwrap();
         assert_eq!(err.to_string(), "HTTP 422: bad");
         assert!(err.is_record_rejection());
-        let mut h = HeaderMap::new();
-        h.insert("retry-after", HeaderValue::from_static("7"));
-        let err = error_for_response(StatusCode::TOO_MANY_REQUESTS, &h, b"").unwrap();
+        headers.insert("retry-after", HeaderValue::from_static("7"));
+        let err = ApiError::from_response(StatusCode::TOO_MANY_REQUESTS, &headers, b"").unwrap();
         assert!(err.is_transient());
         assert_eq!(retry_delay(&err, 3), Duration::from_secs(7));
-        assert!(error_for_response(StatusCode::OK, &h, b"").is_none());
     }
 }

@@ -1,17 +1,16 @@
-//! Monitors (`prime_rl.monitors`): the orchestrator's metrics and episode sinks — local file
-//! traces, the Prime platform and W&B — behind one ordered actor.
+//! Monitors (`prime_rl.monitors`): the orchestrator's metrics and episode sinks (local file
+//! traces, the Prime platform and W&B) behind one ordered actor.
 //!
-//! Every producer logs through a cloned [`Monitors`] handle; the actor consumes one message at a
-//! time and fans it out to each registered monitor in registration order (prime, wandb, file).
-//! A monitor that fails to log is warned about and skipped: monitoring never takes the run down.
-//! A monitor whose init fails does: a configured monitor must work.
+//! Every producer logs through a cloned [`Monitors`] handle. The actor consumes one message at
+//! a time and fans it out to each monitor in registration order (prime, wandb, file). A
+//! monitor that fails to log is warned about and skipped: monitoring never takes the run
+//! down. A monitor whose init fails does: a configured monitor must work.
 
 pub mod annotations;
 pub mod file;
 pub mod prime;
-pub mod pyjson;
-pub mod records;
-pub mod wandb;
+mod records;
+mod wandb;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +18,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use prl_types::{Kind, Subset};
+pub use prl_types::{Metrics as Row, Scalar};
 use prl_wire::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -26,22 +26,30 @@ use tokio_util::sync::CancellationToken;
 
 pub use file::live::{stage, LiveEvent, STAGES};
 pub use file::FileMonitorConfig;
-pub use prime::{PrimeTrainMonitor, PrimeTrainSetup};
-pub use pyjson::{Row, Scalar};
-pub use wandb::{WandbBridge, WandbMonitor};
-
-/// Default precision of per-token float streams in uploaded records (`RECORD_FLOAT_DECIMALS`).
-pub const RECORD_FLOAT_DECIMALS: u32 = 4;
-const INBOX: usize = 1024;
+pub use prime::PrimeTrainSetup;
+pub use wandb::WandbBridge;
 
 /// Episodes are shared with the sinks: the arrival record is serialized later, off the
 /// producer's path, while the same episode flows on.
 pub type EpisodeRef = Arc<prl_wire::Episode>;
 
-/// One monitor (`prime_rl.monitors.base.Monitor`). Monitors that only carry scalars ignore the
-/// rest through the default no-ops.
+/// `prime_rl.utils.utils.sanitize` on a row: non-finite floats are not valid JSON. Returns the
+/// row without them and their keys.
+fn sanitize(row: &Row) -> (Row, Vec<String>) {
+    let (kept, dropped): (Row, Row) =
+        row.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .partition(|(_, v)| match v {
+                Scalar::Float(f) => f.is_finite(),
+                _ => true,
+            });
+    (kept, dropped.into_keys().collect())
+}
+
+/// One monitor (`prime_rl.monitors.base.Monitor`). Monitors that only carry scalars ignore
+/// the rest through the default no-ops.
 #[async_trait]
-pub trait Monitor: Send {
+trait Monitor: Send {
     /// The class name the fan-out warnings use.
     fn name(&self) -> &'static str;
     async fn log_metrics(&mut self, metrics: &Row, step: Option<u64>) -> Result<()>;
@@ -71,8 +79,7 @@ pub trait Monitor: Send {
     }
     /// A paused run stopped to resume later and did not complete.
     async fn finalize(&mut self, paused: bool) -> Result<()>;
-    /// The process is going away without a clean finalize (Python: atexit hooks, open files
-    /// closed by the interpreter). Defaults to doing nothing.
+    /// The process is going away without a clean finalize (Python: atexit hooks).
     async fn crash(&mut self) -> Result<()> {
         Ok(())
     }
@@ -107,7 +114,7 @@ enum MonitorMsg {
     },
 }
 
-/// The producers' handle to the monitors actor. Messages are processed in send order; each
+/// The producers' handle to the monitors actor. Messages are processed in send order. Each
 /// method waits only for the send (the inbox is bounded, so a stalled monitor backs pressure
 /// up to producers like the awaited Python fan-out did), `finalize` for completion.
 #[derive(Clone)]
@@ -117,9 +124,8 @@ pub struct Monitors {
 
 impl Monitors {
     async fn send(&self, msg: MonitorMsg) {
-        if self.tx.send(msg).await.is_err() {
-            tracing::debug!("Monitors already stopped; dropping a log call");
-        }
+        // the actor is gone only once the run is over
+        let _ = self.tx.send(msg).await;
     }
 
     /// A row of scalar metrics; `step=None` logs a time-keyed row.
@@ -170,8 +176,8 @@ impl Monitors {
         .await
     }
 
-    /// Finalize every monitor and stop the actor. Only on a clean exit: a crashed run is
-    /// reported crashed when the actor stops without it.
+    /// Finalize every monitor and stop the actor. Only on a clean exit: a run whose actor stops
+    /// without it is reported crashed.
     pub async fn finalize(&self, paused: bool) {
         let (done, wait) = oneshot::channel();
         self.send(MonitorMsg::Finalize { paused, done }).await;
@@ -190,6 +196,7 @@ macro_rules! fan_out {
     };
 }
 
+/// Fan one message out; a finalize is handed back to the caller.
 async fn handle(
     monitors: &mut [Box<dyn Monitor>],
     msg: MonitorMsg,
@@ -262,12 +269,8 @@ async fn run(
 
 /// The Prime monitor a component runs.
 pub enum PrimeSetup {
-    /// `PrimeTrainMonitorConfig`: `name` from the config, `run` the registration (None for a
-    /// config-less init).
-    Train {
-        name: Option<String>,
-        run: Option<PrimeTrainSetup>,
-    },
+    /// `PrimeTrainMonitorConfig`, with what the training run registers with.
+    Train(PrimeTrainSetup),
     /// `PrimeEvalMonitorConfig` (eval processes).
     Eval(prime::eval::PrimeEvalSetup),
 }
@@ -293,40 +296,34 @@ impl MonitorsSetup {
         wandb: Option<Box<dyn WandbBridge>>,
     ) -> Self {
         let sources = &config.train.source;
-        let prime = config
-            .monitors
-            .prime
-            .as_ref()
-            .map(|prime| PrimeSetup::Train {
+        let prime = config.monitors.prime.as_ref().map(|prime| {
+            PrimeSetup::Train(PrimeTrainSetup {
                 name: prime.name.clone(),
-                run: Some(PrimeTrainSetup {
-                    name: prime.name.clone(),
-                    model: config.model.name.clone(),
-                    environments: sources.iter().map(|s| s.env_id.clone()).collect(),
-                    training: prime::backend::TrainingSpec {
-                        max_steps: config.max_steps.unwrap_or(0),
-                        batch_size: Some(config.batch_size),
-                        rollouts_per_example: sources.iter().map(|s| s.group_size).max(),
-                        seq_len: Some(config.seq_len),
-                        wandb_project: config.monitors.wandb.as_ref().map(|w| w.project.clone()),
-                    },
-                    run_config: config
-                        .prime_run_config
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default(),
-                }),
-            });
+                model: config.model.name.clone(),
+                environments: sources.iter().map(|s| s.env_id.clone()).collect(),
+                training: prime::backend::TrainingSpec {
+                    max_steps: config.max_steps.unwrap_or(0),
+                    batch_size: Some(config.batch_size),
+                    rollouts_per_example: sources.iter().map(|s| s.group_size).max(),
+                    seq_len: Some(config.seq_len),
+                    wandb_project: config.monitors.wandb.as_ref().map(|w| w.project.clone()),
+                },
+                run_config: config
+                    .prime_run_config
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+        });
+        let eval_sources = config.eval.iter().flat_map(|e| &e.source);
         MonitorsSetup {
             output_dir: config.output_dir.clone(),
             producer: Some("orch".into()),
             prime,
             wandb,
-            file: config.monitors.file.as_ref().map(FileMonitorConfig::from),
+            file: config.monitors.file.clone(),
             train_env_names: sources.iter().map(|s| s.resolved_name.clone()).collect(),
-            eval_env_names: config.eval.as_ref().map_or_else(Vec::new, |e| {
-                e.source.iter().map(|s| s.resolved_name.clone()).collect()
-            }),
+            eval_env_names: eval_sources.map(|s| s.resolved_name.clone()).collect(),
             overview_flavor: "rl".into(),
         }
     }
@@ -337,86 +334,166 @@ pub async fn spawn(
     setup: MonitorsSetup,
     cancel: CancellationToken,
 ) -> Result<(Monitors, JoinHandle<Result<()>>)> {
-    let rank: u64 = std::env::var("RANK")
+    let rank = std::env::var("RANK")
         .or_else(|_| std::env::var("DP_RANK"))
-        .ok()
-        .and_then(|r| r.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or_default();
     let mut monitors: Vec<Box<dyn Monitor>> = Vec::new();
-    if rank == 0 {
+    if rank.is_empty() || rank == "0" {
         let names: Vec<&str> = [
-            setup.prime.as_ref().map(|_| "prime"),
-            setup.wandb.as_ref().map(|_| "wandb"),
-            setup.file.as_ref().map(|_| "file"),
+            (setup.prime.is_some(), "prime"),
+            (setup.wandb.is_some(), "wandb"),
+            (setup.file.is_some(), "file"),
         ]
         .into_iter()
-        .flatten()
+        .filter_map(|(on, name)| on.then_some(name))
         .collect();
         if !names.is_empty() {
             tracing::info!("Initializing monitors ({})", names.join(", "));
         }
-        let t0 = std::time::Instant::now();
+        let output_dir = setup.output_dir;
         match setup.prime {
-            Some(PrimeSetup::Train { name, run }) => {
-                tracing::info!("Initializing prime monitor (name={})", py_opt(&name));
-                let output_dir = Some(setup.output_dir.clone());
+            Some(PrimeSetup::Train(train)) => {
+                tracing::info!("Initializing prime monitor");
                 monitors.push(Box::new(
-                    PrimeTrainMonitor::init(run, name, output_dir).await?,
+                    prime::PrimeTrainMonitor::init(train, output_dir.clone()).await?,
                 ));
             }
             Some(PrimeSetup::Eval(eval)) => {
-                tracing::info!("Initializing prime monitor (name={})", py_opt(&eval.name));
-                let output_dir = Some(setup.output_dir.clone());
+                tracing::info!("Initializing prime monitor");
                 monitors.push(Box::new(
-                    prime::eval::PrimeEvalMonitor::init(eval, output_dir).await?,
+                    prime::eval::PrimeEvalMonitor::init(eval, output_dir.clone()).await?,
                 ));
             }
             None => {}
         }
         if let Some(bridge) = setup.wandb {
             tracing::info!("Initializing wandb monitor");
-            let monitor = WandbMonitor::init(
-                bridge,
-                setup.train_env_names.clone(),
-                setup.eval_env_names.clone(),
-                setup.overview_flavor.clone(),
-            )
-            .await?;
-            monitors.push(Box::new(monitor));
-        }
-        if let Some(config) = setup.file {
-            tracing::info!(
-                "Initializing file monitor (path=PosixPath('{}') chunk_bytes={} compress={} float_decimals={})",
-                config.path.display(),
-                config.chunk_bytes,
-                if config.compress { "True" } else { "False" },
-                config.float_decimals.map_or("None".into(), |d| d.to_string())
-            );
+            let flavor = setup.overview_flavor;
             monitors.push(Box::new(
-                file::FileMonitorActor::init(
-                    config,
-                    setup.output_dir.clone(),
-                    setup.producer.clone(),
+                wandb::WandbMonitor::init(
+                    bridge,
+                    setup.train_env_names,
+                    setup.eval_env_names,
+                    flavor,
                 )
                 .await?,
             ));
         }
-        if !names.is_empty() {
-            tracing::debug!("Initialized monitors in {:.2}s", t0.elapsed().as_secs_f64());
+        if let Some(config) = setup.file {
+            tracing::info!("Initializing file monitor");
+            monitors.push(Box::new(
+                file::FileMonitorActor::init(config, output_dir, setup.producer).await?,
+            ));
         }
     }
-    Ok(spawn_monitors(monitors, cancel))
+    let (tx, rx) = mpsc::channel(1024);
+    Ok((Monitors { tx }, tokio::spawn(run(monitors, rx, cancel))))
 }
 
-/// Start the actor over already-initialized monitors.
-pub fn spawn_monitors(
-    monitors: Vec<Box<dyn Monitor>>,
-    cancel: CancellationToken,
-) -> (Monitors, JoinHandle<Result<()>>) {
-    let (tx, rx) = mpsc::channel(INBOX);
-    (Monitors { tx }, tokio::spawn(run(monitors, rx, cancel)))
-}
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
 
-fn py_opt(value: &Option<String>) -> String {
-    value.as_ref().map_or("None".into(), |v| format!("'{v}'"))
+    use anyhow::bail;
+
+    use super::*;
+
+    /// Logs every call; its metrics calls fail when `fail` is set.
+    struct Recorder(&'static str, Arc<Mutex<Vec<String>>>, bool);
+
+    #[async_trait]
+    impl Monitor for Recorder {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        async fn log_metrics(&mut self, metrics: &Row, _step: Option<u64>) -> Result<()> {
+            if self.2 {
+                bail!("boom");
+            }
+            tokio::task::yield_now().await;
+            self.1
+                .lock()
+                .unwrap()
+                .push(format!("{}:metrics:{:?}", self.0, metrics["i"]));
+            Ok(())
+        }
+        async fn log_episodes(
+            &mut self,
+            _: &[EpisodeRef],
+            step: u64,
+            _: Kind,
+            _: Subset,
+        ) -> Result<()> {
+            self.1
+                .lock()
+                .unwrap()
+                .push(format!("{}:episodes:{step}", self.0));
+            Ok(())
+        }
+        async fn finalize(&mut self, _paused: bool) -> Result<()> {
+            self.1.lock().unwrap().push(format!("{}:finalize", self.0));
+            Ok(())
+        }
+        async fn crash(&mut self) -> Result<()> {
+            self.1.lock().unwrap().push(format!("{}:crash", self.0));
+            Ok(())
+        }
+    }
+
+    fn start(
+        log: &Arc<Mutex<Vec<String>>>,
+        cancel: CancellationToken,
+    ) -> (Monitors, JoinHandle<Result<()>>) {
+        let monitors: Vec<Box<dyn Monitor>> = vec![
+            Box::new(Recorder("a", log.clone(), true)),
+            Box::new(Recorder("b", log.clone(), false)),
+        ];
+        let (tx, rx) = mpsc::channel(8);
+        (Monitors { tx }, tokio::spawn(run(monitors, rx, cancel)))
+    }
+
+    #[tokio::test]
+    async fn fan_out_is_ordered_and_contains_failures() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (monitors, task) = start(&log, CancellationToken::new());
+        for i in 0..3 {
+            monitors
+                .log_metrics(
+                    [("i".to_string(), Scalar::Int(i))].into_iter().collect(),
+                    None,
+                )
+                .await;
+        }
+        monitors
+            .log_episodes(vec![], 3, Kind::Eval, Subset::All)
+            .await;
+        monitors.finalize(false).await;
+        task.await.unwrap().unwrap();
+        let want = [
+            "b:metrics:Int(0)",
+            "b:metrics:Int(1)",
+            "b:metrics:Int(2)",
+            "a:episodes:3",
+            "b:episodes:3",
+            "a:finalize",
+            "b:finalize",
+        ];
+        assert_eq!(*log.lock().unwrap(), want);
+    }
+
+    #[tokio::test]
+    async fn cancel_drains_queued_logs_then_crashes() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let cancel = CancellationToken::new();
+        let (monitors, task) = start(&log, cancel.clone());
+        monitors
+            .log_episodes(vec![], 1, Kind::Train, Subset::All)
+            .await;
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["a:episodes:1", "b:episodes:1", "a:crash", "b:crash"]
+        );
+    }
 }

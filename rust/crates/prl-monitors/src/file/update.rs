@@ -3,23 +3,22 @@
 
 use prl_wire::{Map, Value};
 
-pub const UPDATE_VERSION: i64 = 1;
-
 /// One update record. `branches` maps a branch index to its token streams.
-pub fn make_update(trace_id: &str, info: Option<Map>, branches: Vec<(i64, Map)>) -> Value {
+pub fn make_update(trace_id: &str, info: Map, branches: Vec<(i64, Map)>) -> Value {
     let branches: Vec<Value> = branches
         .into_iter()
         .map(|(index, streams)| {
-            let mut branch = Map::new();
-            branch.insert("index".into(), Value::Int(index));
+            let mut branch: Map = [("index".to_string(), Value::Int(index))]
+                .into_iter()
+                .collect();
             branch.extend(streams);
             Value::Map(branch)
         })
         .collect();
     [
-        ("version", Value::Int(UPDATE_VERSION)),
+        ("version", Value::Int(1)),
         ("trace_id", trace_id.into()),
-        ("info", Value::Map(info.unwrap_or_default())),
+        ("info", Value::Map(info)),
         ("branches", branches.into()),
     ]
     .into_iter()

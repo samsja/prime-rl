@@ -6,132 +6,102 @@ use std::time::Duration;
 use serde_json::{Map, Value as Json};
 use tokio::time::Instant;
 
-use super::backend::{Backend, RunHandle, RunKind, RunSpec, RunStatus};
+use super::backend::{Backend, RunKind, RunSpec, RunStatus};
 use super::client::{ApiError, PlatformClient, Settings};
 use super::sinks::{RftMetricsSink, TracesSink};
-use super::worker::{Sink, UploadWorker, WorkerReport};
+use super::worker::UploadWorker;
 use crate::EpisodeRef;
 
+/// How long finishing lets queued uploads drain.
+pub const FINISH_TIMEOUT: Duration = Duration::from_secs(60);
 /// Training runs last days: a sink that struck out on transient failures is tried again after this.
-pub const TRAIN_RETIRE_COOLDOWN: Duration = Duration::from_secs(300);
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const TRAIN_RETIRE_COOLDOWN: Duration = Duration::from_secs(300);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Online,
-    Disabled,
-}
-
-impl Mode {
-    pub fn parse(mode: &str) -> Result<Mode, ApiError> {
-        match mode.trim().to_lowercase().as_str() {
-            "online" => Ok(Mode::Online),
-            "disabled" => Ok(Mode::Disabled),
-            other => Err(ApiError::Configuration(format!(
-                "mode={other:?} is not one of 'online' or 'disabled'"
-            ))),
-        }
-    }
-}
-
-pub struct RunOptions {
-    pub kind: RunKind,
-    pub mode: Mode,
-    pub base_url: Option<String>,
-    pub finish_timeout: Duration,
-    /// Attach to a run a launcher already created instead of creating one.
-    pub id: Option<String>,
-    pub spec: RunSpec,
+/// `$PRIME_API_BASE` historically points at the RFT API root; the SDK takes the platform base.
+fn base_url_override() -> Option<String> {
+    let base = std::env::var("PRIME_API_BASE")
+        .ok()
+        .filter(|b| !b.is_empty())?;
+    let base = base.trim_end_matches('/');
+    Some(base.strip_suffix("/rft").unwrap_or(base).to_string())
 }
 
 pub struct Run {
     pub id: String,
     pub url: Option<String>,
     pub attached: bool,
-    pub kind: RunKind,
+    kind: RunKind,
+    /// None in disabled mode.
     backend: Option<Backend>,
     samples: UploadWorker<EpisodeRef>,
     metrics: UploadWorker<Json>,
     config: Map<String, Json>,
     summary: Map<String, Json>,
-    errors: Vec<String>,
-    finish_timeout: Duration,
     pub finished: bool,
 }
 
-fn disabled_run_id() -> String {
-    format!(
-        "disabled-{}",
-        &uuid::Uuid::new_v4().simple().to_string()[..16]
-    )
-}
-
 impl Run {
-    pub async fn init(options: RunOptions) -> Result<Run, ApiError> {
+    /// Open a run: attach to `id` (a run a launcher created) or register `spec`. A disabled
+    /// run (`online = false`) has a local id and uploads nothing.
+    pub async fn init(
+        kind: RunKind,
+        online: bool,
+        id: Option<String>,
+        mut spec: RunSpec,
+    ) -> Result<Run, ApiError> {
         let settings = Settings::load();
-        let RunOptions {
-            kind,
-            mode,
-            base_url,
-            finish_timeout,
-            id,
-            mut spec,
-        } = options;
         spec.team_id = spec.team_id.or_else(|| settings.team_id());
-        let base_url = base_url.unwrap_or_else(|| settings.base_url());
-        // Resolved before any platform call: a bad value fails here, not after the run exists.
-        let opted_out = mode == Mode::Online && settings.traces_opt_out()?;
         let mut run = Run {
-            id: String::new(),
+            id: id.clone().unwrap_or_else(|| {
+                format!(
+                    "disabled-{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..16]
+                )
+            }),
             url: None,
-            attached: false,
+            attached: id.is_some(),
             kind,
             backend: None,
-            samples: UploadWorker::spawn(vec![], None),
-            metrics: UploadWorker::spawn(vec![], None),
+            samples: UploadWorker::disabled(),
+            metrics: UploadWorker::disabled(),
             config: spec.config.clone(),
             summary: Map::new(),
-            errors: Vec::new(),
-            finish_timeout,
             finished: false,
         };
-        if mode == Mode::Disabled {
-            run.id = id.unwrap_or_else(disabled_run_id);
+        if !online {
             return Ok(run);
         }
+        // resolved before any platform call: a bad value fails here, not after the run exists
+        let opted_out = settings.traces_opt_out()?;
         let api_key = settings.api_key();
         if api_key.is_empty() {
             return Err(ApiError::Configuration(
                 "mode=\"online\" needs an API key. Set PRIME_API_KEY, run `prime login`, or pass mode=\"disabled\".".into(),
             ));
         }
-        let client = PlatformClient::new(&api_key, &base_url, DEFAULT_TIMEOUT)?;
+        let client = PlatformClient::new(
+            &api_key,
+            &base_url_override().unwrap_or_else(|| settings.base_url()),
+        )?;
         let backend = Backend::new(
             client.clone(),
             kind,
-            &settings.frontend_url(),
+            settings.frontend_url(),
             spec.team_id.clone(),
         );
-        let handle: RunHandle = match &id {
-            Some(id) => {
-                run.attached = true;
-                backend.attach(id)
-            }
+        let handle = match &id {
+            Some(id) => backend.attach(id),
             None => backend.create(&spec).await?,
         };
         let mut context = vec![
             ("source", "prime-runs".to_string()),
             ("run_type", kind.as_str().to_string()),
         ];
-        if let Some(framework) = &spec.framework {
-            context.push(("framework", framework.clone()));
-        }
-        if let Some(model) = &spec.model {
-            context.push(("model", model.clone()));
-        }
+        context.extend(spec.framework.clone().map(|f| ("framework", f)));
+        context.extend(spec.model.clone().map(|m| ("model", m)));
         let mut traces = TracesSink::new(
             &api_key,
-            spec.team_id.clone(),
+            spec.team_id.as_deref(),
             &settings.traces_url(),
             &handle.id,
             kind.as_str(),
@@ -141,22 +111,14 @@ impl Run {
             traces.opt_out();
         }
         let cooldown = (kind == RunKind::Train).then_some(TRAIN_RETIRE_COOLDOWN);
-        run.samples = UploadWorker::spawn(
-            vec![Box::new(traces) as Box<dyn Sink<EpisodeRef>>],
-            cooldown,
-        );
+        run.samples = UploadWorker::spawn(Box::new(traces), cooldown);
         if kind == RunKind::Train {
-            run.metrics = UploadWorker::spawn(
-                vec![Box::new(RftMetricsSink::new(client, &handle.id)) as Box<dyn Sink<Json>>],
-                cooldown,
-            );
+            let metrics = RftMetricsSink::new(client, &handle.id);
+            run.metrics = UploadWorker::spawn(Box::new(metrics), cooldown);
         }
         run.id = handle.id;
-        run.url = handle.url;
+        run.url = Some(handle.url);
         run.backend = Some(backend);
-        if let Some(url) = &run.url {
-            tracing::debug!("Run {}: {url}", run.id);
-        }
         Ok(run)
     }
 
@@ -177,68 +139,65 @@ impl Run {
         self.metrics.submit(vec![row.into()]).await;
     }
 
-    /// Block until queued records have been written.
-    pub async fn flush(&self, timeout: Duration) -> bool {
+    /// Wait until queued records have been written.
+    pub async fn flush(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let samples = self.samples.flush(deadline).await;
-        self.metrics.flush(deadline).await && samples
+        self.samples.flush(deadline).await;
+        self.metrics.flush(deadline).await;
     }
 
     /// Drain the uploads and close the run out. Idempotent.
     pub async fn finish(
         &mut self,
-        summary: Option<Map<String, Json>>,
+        summary: Map<String, Json>,
         status: RunStatus,
         error: Option<String>,
     ) {
-        if self.finished {
+        if std::mem::replace(&mut self.finished, true) {
             return;
         }
-        self.finished = true;
-        if let Some(summary) = summary {
-            self.summary.extend(summary);
-        }
-        let deadline = Instant::now() + self.finish_timeout;
-        // Records first, so the dashboard never sees a finished run with samples landing.
-        let drained = self.samples.flush(deadline).await;
-        let drained = self.metrics.flush(deadline).await && drained;
+        self.summary.extend(summary);
+        let deadline = Instant::now() + FINISH_TIMEOUT;
+        // records first, so the dashboard never sees a finished run with samples landing
+        let drained = self.samples.flush(deadline).await & self.metrics.flush(deadline).await;
         if !drained {
             tracing::warn!(
                 "Run {}: uploads did not drain within {}s; finalizing anyway. Some records may be missing from this run.",
                 self.id,
-                self.finish_timeout.as_secs_f64()
+                FINISH_TIMEOUT.as_secs()
             );
         }
-        let reports: Vec<WorkerReport> = [
+        let reports: Vec<_> = [
             self.samples.close(deadline).await,
             self.metrics.close(deadline).await,
         ]
         .into_iter()
         .flatten()
         .collect();
-        for report in &reports {
-            self.errors.extend(report.errors.iter().cloned());
-        }
+        let mut errors: Vec<String> = reports
+            .iter()
+            .flat_map(|r| r.errors.iter().cloned())
+            .collect();
         if let Some(backend) = self.backend.take() {
-            let written: Vec<usize> = reports
-                .iter()
-                .flat_map(|r| r.episodes_written.iter().copied())
-                .collect();
+            let written: Vec<usize> = reports.iter().filter_map(|r| r.episodes_written).collect();
             if self.kind == RunKind::Eval && !written.is_empty() {
-                let mut prime_runs = match self.summary.get("prime_runs") {
-                    Some(Json::Object(m)) => m.clone(),
-                    _ => Map::new(),
-                };
-                prime_runs.insert(
-                    "traces_episodes_written".into(),
-                    written.iter().sum::<usize>().into(),
-                );
-                self.summary.insert("prime_runs".into(), prime_runs.into());
+                let entry = self
+                    .summary
+                    .entry("prime_runs")
+                    .or_insert_with(|| serde_json::json!({}));
+                if !entry.is_object() {
+                    *entry = serde_json::json!({});
+                }
+                entry["traces_episodes_written"] = written.iter().sum::<usize>().into();
             }
-            let config = (!self.attached && !self.config.is_empty()).then_some(&self.config);
-            let summary = (!self.summary.is_empty()).then_some(&self.summary);
-            if let Err(e) = backend.update(&self.id, config, summary).await {
-                self.note("updating the run", &e);
+            // an attached run's config is the launcher's
+            let config = if self.attached {
+                Map::new()
+            } else {
+                self.config.clone()
+            };
+            if let Err(e) = backend.update(&self.id, &config, &self.summary).await {
+                errors.push(self.note("updating the run", &e));
             }
             if self.attached && status != RunStatus::Completed {
                 tracing::info!(
@@ -247,11 +206,15 @@ impl Run {
                     status.as_str()
                 );
             } else {
-                let error = error.or_else(|| self.errors.first().cloned());
-                let config = (!self.config.is_empty()).then_some(&self.config);
-                let summary = (!self.summary.is_empty()).then_some(&self.summary);
+                let error = error.or_else(|| errors.first().cloned());
                 if let Err(e) = backend
-                    .finalize(&self.id, status, summary, error.as_deref(), config)
+                    .finalize(
+                        &self.id,
+                        status,
+                        &self.summary,
+                        error.as_deref(),
+                        &self.config,
+                    )
                     .await
                 {
                     self.note("finalizing the run", &e);
@@ -260,24 +223,35 @@ impl Run {
         }
         let dropped = self.samples.dropped + self.metrics.dropped;
         if dropped > 0 {
+            tracing::warn!("Run {} finished with {dropped} record(s) that reached no sink; the producer outran the uploader.", self.id);
+        }
+        for (sink, count) in reports.iter().filter_map(|r| r.failed_records) {
             tracing::warn!(
-                "Run {} finished with {dropped} record(s) that reached no sink; the producer outran the uploader.",
+                "Run {}: the {sink} sink could not store {count} record(s)",
                 self.id
             );
         }
-        for report in &reports {
-            for (sink, count) in &report.failed_records {
-                tracing::warn!(
-                    "Run {}: the {sink} sink could not store {count} record(s)",
-                    self.id
-                );
-            }
+    }
+
+    /// The SDK's atexit hook: a run never finished reports crashed.
+    pub async fn crash(&mut self) {
+        if !self.finished {
+            tracing::warn!(
+                "Run {} was never finished; reporting it as crashed",
+                self.id
+            );
+            self.finish(
+                Map::new(),
+                RunStatus::Crashed,
+                Some("process exited without finishing the run".into()),
+            )
+            .await;
         }
     }
 
-    fn note(&mut self, what: &str, e: &ApiError) {
+    fn note(&self, what: &str, e: &ApiError) -> String {
         let message = format!("{what} failed: {}", e.describe());
         tracing::warn!("Run {}: {message}", self.id);
-        self.errors.push(message);
+        message
     }
 }

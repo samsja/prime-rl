@@ -1,28 +1,28 @@
 //! `PrimeEvalMonitor`: each eval epoch streamed to the platform as one evaluation per env and
-//! step — opened when the epoch is counted (`log_eval_plan`), fed every episode as it lands, and
+//! step, opened when the epoch is counted (`log_eval_plan`), fed every episode as it lands and
 //! finished with the epoch's aggregates (`log_eval_epoch`). Under a managed launch (`$RUN_ID`)
 //! the epoch metrics also go to the parent training run.
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use prl_types::{Kind, Subset};
 use serde_json::{json, Map, Value as Json};
 
 use super::backend::{RunKind, RunSpec, RunStatus};
-use super::run::{Mode, Run, RunOptions};
-use super::{base_url_override, metrics_json, prime_mode, FINISH_TIMEOUT};
-use crate::pyjson::{py_sum, Row};
+use super::run::{Run, FINISH_TIMEOUT};
+use super::{metrics_json, online};
+use crate::file::index::py_sum;
 use crate::records::{
     platform_run_path, publish_link, register_links, update_record, PRIME_EVAL_LINKS,
 };
-use crate::{EpisodeRef, Monitor};
+use crate::{EpisodeRef, Monitor, Row};
 
-pub const EVAL_ID_VAR: &str = "PRIME_RUNS_EVAL_ID";
+const EVAL_ID_VAR: &str = "PRIME_RUNS_EVAL_ID";
 
-/// One eval source as the platform evaluation is registered with it.
+/// One eval source as its platform evaluation is registered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvalSourceSpec {
     pub resolved_name: String,
@@ -34,15 +34,15 @@ pub struct EvalSourceSpec {
 pub struct PrimeEvalSetup {
     /// `PrimeEvalMonitorConfig.name`.
     pub name: Option<String>,
-    /// The evaluated model (`"unknown"` without a config).
+    /// The evaluated model.
     pub model: String,
     pub sources: Vec<EvalSourceSpec>,
 }
 
 /// Run-level aggregates over episodes (`prime_runs.metrics.from_episodes`): rewards and metrics
-/// over the trainable traces (all traces when none is trainable), the share of failed episodes.
+/// over the trainable traces (all traces when none is), and the share of failed episodes.
 pub fn summary_from_episodes(episodes: &[EpisodeRef]) -> Map<String, Json> {
-    let traces: Vec<&prl_wire::Trace> = episodes.iter().flat_map(|e| e.traces.iter()).collect();
+    let traces: Vec<&prl_wire::Trace> = episodes.iter().flat_map(|e| &e.traces).collect();
     let trainable: Vec<&prl_wire::Trace> = traces
         .iter()
         .copied()
@@ -55,62 +55,53 @@ pub fn summary_from_episodes(episodes: &[EpisodeRef]) -> Map<String, Json> {
     };
     let mut sums: IndexMap<&str, (f64, u64)> = IndexMap::new();
     for trace in &scored {
-        let mut values: IndexMap<&str, f64> = IndexMap::new();
-        for (name, reward) in &trace.rewards {
-            if let Some(reward) = reward {
-                values.insert(name, reward.score);
-            }
-        }
-        for (name, value) in &trace.metrics {
-            if let Some(value) = value {
-                values.insert(name, *value);
-            }
-        }
+        let scores = trace
+            .rewards
+            .iter()
+            .filter_map(|(name, r)| Some((name.as_str(), r.as_ref()?.score)));
+        let metrics = trace
+            .metrics
+            .iter()
+            .filter_map(|(name, v)| Some((name.as_str(), (*v)?)));
+        // `{**scores, **metrics}`: a metric named like a reward replaces it
+        let values: IndexMap<&str, f64> = scores.chain(metrics).collect();
         for (name, value) in values {
-            let entry = sums.entry(name).or_insert((0.0, 0));
-            entry.0 += value;
-            entry.1 += 1;
+            let entry = sums.entry(name).or_default();
+            *entry = (entry.0 + value, entry.1 + 1);
         }
     }
-    let n = scored.len();
-    let avg_error = if episodes.is_empty() {
-        0.0
-    } else {
-        episodes.iter().filter(|e| !e.ok).count() as f64 / episodes.len() as f64
-    };
-    // Trace.reward and the mean are Python sums
-    let reward = |t: &prl_wire::Trace| py_sum(t.rewards.values().flatten().map(|r| r.value()));
-    let avg_reward = if n > 0 {
-        py_sum(scored.iter().map(|t| reward(t))) / n as f64
-    } else {
-        0.0
-    };
+    let mean = |total: f64, n: usize| if n > 0 { total / n as f64 } else { 0.0 };
+    let reward = |t: &&prl_wire::Trace| py_sum(t.rewards.values().flatten().map(|r| r.value()));
     let avg_metrics: Map<String, Json> = sums
         .into_iter()
-        .map(|(name, (sum, count))| (name.to_string(), json!(sum / count as f64)))
+        .map(|(name, (sum, n))| (name.to_string(), json!(sum / n as f64)))
         .collect();
-    json!({"avg_reward": avg_reward, "avg_metrics": avg_metrics, "avg_error": avg_error})
-        .as_object()
-        .expect("object")
-        .clone()
+    let failed = episodes.iter().filter(|e| !e.ok).count();
+    let summary = json!({
+        "avg_reward": mean(py_sum(scored.iter().map(reward)), scored.len()),
+        "avg_metrics": avg_metrics,
+        "avg_error": mean(failed as f64, episodes.len()),
+    });
+    summary.as_object().expect("object").clone()
 }
 
 pub struct PrimeEvalMonitor {
-    mode: Mode,
+    online: bool,
     name: Option<String>,
     model: String,
     sources: IndexMap<String, EvalSourceSpec>,
     run_id: Option<String>,
-    output_dir: Option<PathBuf>,
-    /// `(env, step)` -> its open evaluation; None once opening it failed.
+    output_dir: PathBuf,
+    /// `(env, step)` -> its evaluation; None once opening it failed (no retry per episode).
     runs: IndexMap<(String, u64), Option<Run>>,
+    /// The parent training run, for metrics only: its lifecycle belongs to the trainer.
     parent: Option<Run>,
     evaluation_id: Option<String>,
 }
 
 impl PrimeEvalMonitor {
-    pub async fn init(setup: PrimeEvalSetup, output_dir: Option<PathBuf>) -> Result<Self> {
-        let mode = prime_mode()?;
+    pub async fn init(setup: PrimeEvalSetup, output_dir: PathBuf) -> Result<Self> {
+        let online = online()?;
         let sources: IndexMap<String, EvalSourceSpec> = setup
             .sources
             .into_iter()
@@ -118,112 +109,90 @@ impl PrimeEvalMonitor {
             .collect();
         let evaluation_id = std::env::var(EVAL_ID_VAR).ok().filter(|v| !v.is_empty());
         if evaluation_id.is_some() && sources.len() != 1 {
-            bail!(
-                "${EVAL_ID_VAR} names one platform evaluation, so the run needs exactly one eval source (got {})",
-                sources.len()
-            );
+            bail!("${EVAL_ID_VAR} names one platform evaluation, so the run needs exactly one eval source (got {})", sources.len());
         }
         let run_id = std::env::var("PRL_RUN_ID").ok();
-        let mut monitor = PrimeEvalMonitor {
-            mode,
-            name: setup.name,
-            model: setup.model,
-            sources,
-            run_id: run_id.clone(),
-            output_dir: output_dir.clone(),
-            runs: IndexMap::new(),
-            parent: None,
-            evaluation_id,
-        };
-        if mode == Mode::Online {
+        let mut parent = None;
+        if online {
             tracing::info!("Streaming eval epochs to the Prime platform");
-            monitor.parent = monitor.attach_parent().await?;
-            if let Some(output_dir) = &output_dir {
-                let path = platform_run_path(output_dir);
-                let run_id = run_id.clone();
-                tokio::task::spawn_blocking(move || {
-                    update_record(&path, |mut record| {
-                        if record.get("kind").and_then(Json::as_str) == Some("train") {
-                            record.entry("evaluations").or_insert(json!({}));
-                            record.insert("run_id".into(), run_id.into());
-                            record
-                        } else {
-                            json!({"kind": "eval", "run_id": run_id, "evaluations": {}})
-                                .as_object()
-                                .expect("object")
-                                .clone()
-                        }
-                    })
-                })
-                .await?;
+            if let Some(id) = std::env::var("RUN_ID").ok().filter(|v| !v.is_empty()) {
+                let run = Run::init(RunKind::Train, true, Some(id), RunSpec::default())
+                    .await
+                    .map_err(|e| anyhow!(e.describe()))?;
+                tracing::info!("Logging eval metrics to parent training run {}", run.id);
+                parent = Some(run);
             }
+            // a train record (an eval process sharing the trainer's run dir) keeps its link
+            let (path, run_id) = (platform_run_path(&output_dir), run_id.clone());
+            tokio::task::spawn_blocking(move || {
+                update_record(&path, |mut record| {
+                    if record.get("kind").and_then(Json::as_str) != Some("train") {
+                        return json!({"kind": "eval", "run_id": run_id, "evaluations": {}});
+                    }
+                    record
+                        .as_object_mut()
+                        .expect("records are objects")
+                        .entry("evaluations")
+                        .or_insert(json!({}));
+                    record["run_id"] = run_id.into();
+                    record
+                })
+            })
+            .await?;
         } else {
             tracing::info!("Prime evaluations disabled");
         }
-        if let Some(output_dir) = output_dir {
-            let expected = if mode == Mode::Online {
-                monitor.sources.len() as u64
-            } else {
-                0
-            };
-            tokio::task::spawn_blocking(move || {
-                register_links(&output_dir, PRIME_EVAL_LINKS, expected)
-            })
+        let (dir, expected) = (
+            output_dir.clone(),
+            if online { sources.len() as u64 } else { 0 },
+        );
+        tokio::task::spawn_blocking(move || register_links(&dir, PRIME_EVAL_LINKS, expected))
             .await?;
-        }
-        Ok(monitor)
-    }
-
-    /// The parent training run, for metrics only. Its lifecycle belongs to the trainer: this
-    /// process never reports its status (no crash hook).
-    async fn attach_parent(&self) -> Result<Option<Run>> {
-        let Some(run_id) = std::env::var("RUN_ID").ok().filter(|v| !v.is_empty()) else {
-            return Ok(None);
-        };
-        let run = Run::init(RunOptions {
-            kind: RunKind::Train,
-            mode: self.mode,
-            base_url: base_url_override(),
-            finish_timeout: FINISH_TIMEOUT,
-            id: Some(run_id),
-            spec: RunSpec::default(),
+        Ok(PrimeEvalMonitor {
+            online,
+            name: setup.name,
+            model: setup.model,
+            sources,
+            run_id,
+            output_dir,
+            runs: IndexMap::new(),
+            parent,
+            evaluation_id,
         })
-        .await?;
-        tracing::info!("Logging eval metrics to parent training run {}", run.id);
-        Ok(Some(run))
     }
 
     async fn open(&self, env_name: &str, step: u64, expected: Option<u64>) -> Result<Run> {
-        let options = |id: Option<String>, spec: RunSpec| RunOptions {
-            kind: RunKind::Eval,
-            mode: self.mode,
-            base_url: base_url_override(),
-            finish_timeout: FINISH_TIMEOUT,
-            id,
-            spec,
-        };
         if let Some(id) = &self.evaluation_id {
+            // a hosted launch pre-created the evaluation
             if !self.runs.is_empty() {
                 bail!("${EVAL_ID_VAR} holds one epoch, and it already took one");
             }
-            return Ok(Run::init(options(Some(id.clone()), RunSpec::default())).await?);
+            return Run::init(
+                RunKind::Eval,
+                self.online,
+                Some(id.clone()),
+                RunSpec::default(),
+            )
+            .await
+            .map_err(|e| anyhow!(e.describe()));
         }
         let source = self
             .sources
             .get(env_name)
-            .ok_or_else(|| anyhow::anyhow!("KeyError: '{env_name}'"))?;
-        let base = self.name.clone().unwrap_or_else(|| "None".into());
+            .ok_or_else(|| anyhow!("KeyError: '{env_name}'"))?;
         let name = if self.sources.len() == 1 {
             self.name.clone()
         } else {
-            Some(format!("{base}--{env_name}"))
+            Some(format!(
+                "{}--{env_name}",
+                self.name.as_deref().unwrap_or("None")
+            ))
         };
-        let num_examples = expected.filter(|e| *e > 0).map(|e| e / source.group_size);
         let config = json!({
             "model": self.model,
             "step": step,
             "run_id": self.run_id,
-            "num_examples": num_examples,
+            "num_examples": expected.filter(|e| *e > 0).map(|e| e / source.group_size),
             "rollouts_per_example": source.group_size,
         });
         let spec = RunSpec {
@@ -234,7 +203,9 @@ impl PrimeEvalMonitor {
             config: config.as_object().expect("object").clone(),
             ..Default::default()
         };
-        Ok(Run::init(options(None, spec)).await?)
+        Run::init(RunKind::Eval, self.online, None, spec)
+            .await
+            .map_err(|e| anyhow!(e.describe()))
     }
 
     /// The epoch's evaluation, opened on first use.
@@ -246,60 +217,44 @@ impl PrimeEvalMonitor {
     ) -> Option<&mut Run> {
         let key = (env_name.to_string(), step);
         if !self.runs.contains_key(&key) {
-            let opened = self.open(env_name, step, expected).await;
-            match opened {
+            let run = match self.open(env_name, step, expected).await {
+                Ok(run) => Some(run),
                 Err(e) => {
                     tracing::warn!("Failed to open the {env_name} (Step {step}) evaluation: {e:#}");
-                    self.runs.insert(key.clone(), None);
-                    if let Some(output_dir) = self.output_dir.clone() {
-                        let env = env_name.to_string();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            publish_link(&output_dir, PRIME_EVAL_LINKS, &env, None)
-                        })
-                        .await;
-                    }
+                    None
                 }
-                Ok(run) => {
-                    if let Some(url) = &run.url {
-                        let attached = if run.attached {
-                            format!(" (attached via ${EVAL_ID_VAR})")
-                        } else {
-                            String::new()
-                        };
-                        tracing::info!(
-                            "Streaming {env_name} (Step {step}) evaluation - {url}{attached}"
-                        );
-                    }
-                    if let Some(output_dir) = self.output_dir.clone() {
-                        let (env, id, url, run_id) = (
-                            env_name.to_string(),
-                            run.id.clone(),
-                            run.url.clone(),
-                            self.run_id.clone(),
-                        );
-                        let _ = tokio::task::spawn_blocking(move || {
-                            if let Some(url) = &url {
-                                update_record(&platform_run_path(&output_dir), |mut record| {
-                                    record.entry("kind").or_insert("eval".into());
-                                    record.entry("run_id").or_insert(run_id.into());
-                                    let evaluations =
-                                        record.entry("evaluations").or_insert(json!({}));
-                                    if let Some(evaluations) = evaluations.as_object_mut() {
-                                        evaluations.insert(
-                                            env.clone(),
-                                            json!({"step": step, "id": id, "url": url}),
-                                        );
-                                    }
-                                    record
-                                });
-                            }
-                            publish_link(&output_dir, PRIME_EVAL_LINKS, &env, url.as_deref());
-                        })
-                        .await;
-                    }
-                    self.runs.insert(key.clone(), Some(run));
-                }
+            };
+            let url = run.as_ref().and_then(|r| r.url.clone());
+            if let (Some(run), Some(url)) = (&run, &url) {
+                let attached = if run.attached {
+                    format!(" (attached via ${EVAL_ID_VAR})")
+                } else {
+                    String::new()
+                };
+                tracing::info!("Streaming {env_name} (Step {step}) evaluation - {url}{attached}");
             }
+            let (dir, env, run_id) = (
+                self.output_dir.clone(),
+                env_name.to_string(),
+                self.run_id.clone(),
+            );
+            let id = run.as_ref().map(|r| r.id.clone());
+            tokio::task::spawn_blocking(move || {
+                if let (Some(id), Some(url)) = (id, &url) {
+                    update_record(&platform_run_path(&dir), |mut record| {
+                        let fields = record.as_object_mut().expect("records are objects");
+                        fields.entry("kind").or_insert("eval".into());
+                        fields.entry("run_id").or_insert(run_id.into());
+                        let evaluations = fields.entry("evaluations").or_insert(json!({}));
+                        evaluations[&env] = json!({"step": step, "id": id, "url": url});
+                        record
+                    });
+                }
+                publish_link(&dir, PRIME_EVAL_LINKS, &env, url.as_deref());
+            })
+            .await
+            .expect("record update panicked");
+            self.runs.insert(key.clone(), run);
         }
         self.runs.get_mut(&key).and_then(Option::as_mut)
     }
@@ -335,17 +290,14 @@ impl Monitor for PrimeEvalMonitor {
         if kind != Kind::Eval || subset != Subset::All {
             return Ok(());
         }
-        let mut by_env: IndexMap<String, Vec<EpisodeRef>> = IndexMap::new();
+        let mut by_env: IndexMap<&str, Vec<EpisodeRef>> = IndexMap::new();
         for episode in episodes {
             if let Some(name) = &episode.env.name {
-                by_env
-                    .entry(name.clone())
-                    .or_default()
-                    .push(episode.clone());
+                by_env.entry(name).or_default().push(episode.clone());
             }
         }
         for (env_name, batch) in by_env {
-            if let Some(run) = self.run_for(&env_name, step, None).await {
+            if let Some(run) = self.run_for(env_name, step, None).await {
                 run.log_episodes(batch).await;
             }
         }
@@ -363,7 +315,7 @@ impl Monitor for PrimeEvalMonitor {
         let Some(run) = self.run_for(env_name, step, None).await else {
             return Ok(());
         };
-        run.finish(Some(summary), RunStatus::Completed, None).await;
+        run.finish(summary, RunStatus::Completed, None).await;
         tracing::info!(
             "Uploaded {env_name} (Step {step}) evaluation - {}",
             run.url.as_deref().unwrap_or("None")
@@ -371,33 +323,22 @@ impl Monitor for PrimeEvalMonitor {
         Ok(())
     }
 
-    /// An epoch the run did not finish leaves its evaluation open: close it as cancelled.
+    /// An epoch the run did not finish leaves its evaluation open: close it as cancelled. The
+    /// parent run is only drained: its status is never this process's to report.
     async fn finalize(&mut self, _paused: bool) -> Result<()> {
         for run in self.runs.values_mut().flatten() {
-            if !run.finished {
-                run.finish(None, RunStatus::Cancelled, Some("interrupted".into()))
-                    .await;
-            }
+            run.finish(Map::new(), RunStatus::Cancelled, Some("interrupted".into()))
+                .await;
         }
         if let Some(parent) = &self.parent {
-            // Drain only: the parent run belongs to the trainer and the platform.
             parent.flush(FINISH_TIMEOUT).await;
         }
         Ok(())
     }
 
-    /// The SDK's atexit hook on each open evaluation (the parent has none).
     async fn crash(&mut self) -> Result<()> {
         for run in self.runs.values_mut().flatten() {
-            if !run.finished {
-                tracing::warn!("Run {} was never finished; reporting it as crashed", run.id);
-                run.finish(
-                    None,
-                    RunStatus::Crashed,
-                    Some("process exited without finishing the run".into()),
-                )
-                .await;
-            }
+            run.crash().await;
         }
         if let Some(parent) = &self.parent {
             parent.flush(FINISH_TIMEOUT).await;
