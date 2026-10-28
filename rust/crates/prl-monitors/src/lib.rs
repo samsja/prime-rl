@@ -405,8 +405,16 @@ pub async fn spawn(
             tracing::debug!("Initialized monitors in {:.2}s", t0.elapsed().as_secs_f64());
         }
     }
+    Ok(spawn_monitors(monitors, cancel))
+}
+
+/// Start the actor over already-initialized monitors.
+pub fn spawn_monitors(
+    monitors: Vec<Box<dyn Monitor>>,
+    cancel: CancellationToken,
+) -> (Monitors, JoinHandle<Result<()>>) {
     let (tx, rx) = mpsc::channel(INBOX);
-    Ok((Monitors { tx }, tokio::spawn(run(monitors, rx, cancel))))
+    (Monitors { tx }, tokio::spawn(run(monitors, rx, cancel)))
 }
 
 fn py_opt(value: &Option<String>) -> String {

@@ -23,9 +23,7 @@ async fn route(
     body: Bytes,
 ) -> Json<Json_> {
     let path = uri.path().to_string();
-    let body: Json_ = if path.ends_with("/traces") {
-        Json_::Null
-    } else if body.is_empty() {
+    let body: Json_ = if path.ends_with("/traces") || body.is_empty() {
         Json_::Null
     } else {
         serde_json::from_slice(&body).unwrap()

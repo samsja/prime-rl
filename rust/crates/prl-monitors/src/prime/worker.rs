@@ -322,3 +322,148 @@ impl<R: Send + Sync + 'static> UploadWorker<R> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    struct FakeSink {
+        enabled: bool,
+        writes: Arc<Mutex<Vec<Vec<u32>>>>,
+        errors: Arc<Mutex<Vec<ApiError>>>,
+    }
+
+    #[async_trait]
+    impl Sink<u32> for FakeSink {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn enabled(&self) -> bool {
+            self.enabled
+        }
+        fn set_enabled(&mut self, enabled: bool) {
+            self.enabled = enabled;
+        }
+        async fn write(&mut self, records: &[u32]) -> Result<(), SinkError> {
+            self.writes.lock().unwrap().push(records.to_vec());
+            match self.errors.lock().unwrap().pop() {
+                Some(cause) => Err(SinkError {
+                    cause,
+                    failed_records: records.len(),
+                }),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn transient() -> ApiError {
+        ApiError::Retryable {
+            status: 503,
+            message: "busy".into(),
+            code: None,
+            retry_after: None,
+        }
+    }
+
+    fn worker(
+        errors: Vec<ApiError>,
+        cooldown: Option<Duration>,
+    ) -> (UploadWorker<u32>, Arc<Mutex<Vec<Vec<u32>>>>) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let sink = FakeSink {
+            enabled: true,
+            writes: writes.clone(),
+            errors: Arc::new(Mutex::new(errors)),
+        };
+        (UploadWorker::spawn(vec![Box::new(sink)], cooldown), writes)
+    }
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    #[tokio::test]
+    async fn transient_strikes_retire_the_sink() {
+        let (mut w, writes) = worker(vec![transient(), transient(), transient()], None);
+        for i in 0..5 {
+            w.submit(vec![i]).await;
+            w.flush(soon()).await;
+        }
+        let report = w.close(soon()).await.unwrap();
+        // three strikes, then retired: the last two batches never reach it and count as lost
+        assert_eq!(writes.lock().unwrap().len(), 3);
+        assert_eq!(report.failed_records["fake"], 5);
+        assert_eq!(report.errors.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn record_rejections_keep_the_sink() {
+        let rejection = ApiError::ValidationRejected {
+            message: "bad".into(),
+            code: None,
+        };
+        let (mut w, writes) = worker(vec![rejection], None);
+        w.submit(vec![1]).await;
+        w.flush(soon()).await;
+        w.submit(vec![2]).await;
+        let report = w.close(soon()).await.unwrap();
+        assert_eq!(*writes.lock().unwrap(), [vec![1], vec![2]]);
+        assert_eq!(report.failed_records["fake"], 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retired_sink_revives_after_cooldown() {
+        let (mut w, writes) = worker(
+            vec![transient(), transient(), transient()],
+            Some(Duration::from_secs(300)),
+        );
+        for i in 0..4 {
+            w.submit(vec![i]).await;
+            w.flush(soon()).await;
+        }
+        assert_eq!(writes.lock().unwrap().len(), 3);
+        tokio::time::advance(Duration::from_secs(301)).await;
+        w.submit(vec![9]).await;
+        w.close(soon()).await.unwrap();
+        assert_eq!(writes.lock().unwrap().last().unwrap(), &vec![9]);
+    }
+
+    #[tokio::test]
+    async fn queued_batches_coalesce_and_a_full_queue_drops() {
+        let (tx, rx) = mpsc::channel(4);
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let sink = FakeSink {
+            enabled: true,
+            writes: writes.clone(),
+            errors: Arc::default(),
+        };
+        for i in 0..3 {
+            tx.send(Item::Records(vec![i])).await.unwrap();
+        }
+        tx.send(Item::Stop).await.unwrap();
+        let state = State {
+            sinks: vec![Box::new(sink) as Box<dyn Sink<u32>>],
+            retire_cooldown: None,
+            report: WorkerReport::default(),
+            transient: HashMap::new(),
+            retired: HashSet::new(),
+            cooldowns: HashMap::new(),
+        };
+        run(rx, state).await;
+        assert_eq!(*writes.lock().unwrap(), [vec![0, 1, 2]]);
+
+        // a worker whose queue stays full drops after the put timeout
+        let (tx, _rx) = mpsc::channel(1);
+        let mut w: UploadWorker<u32> = UploadWorker {
+            tx: Some(tx),
+            task: None,
+            put_timeout: Duration::from_millis(10),
+            dropped: 0,
+        };
+        assert!(w.submit(vec![1]).await);
+        assert!(!w.submit(vec![2, 3]).await);
+        assert_eq!(w.dropped, 2);
+    }
+}
