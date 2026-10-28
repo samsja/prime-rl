@@ -1,145 +1,82 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use prl_eval::resume::{archives, read_records, stamp_config, take_landed, take_landed_episodes, to_orjson_indent2};
-use serde_json::Value;
+use prl_eval::resume::{archives, stamp_config, take_landed};
+use serde_json::{json, Value};
 
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+fn record(id: &str, ok: bool) -> String {
+    json!({
+        "id": id,
+        "env": {"id": "math", "name": "math"},
+        "task": {"type": "Task", "data": {"idx": 0}, "key": id, "hash": id},
+        "group": {"id": "g"},
+        "ok": ok,
+        "traces": [],
+    })
+    .to_string()
 }
 
-fn load(name: &str) -> Value {
-    serde_json::from_slice(&fs::read(fixtures().join(name)).unwrap()).unwrap()
-}
-
-fn copy_dir(src: &Path, dst: &Path) {
-    fs::create_dir_all(dst).unwrap();
-    for entry in fs::read_dir(src).unwrap() {
-        let path = entry.unwrap().path();
-        let target = dst.join(path.file_name().unwrap());
-        if path.is_dir() {
-            copy_dir(&path, &target);
+/// One attempt's file monitor dir: the stamped config and its stream chunks (`None` = sealed).
+fn attempt(run: &Path, dir: &str, config: &Value, chunks: &[(&str, bool)]) {
+    let monitors = run.join("monitors");
+    stamp_config(run, config).unwrap();
+    let stream = monitors.join("file/traces/stream");
+    fs::create_dir_all(&stream).unwrap();
+    for (number, (text, sealed)) in chunks.iter().enumerate() {
+        let path = stream.join(format!("{number:05}.jsonl"));
+        if *sealed {
+            fs::write(path.with_extension("jsonl.zst"), zstd::encode_all(text.as_bytes(), 3).unwrap()).unwrap();
         } else {
-            fs::copy(&path, &target).unwrap();
+            fs::write(path, text).unwrap();
         }
     }
-}
-
-fn parse(line: &[u8]) -> anyhow::Result<(String, bool)> {
-    let record: Value = serde_json::from_slice(line)?;
-    Ok((record["id"].as_str().unwrap().to_owned(), record["ok"].as_bool().unwrap()))
-}
-
-#[test]
-fn stamp_matches_orjson_indent2() {
-    let expected = load("resume_expected.json");
-    let stamp = expected["stamp"].as_str().unwrap();
-    let config: Value = serde_json::from_str(stamp).unwrap();
-    assert_eq!(String::from_utf8(to_orjson_indent2(&config).unwrap()).unwrap(), stamp);
-
-    let dir = tempfile::tempdir().unwrap();
-    stamp_config(dir.path(), &config).unwrap();
-    assert_eq!(fs::read_to_string(dir.path().join("monitors/file/eval.json")).unwrap(), stamp);
-}
-
-#[test]
-fn take_landed_reads_sealed_and_live_chunks_and_rotates() {
-    let expected = load("resume_expected.json");
-    let config = load("resume_config.json");
-    let dir = tempfile::tempdir().unwrap();
-    let run = dir.path().join("run");
-    copy_dir(&fixtures().join("resume_run"), &run);
-
-    let landed = take_landed(&run, &config, false, parse).unwrap();
-
-    let ids: Vec<&str> = expected["landed"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-    assert_eq!(landed, ids);
-    let names: Vec<String> =
-        archives(&run).unwrap().iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-    assert_eq!(names, expected["archives"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>());
-    assert!(!run.join("monitors/file").exists());
-}
-
-#[test]
-fn torn_line_ends_the_stream() {
-    let stream = fixtures().join("resume_run/monitors/file/traces/stream");
-    let ids: Vec<String> = read_records(&stream).unwrap().into_iter().map(|(_, r)| r["id"].as_str().unwrap().to_owned()).collect();
-    assert_eq!(ids, ["b0", "b1"]);
-}
-
-#[test]
-fn validation_error_leaves_the_run_untouched() {
-    let config = load("resume_config.json");
-    let dir = tempfile::tempdir().unwrap();
-    let run = dir.path().join("run");
-    copy_dir(&fixtures().join("resume_run"), &run);
-    let err = take_landed(&run, &config, false, |_| -> anyhow::Result<((), bool)> { anyhow::bail!("invalid") });
-    assert!(err.is_err());
-    assert!(run.join("monitors/file").is_dir());
-    assert_eq!(archives(&run).unwrap().len(), 1);
-}
-
-#[test]
-fn config_checks_match_python() {
-    for case in load("resume_config_cases.json").as_array().unwrap() {
-        for skip_checks in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            stamp_config(dir.path(), &case["saved"]).unwrap();
-            let result = take_landed(dir.path(), &case["current"], skip_checks, parse);
-            match (&case["error"], skip_checks) {
-                (Value::String(message), false) => {
-                    let got = result.unwrap_err().to_string().replace(&dir.path().display().to_string(), "<RUN>");
-                    assert_eq!(&got, message);
-                    assert!(dir.path().join("monitors/file").is_dir());
-                }
-                _ => {
-                    assert!(result.unwrap().is_empty());
-                    assert!(!dir.path().join("monitors/file").exists());
-                    assert_eq!(archives(dir.path()).unwrap().len(), 1);
-                }
-            }
-        }
+    if dir != "file" {
+        fs::rename(monitors.join("file"), monitors.join(dir)).unwrap();
     }
 }
 
 #[test]
-fn missing_saved_config_needs_skip_checks() {
-    let config = load("resume_config.json");
-    for skip_checks in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("monitors/file")).unwrap();
-        let result = take_landed(dir.path(), &config, skip_checks, parse);
-        if skip_checks {
-            assert!(result.unwrap().is_empty());
-            assert_eq!(archives(dir.path()).unwrap().len(), 1);
-        } else {
-            assert!(result.unwrap_err().to_string().contains("no saved config"));
-            assert!(archives(dir.path()).unwrap().is_empty());
-        }
-    }
+fn landed_episodes_come_from_every_attempt() {
+    let run = tempfile::tempdir().unwrap();
+    let config = json!({"model": "m", "resume": null});
+    let sealed = format!("{}\n{}\n", record("a0", true), record("a1", false));
+    let no_traces = json!({"id": "a2", "env": {"id": "math"}, "task": {"type": "Task", "data": {}}, "ok": true}).to_string();
+    attempt(run.path(), "file.attempt_1", &config, &[(&sealed, true), (&format!("{no_traces}\n"), false)]);
+    // the live chunk of the interrupted attempt ends in a torn line
+    let live = format!("{}\n{{\"id\": \"torn\", \"ok\": tr", record("b0", true));
+    attempt(run.path(), "file", &json!({"model": "m", "resume": {"skip_checks": false}}), &[(&live, false)]);
+
+    let landed = take_landed(run.path(), &config, false).unwrap();
+
+    assert_eq!(landed.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["a0", "b0"]);
+    assert!(!run.path().join("monitors/file").exists());
+    let names: Vec<String> = archives(run.path()).unwrap().iter().map(|p| p.file_name().unwrap().to_string_lossy().into()).collect();
+    assert_eq!(names, ["file.attempt_1", "file.attempt_2"]);
 }
 
 #[test]
-fn saved_episodes_are_validated_like_python() {
-    let fixture = load("resume_validation_cases.json");
-    for case in fixture["cases"].as_array().unwrap() {
-        let dir = tempfile::tempdir().unwrap();
-        stamp_config(dir.path(), &fixture["config"]).unwrap();
-        let stream = dir.path().join("monitors/file/traces/stream");
-        fs::create_dir_all(&stream).unwrap();
-        let lines: String = case["lines"].as_array().unwrap().iter().map(|l| format!("{}\n", l.as_str().unwrap())).collect();
-        fs::write(stream.join("00000.jsonl"), lines).unwrap();
-        let result = take_landed_episodes(dir.path(), &fixture["config"], false);
-        match &case["landed"] {
-            Value::Null => {
-                assert!(result.is_err(), "{case}");
-                assert!(dir.path().join("monitors/file").is_dir());
-            }
-            Value::Array(ids) => {
-                let got: Vec<String> = result.unwrap().into_iter().map(|e| e.id).collect();
-                assert_eq!(got, ids.iter().map(|v| v.as_str().unwrap().to_owned()).collect::<Vec<_>>(), "{case}");
-            }
-            _ => unreachable!(),
-        }
-    }
+fn changed_configs_need_skip_checks() {
+    let run = tempfile::tempdir().unwrap();
+    attempt(run.path(), "file", &json!({"model": "m", "group_size": 1, "log": {"level": "info"}}), &[]);
+    let current = json!({"model": "m", "group_size": 2, "log": {"level": "debug"}, "resume": {}});
+
+    let err = take_landed(run.path(), &current, false).unwrap_err().to_string();
+    assert!(err.contains("monitors/file/eval.json in [group_size, log]"), "{err}");
+    assert!(err.contains("--resume.skip-checks"));
+    assert!(run.path().join("monitors/file").is_dir());
+
+    assert!(take_landed(run.path(), &current, true).unwrap().is_empty());
+    assert_eq!(archives(run.path()).unwrap().len(), 1);
+}
+
+#[test]
+fn missing_saved_config_or_invalid_episode_leaves_the_run_untouched() {
+    let run = tempfile::tempdir().unwrap();
+    fs::create_dir_all(run.path().join("monitors/file")).unwrap();
+    let err = take_landed(run.path(), &json!({}), false).unwrap_err().to_string();
+    assert!(err.contains("no saved config"), "{err}");
+
+    attempt(run.path(), "file", &json!({}), &[("{\"id\": \"bad\", \"traces\": null}\n", false)]);
+    assert!(take_landed(run.path(), &json!({}), false).is_err());
+    assert!(archives(run.path()).unwrap().is_empty());
 }
