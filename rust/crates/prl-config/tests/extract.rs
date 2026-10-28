@@ -80,6 +80,11 @@ fn extracts_every_config() {
                 Some(config.batch_size),
                 "{name}"
             );
+            assert!(
+                config.reprs.weight_broadcast.contains(&format!("type='{}'", config.weight_broadcast.tag())),
+                "{name}: {}",
+                config.reprs.weight_broadcast
+            );
             let env_names: Vec<&str> = config
                 .env_addresses
                 .keys()

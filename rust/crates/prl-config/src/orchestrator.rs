@@ -226,6 +226,17 @@ pub struct OrchestratorConfig {
     /// The whole config as `model_dump(exclude_none=True, mode="json")`: the run config the
     /// prime monitor registers.
     pub prime_run_config: Value,
+    /// `str()` of sub-configs the orchestrator prints in its setup log lines.
+    pub reprs: ConfigReprs,
+}
+
+/// Python `str()` (pydantic field repr) of sub-configs, for log lines like
+/// `Initializing weight broadcast (timeout=3600 type='filesystem')`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConfigReprs {
+    pub model: String,
+    pub rollout_transport: String,
+    pub weight_broadcast: String,
 }
 
 impl OrchestratorConfig {
@@ -271,6 +282,11 @@ impl<'py> FromPyObject<'py> for OrchestratorConfig {
             any_policy_sourced: attr("any_policy_sourced")?.extract()?,
             dump: model_dump(obj)?,
             prime_run_config: model_dump_exclude_none(obj)?,
+            reprs: ConfigReprs {
+                model: attr("model")?.str()?.to_string(),
+                rollout_transport: attr("rollout_transport")?.str()?.to_string(),
+                weight_broadcast: attr("weight_broadcast")?.str()?.to_string(),
+            },
         })
     }
 }

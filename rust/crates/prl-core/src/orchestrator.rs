@@ -251,7 +251,7 @@ impl Orchestrator {
         tasks: &mut Components,
         cancel: CancellationToken,
     ) -> Result<Self> {
-        info!("Initializing policy inference pool (name='{}')", config.model.name);
+        info!("Initializing policy inference pool ({})", config.reprs.model);
         let policy_client = Arc::new(InferenceClient::new(
             &config.model.client,
             &config.model.name,
@@ -299,7 +299,7 @@ impl Orchestrator {
         }
 
         let packer = Arc::new(crate::train_glue::build_packer(&config, &bridge).await?);
-        info!("Initializing micro batch sender ({})", config.rollout_transport.tag());
+        info!("Initializing micro batch sender ({})", config.reprs.rollout_transport);
         let sender = prl_train::BatchSender::new(
             config.output_dir.clone(),
             config.num_train_workers as usize,
@@ -378,7 +378,7 @@ impl Orchestrator {
         futures::future::try_join_all(algorithms.iter_mut().map(|a| a.setup())).await?;
 
         let admin_clients = admin.clients().to_vec();
-        info!("Initializing weight broadcast ({})", config.weight_broadcast.tag());
+        info!("Initializing weight broadcast ({})", config.reprs.weight_broadcast);
         let t0 = Instant::now();
         let mut receiver = WeightReceiver::new(
             prl_io::pathing::broadcast_dir(&config.output_dir),
