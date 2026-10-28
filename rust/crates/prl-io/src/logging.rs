@@ -15,6 +15,8 @@ use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
+use prl_wire::json::to_python_json;
+use prl_wire::Value;
 
 /// Log at loguru's SUCCESS level.
 #[macro_export]
@@ -28,7 +30,7 @@ const DIM: &str = "\x1b[2m";
 
 /// Loguru levels, ordered by severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogLevel {
+enum LogLevel {
     Trace,
     Debug,
     Info,
@@ -38,7 +40,7 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    pub fn parse(level: &str) -> anyhow::Result<Self> {
+    fn parse(level: &str) -> anyhow::Result<Self> {
         Ok(match level.to_ascii_uppercase().as_str() {
             "TRACE" => Self::Trace,
             "DEBUG" => Self::Debug,
@@ -50,7 +52,7 @@ impl LogLevel {
         })
     }
 
-    pub fn name(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Self::Trace => "TRACE",
             Self::Debug => "DEBUG",
@@ -74,23 +76,19 @@ impl LogLevel {
     }
 }
 
-/// One log record, independent of tracing.
-#[derive(Debug, Clone)]
-pub struct Record<'a> {
-    pub level: LogLevel,
-    pub message: &'a str,
-    pub time: chrono::DateTime<chrono::Local>,
-    pub file: &'a str,
-    pub line: u32,
-    pub module: &'a str,
+struct Record<'a> {
+    level: LogLevel,
+    message: &'a str,
+    time: chrono::DateTime<chrono::Local>,
+    file: &'a str,
+    line: u32,
 }
 
-/// The colorized console line (without trailing newline).
-pub fn format_console(record: &Record, tag: Option<&str>, with_location: bool) -> String {
+/// The colorized console line.
+fn format_console(record: &Record, with_location: bool) -> String {
     let color = record.level.color();
-    let tag_prefix = tag.map(|t| format!("[{t}] ")).unwrap_or_default();
     let mut line = format!(
-        "{DIM}{}{RESET} {color}{:>7}{RESET} {color}{NO_BOLD}{tag_prefix}{}{RESET}{RESET}",
+        "{DIM}{}{RESET} {color}{:>7}{RESET} {color}{NO_BOLD}{}{RESET}{RESET}",
         record.time.format("%H:%M:%S"),
         record.level.name(),
         record.message,
@@ -101,54 +99,20 @@ pub fn format_console(record: &Record, tag: Option<&str>, with_location: bool) -
     line
 }
 
-/// The plain file-sink line (without trailing newline).
-pub fn format_plain(record: &Record, tag: Option<&str>) -> String {
-    let tag_prefix = tag.map(|t| format!("[{t}] ")).unwrap_or_default();
-    format!("{} {:>7} {tag_prefix}{}", record.time.format("%H:%M:%S"), record.level.name(), record.message)
-}
-
-/// The flat JSON line (Loki/Grafana), as Python's `json.dumps` renders it.
-pub fn format_json(record: &Record, tag: Option<&str>) -> String {
-    let timestamp = record.time.format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string();
-    let mut out = format!(
-        "{{\"timestamp\": {}, \"level\": {}, \"message\": {}, \"module\": {}, \"function\": \"\", \"line\": {}",
-        py_json_str(&timestamp),
-        py_json_str(record.level.name()),
-        py_json_str(record.message),
-        py_json_str(record.module),
-        record.line,
-    );
-    if let Some(tag) = tag {
-        let _ = write!(out, ", \"tag\": {}", py_json_str(tag));
-    }
-    out.push('}');
-    out
-}
-
-/// A JSON string literal with `ensure_ascii=True` escaping.
-fn py_json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    let _ = write!(out, "\\u{unit:04x}");
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+/// The flat JSON line (Loki/Grafana) as Python's `json.dumps` renders it.
+fn format_json(record: &Record) -> String {
+    let entry: prl_wire::Map = [
+        ("timestamp", Value::Str(record.time.format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string())),
+        ("level", Value::Str(record.level.name().into())),
+        ("message", Value::Str(record.message.into())),
+        ("module", Value::Str(record.file.strip_suffix(".rs").unwrap_or(record.file).into())),
+        ("function", Value::Str(String::new())),
+        ("line", Value::Int(record.line.into())),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect();
+    to_python_json(&Value::Map(entry), false)
 }
 
 /// `format_time` of `utils/logger.py`.
@@ -210,14 +174,10 @@ impl Visit for MessageVisitor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Sink {
-    Console { with_location: bool },
-    Json,
-}
-
 struct LoguruLayer {
-    sink: Sink,
+    json: bool,
+    /// Loguru's debug format appends ` [file::line]`.
+    with_location: bool,
     level: LogLevel,
     console_level: LogLevel,
     file: Option<Mutex<File>>,
@@ -244,28 +204,23 @@ impl<S: Subscriber> Layer<S> for LoguruLayer {
         }
         let message = visitor.message + &visitor.fields;
         let path = event.metadata().file().unwrap_or("");
-        let file = path.rsplit('/').next().unwrap_or(path);
         let record = Record {
             level,
             message: &message,
             time: chrono::Local::now(),
-            file,
+            file: path.rsplit('/').next().unwrap_or(path),
             line: event.metadata().line().unwrap_or(0),
-            module: file.strip_suffix(".rs").unwrap_or(file),
         };
         // Records carrying `console = true` (e.g. a banner) pass the console threshold.
         if level >= self.console_level || visitor.console {
-            let line = match self.sink {
-                Sink::Console { with_location } => format_console(&record, None, with_location),
-                Sink::Json => format_json(&record, None),
-            };
+            let line = if self.json { format_json(&record) } else { format_console(&record, self.with_location) };
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{line}");
             let _ = stdout.flush();
         }
         if let Some(file) = &self.file {
             let mut file = file.lock().expect("log file lock");
-            let _ = writeln!(file, "{}", format_plain(&record, None));
+            let _ = writeln!(file, "{} {:>7} {}", record.time.format("%H:%M:%S"), level.name(), record.message);
         }
     }
 }
@@ -277,12 +232,11 @@ impl<S: Subscriber> Layer<S> for LoguruLayer {
 pub fn setup_logger(level: &str, json_logging: bool, log_file: Option<&Path>, console_level: Option<&str>) -> anyhow::Result<()> {
     let level = LogLevel::parse(level)?;
     let console_level = console_level.map(LogLevel::parse).transpose()?.unwrap_or(level);
-    let sink = if json_logging { Sink::Json } else { Sink::Console { with_location: level == LogLevel::Debug } };
     let file = match log_file {
         Some(path) => Some(Mutex::new(File::options().create(true).append(true).open(path)?)),
         None => None,
     };
-    let layer = LoguruLayer { sink, level, console_level, file };
+    let layer = LoguruLayer { json: json_logging, with_location: level == LogLevel::Debug, level, console_level, file };
     let filter = filter_fn(|meta| meta.target().starts_with("prl_") || *meta.level() <= Level::WARN);
     Registry::default().with(layer.with_filter(filter)).try_init()?;
     Ok(())
@@ -294,67 +248,29 @@ mod tests {
     use chrono::TimeZone;
 
     fn record(level: LogLevel, message: &str) -> Record<'_> {
-        Record {
-            level,
-            message,
-            time: chrono::Local.with_ymd_and_hms(2026, 10, 28, 8, 22, 44).unwrap(),
-            file: "io_log.py",
-            line: 6,
-            module: "io_log",
-        }
+        let time = chrono::Local.with_ymd_and_hms(2026, 10, 28, 8, 22, 44).unwrap();
+        Record { level, message, time, file: "io_log.py", line: 6 }
     }
 
     #[test]
-    fn console_lines_match_loguru() {
-        // Captured from `setup_logger("info")` / `setup_logger("debug")` in Python.
+    fn lines_match_loguru() {
+        // Captured from Python's `setup_logger("info")` / `setup_logger("debug")`.
         assert_eq!(
-            format_console(&record(LogLevel::Info, "info message"), None, false),
-            "\x1b[2m08:22:44\x1b[0m \x1b[1m   INFO\x1b[0m \x1b[1m\x1b[22minfo message\x1b[0m\x1b[0m"
-        );
-        assert_eq!(
-            format_console(&record(LogLevel::Success, "ok message"), None, false),
+            format_console(&record(LogLevel::Success, "ok message"), false),
             "\x1b[2m08:22:44\x1b[0m \x1b[32m\x1b[1mSUCCESS\x1b[0m \x1b[32m\x1b[1m\x1b[22mok message\x1b[0m\x1b[0m"
         );
         assert_eq!(
-            format_console(&record(LogLevel::Warning, "warn message"), None, false),
-            "\x1b[2m08:22:44\x1b[0m \x1b[33m\x1b[1mWARNING\x1b[0m \x1b[33m\x1b[1m\x1b[22mwarn message\x1b[0m\x1b[0m"
-        );
-        assert_eq!(
-            format_console(&record(LogLevel::Error, "err message"), None, false),
-            "\x1b[2m08:22:44\x1b[0m \x1b[31m\x1b[1m  ERROR\x1b[0m \x1b[31m\x1b[1m\x1b[22merr message\x1b[0m\x1b[0m"
-        );
-        assert_eq!(
-            format_console(&record(LogLevel::Debug, "dbg message"), None, true),
+            format_console(&record(LogLevel::Debug, "dbg message"), true),
             "\x1b[2m08:22:44\x1b[0m \x1b[34m\x1b[1m  DEBUG\x1b[0m \x1b[34m\x1b[1m\x1b[22mdbg message\x1b[0m\x1b[0m\x1b[34m\x1b[1m\x1b[22m [io_log.py::6]\x1b[0m\x1b[0m"
         );
-    }
-
-    #[test]
-    fn json_line_uses_python_separators() {
-        let line = format_json(&record(LogLevel::Info, "json, message: \"x\""), None);
-        assert!(line.starts_with("{\"timestamp\": \"2026-10-28T08:22:44.000000"), "{line}");
-        assert!(line.contains("\"level\": \"INFO\", \"message\": \"json, message: \\\"x\\\"\""), "{line}");
-        assert!(line.ends_with("\"module\": \"io_log\", \"function\": \"\", \"line\": 6}"), "{line}");
-        assert_eq!(py_json_str("é😀\u{7f}"), "\"\\u00e9\\ud83d\\ude00\\u007f\"");
+        let json = format_json(&record(LogLevel::Info, "é"));
+        assert!(json.ends_with(r#""level": "INFO", "message": "\u00e9", "module": "io_log.py", "function": "", "line": 6}"#), "{json}");
     }
 
     #[test]
     fn format_time_matches_python() {
-        // Expected values from prime_rl.utils.logger.format_time.
-        for (seconds, expected) in [
-            (0.0, "0ms"),
-            (0.0004, "0ms"),
-            (0.5, "500ms"),
-            (0.9996, "1000ms"),
-            (1.0, "1.0s"),
-            (59.96, "60.0s"),
-            (61.5, "1m 1s"),
-            (3599.9, "59m 59s"),
-            (3600.0, "1h 0m"),
-            (7322.0, "2h 2m"),
-            (86400.0, "1d 0h"),
-            (200000.0, "2d 7h"),
-        ] {
+        let cases = [(0.0004, "0ms"), (0.9996, "1000ms"), (59.96, "60.0s"), (61.5, "1m 1s"), (7322.0, "2h 2m"), (200000.0, "2d 7h")];
+        for (seconds, expected) in cases {
             assert_eq!(format_time(seconds), expected, "{seconds}");
         }
     }

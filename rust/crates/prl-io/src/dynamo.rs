@@ -13,13 +13,13 @@ use crate::clients::{check_health, maybe_check_has_model, update_engines, Transp
 use crate::http::{admin_post, header_map, router_admin_client, AdminClient, AdminRequest, ADMIN_TIMEOUT_S, UPDATE_WEIGHTS_TIMEOUT_S};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DynamoWorker {
-    pub admin_base_url: String,
-    pub instance_id: u64,
+struct DynamoWorker {
+    admin_base_url: String,
+    instance_id: u64,
 }
 
 impl DynamoWorker {
-    pub fn fingerprint(&self) -> (u64, String) {
+    fn fingerprint(&self) -> (u64, String) {
         (self.instance_id, self.admin_base_url.clone())
     }
 }
@@ -27,7 +27,7 @@ impl DynamoWorker {
 /// Why a discovery attempt failed: `Pending` and `Retryable` are retried by the readiness loop,
 /// `Fatal` is raised.
 #[derive(Debug, thiserror::Error)]
-pub enum DiscoveryError {
+enum DiscoveryError {
     /// The endpoint is healthy but has not published a complete worker set.
     #[error("{0}")]
     Pending(String),
@@ -43,7 +43,7 @@ fn invalid(message: impl Into<String>) -> DiscoveryError {
 }
 
 /// `parse_dynamo_worker`: the single bound worker serving `model_name`.
-pub fn parse_dynamo_worker(payload: &Value, model_name: &str, expected_admin_host: Option<&str>) -> Result<DynamoWorker, DiscoveryError> {
+fn parse_dynamo_worker(payload: &Value, model_name: &str, expected_admin_host: Option<&str>) -> Result<DynamoWorker, DiscoveryError> {
     if payload.get("protocol_version") != Some(&json!(1)) {
         return Err(invalid("Dynamo snapshot must have protocol_version 1"));
     }
@@ -100,7 +100,7 @@ pub fn parse_dynamo_worker(payload: &Value, model_name: &str, expected_admin_hos
 }
 
 /// `resolve_dynamo_discovery_url`: explicit URL, else `base_url` with port + 1 and no path.
-pub fn resolve_dynamo_discovery_url(config: &PolicyClientConfig) -> Result<String> {
+fn resolve_dynamo_discovery_url(config: &PolicyClientConfig) -> Result<String> {
     let dynamo = config.dynamo.as_ref().filter(|d| d.enabled).ok_or_else(|| anyhow!("Dynamo discovery is not enabled"))?;
     if let Some(url) = &dynamo.discovery_url {
         return Ok(url.clone());
@@ -129,7 +129,7 @@ fn discovery_headers(config: &PolicyClientConfig) -> IndexMap<String, String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NcclState {
+enum NcclState {
     Uninitialized,
     Initializing,
     Ready,
@@ -141,18 +141,18 @@ pub struct DynamoAdminPlane {
     discovery_url: String,
     discovery_host: String,
     model_name: String,
-    pub poll_interval: Duration,
+    poll_interval: Duration,
     timeout: u64,
     skip_model_check: bool,
     headers: IndexMap<String, String>,
     frontend_clients: Vec<AdminClient>,
     clients: Vec<AdminClient>,
     fingerprint: Option<(u64, String)>,
-    pub nccl_state: NcclState,
+    nccl_state: NcclState,
 }
 
 impl DynamoAdminPlane {
-    pub fn new(config: &PolicyClientConfig, model_name: &str) -> Result<Self> {
+    pub(crate) fn new(config: &PolicyClientConfig, model_name: &str) -> Result<Self> {
         let discovery_url = resolve_dynamo_discovery_url(config)?;
         let parsed = url::Url::parse(&discovery_url).map_err(|_| anyhow!("dynamo.discovery_url must be a valid URL"))?;
         if !matches!(parsed.scheme(), "http" | "https")
@@ -179,11 +179,7 @@ impl DynamoAdminPlane {
         })
     }
 
-    pub fn discovery_url(&self) -> &str {
-        &self.discovery_url
-    }
-
-    pub fn clients(&self) -> &[AdminClient] {
+    pub(crate) fn clients(&self) -> &[AdminClient] {
         &self.clients
     }
 
@@ -201,7 +197,7 @@ impl DynamoAdminPlane {
     }
 
     /// One `GET /v1/rl/workers` snapshot.
-    pub async fn discover(&self) -> Result<DynamoWorker, DiscoveryError> {
+    async fn discover(&self) -> Result<DynamoWorker, DiscoveryError> {
         let timeout = self.worker_timeout();
         let http = reqwest::Client::builder()
             .default_headers(header_map(&self.headers)?)
@@ -231,7 +227,7 @@ impl DynamoAdminPlane {
         Ok(deadline - now)
     }
 
-    pub async fn wait_for_ready(&mut self, model_name: &str) -> Result<()> {
+    pub(crate) async fn wait_for_ready(&mut self, model_name: &str) -> Result<()> {
         if model_name != self.model_name {
             bail!("Dynamo admin plane was configured for '{}', not '{model_name}'", self.model_name);
         }
@@ -288,7 +284,7 @@ impl DynamoAdminPlane {
     }
 
     /// Fail when the worker topology changed since it was pinned (confirmed by two snapshots).
-    pub async fn ensure_topology_current(&self) -> Result<()> {
+    async fn ensure_topology_current(&self) -> Result<()> {
         if self.nccl_state == NcclState::Terminal {
             bail!("Dynamo administration is in a terminal state; restart is required");
         }
@@ -351,7 +347,7 @@ impl DynamoAdminPlane {
         Ok(())
     }
 
-    pub async fn update_weights(
+    pub(crate) async fn update_weights(
         &mut self,
         weight_dir: Option<&Path>,
         transport: Transport,
@@ -395,7 +391,7 @@ impl DynamoAdminPlane {
         Ok(UpdateTimes { pause: vec![pause], transfer: vec![transfer], resume: vec![resume] })
     }
 
-    pub async fn initialize_nccl(&mut self, host: &str, port: u16, timeout: u64, inference_world_size: u64) -> Result<()> {
+    pub(crate) async fn initialize_nccl(&mut self, host: &str, port: u16, timeout: u64, inference_world_size: u64) -> Result<()> {
         if self.nccl_state != NcclState::Uninitialized {
             bail!("Dynamo NCCL can only be initialized once; restart the inference workers before retrying");
         }
@@ -496,7 +492,7 @@ mod tests {
     fn discovery_url_derivation() {
         let plane = crate::clients::AdminPlane::setup(&policy_config("http://worker:8000/v1", None, true), MODEL, None).unwrap();
         let crate::clients::AdminPlane::Dynamo(plane) = plane else { panic!("expected dynamo") };
-        assert_eq!(plane.discovery_url(), "http://worker:8001");
+        assert_eq!(plane.discovery_url, "http://worker:8001");
         assert_eq!(plane.discovery_endpoint(), "http://worker:8001/v1/rl/workers");
         let disabled = crate::clients::AdminPlane::setup(&policy_config("http://worker:8000/v1", None, false), MODEL, None).unwrap();
         assert!(matches!(disabled, crate::clients::AdminPlane::Standard(_)));
