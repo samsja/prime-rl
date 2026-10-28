@@ -4,6 +4,8 @@ use anyhow::{ensure, Result};
 use indexmap::IndexMap;
 use prl_io::ckpt::{PyRandom, TrainSourceState};
 use prl_types::{Metrics, TaskRecord};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::curriculum::{Curriculum, CurriculumConfig, GroupOutcome, Tasks};
 use crate::eval_source::TaskRequest;
@@ -98,6 +100,78 @@ impl TrainSource {
             curriculum.load(&state.envs[name]).await?;
         }
         Ok(state.envs.keys().filter(|name| self.curricula.contains_key(*name)).cloned().collect())
+    }
+}
+
+// ── actor ──────────────────────────────────────────────────────────────────
+
+enum Command {
+    NextTask { step: u64, reply: oneshot::Sender<Result<TaskRequest>> },
+    OnResult { env_name: String, outcome: GroupOutcome, reply: oneshot::Sender<Result<bool>> },
+    Metrics { reply: oneshot::Sender<Metrics> },
+    State { reply: oneshot::Sender<TrainSourceState> },
+}
+
+/// Handle onto the train source actor: the dispatcher draws tasks, the train pipeline
+/// reports finalized groups, reads metrics at ship time and snapshots it for checkpoints.
+#[derive(Clone)]
+pub struct TrainSourceHandle {
+    tx: mpsc::UnboundedSender<Command>,
+}
+
+fn stopped() -> anyhow::Error {
+    anyhow::anyhow!("train source stopped")
+}
+
+impl TrainSourceHandle {
+    pub async fn next_task(&self, step: u64) -> Result<TaskRequest> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::NextTask { step, reply }).map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
+    pub async fn on_result(&self, env_name: &str, outcome: GroupOutcome) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::OnResult { env_name: env_name.to_owned(), outcome, reply }).map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())?
+    }
+
+    pub async fn metrics(&self) -> Result<Metrics> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::Metrics { reply }).map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())
+    }
+
+    pub async fn state(&self) -> Result<TrainSourceState> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::State { reply }).map_err(|_| stopped())?;
+        rx.await.map_err(|_| stopped())
+    }
+}
+
+impl TrainSource {
+    /// Run as an actor until every handle is dropped.
+    pub fn spawn(mut self) -> (TrainSourceHandle, JoinHandle<()>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    Command::NextTask { step, reply } => {
+                        let _ = reply.send(self.next_task(step).await);
+                    }
+                    Command::OnResult { env_name, outcome, reply } => {
+                        let _ = reply.send(self.on_result(&env_name, &outcome));
+                    }
+                    Command::Metrics { reply } => {
+                        let _ = reply.send(self.metrics());
+                    }
+                    Command::State { reply } => {
+                        let _ = reply.send(self.state());
+                    }
+                }
+            }
+        });
+        (TrainSourceHandle { tx }, task)
     }
 }
 

@@ -27,6 +27,25 @@ pub trait SavedEpisode {
     fn set_group(&mut self, group_id: &str);
 }
 
+impl SavedEpisode for prl_wire::Episode {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn env_key(&self) -> &str {
+        self.env.name.as_deref().unwrap_or(&self.env.id)
+    }
+
+    fn task_hash(&self) -> String {
+        // Saved records always carry the task hash the orchestrator stamped at dispatch.
+        self.task.hash.clone().unwrap_or_default()
+    }
+
+    fn set_group(&mut self, group_id: &str) {
+        self.group = Some(prl_wire::GroupInfo { id: group_id.to_owned() });
+    }
+}
+
 /// One eval env as the source sees it.
 #[derive(Debug, Clone)]
 pub struct EvalEnvTasks {
@@ -155,6 +174,10 @@ impl EvalSource {
         let (cancelled, kept): (Vec<_>, Vec<_>) = self.queue.drain(..).partition(|r| r.step == step);
         self.queue = kept.into();
         cancelled
+    }
+
+    pub fn queued(&self) -> impl Iterator<Item = &TaskRequest> {
+        self.queue.iter()
     }
 
     pub fn len(&self) -> usize {
