@@ -1040,6 +1040,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "prl-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "prl-monitors",
+ "prl-types",
+ "prl-wire",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
 name = "prl-io"
 version = "0.1.0"
 dependencies = [
