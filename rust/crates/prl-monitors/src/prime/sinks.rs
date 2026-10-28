@@ -26,6 +26,14 @@ pub const MAX_BATCH_LINES: usize = 1_000_000;
 pub const DEFAULT_TARGET_BATCH_BYTES: usize = 30 * MIB;
 pub const UPLOAD_MAX_ATTEMPTS: u32 = 5;
 
+/// Python routes episodes to the legacy sample tables when Prime Traces is off for the
+/// account; that fallback is not ported.
+fn warn_no_legacy_samples() {
+    tracing::warn!(
+        "The legacy samples fallback is not available in the Rust orchestrator; episodes of this run are not uploaded"
+    );
+}
+
 /// A copy of `record` keyed to this run: `run.id`/`run.type` on the envelope and every member trace.
 pub fn stamp_run(record: &Value, run_id: &str, run_type: &str) -> Value {
     fn rekey(run: Option<&Value>, run_id: &str, run_type: &str) -> Value {
@@ -282,6 +290,7 @@ impl TracesSink {
     pub fn opt_out(&mut self) {
         self.service_not_enabled = true;
         self.retire_quietly("opted out of Prime Traces; uploading to legacy samples");
+        warn_no_legacy_samples();
     }
 
     fn retire_quietly(&mut self, reason: &str) {
@@ -356,9 +365,7 @@ impl Sink<EpisodeRef> for TracesSink {
                     self.retire_quietly(&format!(
                         "Prime Traces is not enabled for this account ({message}); continuing with legacy samples"
                     ));
-                    tracing::warn!(
-                        "The legacy samples fallback is not available in the Rust orchestrator; episodes of this run are not uploaded"
-                    );
+                    warn_no_legacy_samples();
                     return Ok(());
                 }
                 if self.enabled {

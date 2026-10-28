@@ -79,12 +79,8 @@ impl Run {
         } = options;
         spec.team_id = spec.team_id.or_else(|| settings.team_id());
         let base_url = base_url.unwrap_or_else(|| settings.base_url());
-        if mode == Mode::Online && settings.traces_opt_out()? {
-            return Err(ApiError::Configuration(
-                "Opting out of Prime Traces sends samples to the legacy tables, which the Rust orchestrator does not support"
-                    .into(),
-            ));
-        }
+        // Resolved before any platform call: a bad value fails here, not after the run exists.
+        let opted_out = mode == Mode::Online && settings.traces_opt_out()?;
         let mut run = Run {
             id: String::new(),
             url: None,
@@ -133,7 +129,7 @@ impl Run {
         if let Some(model) = &spec.model {
             context.push(("model", model.clone()));
         }
-        let traces = TracesSink::new(
+        let mut traces = TracesSink::new(
             &api_key,
             spec.team_id.clone(),
             &settings.traces_url(),
@@ -141,6 +137,9 @@ impl Run {
             kind.as_str(),
             &context,
         )?;
+        if opted_out {
+            traces.opt_out();
+        }
         let cooldown = (kind == RunKind::Train).then_some(TRAIN_RETIRE_COOLDOWN);
         run.samples = UploadWorker::spawn(
             vec![Box::new(traces) as Box<dyn Sink<EpisodeRef>>],

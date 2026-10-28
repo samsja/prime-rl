@@ -52,6 +52,57 @@ impl Settings {
         Settings { file }
     }
 
+    /// `prime_sandboxes.Config`: the config file with the prime CLI's `$PRIME_CONTEXT` profile
+    /// (`~/.prime/environments/<context>.json`) laid over it. Only the monitors' credential
+    /// check reads it; the SDK settings (`load`) do not overlay the profile.
+    pub fn load_with_context() -> Result<Self, ApiError> {
+        let mut settings = Settings::load();
+        let Some(context) = env_nonempty("PRIME_CONTEXT") else {
+            return Ok(settings);
+        };
+        if context.to_lowercase() == "production" {
+            settings
+                .file
+                .insert("base_url".into(), DEFAULT_BASE_URL.into());
+            for key in ["team_id", "team_name", "team_role"] {
+                settings.file.insert(key.into(), Json::Null);
+            }
+            return Ok(settings);
+        }
+        if !context
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(ApiError::Configuration(format!(
+                "Invalid context name: {context:?}"
+            )));
+        }
+        let path = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(".prime/environments")
+            .join(format!("{context}.json"));
+        if !path.exists() {
+            return Err(ApiError::Configuration(format!(
+                "Context file not found: {}",
+                path.display()
+            )));
+        }
+        let overlay = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|data| serde_json::from_slice::<Json>(&data).map_err(|e| e.to_string()))
+            .map_err(|e| {
+                ApiError::Configuration(format!("Failed to load context '{context}': {e}"))
+            })?;
+        let Json::Object(overlay) = overlay else {
+            return Err(ApiError::Configuration(format!(
+                "Invalid context '{context}': expected a JSON object"
+            )));
+        };
+        settings.file.extend(overlay);
+        Ok(settings)
+    }
+
     fn file_str(&self, key: &str) -> Option<String> {
         self.file
             .get(key)

@@ -35,7 +35,10 @@ pub fn prime_mode() -> Result<Mode> {
     if let Some(mode) = std::env::var(MODE_ENV).ok().filter(|m| !m.is_empty()) {
         return Ok(Mode::parse(&mode)?);
     }
-    if Settings::load().api_key().is_empty() {
+    // `os.getenv("PRIME_API_KEY") or PrimeConfig().api_key`: the profile is only read without the env var
+    if std::env::var("PRIME_API_KEY").map_or(true, |k| k.is_empty())
+        && Settings::load_with_context()?.api_key().is_empty()
+    {
         return Err(anyhow!(
             "The prime monitor found no Prime API key. Authenticate with `prime login` (or set PRIME_API_KEY), or {OFF_HINT}"
         ));

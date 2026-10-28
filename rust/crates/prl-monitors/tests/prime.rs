@@ -306,6 +306,60 @@ async fn prime_train_monitor_against_mock_platform() {
         json!({"status": "failed", "error_message": "crashed: process exited without finishing the run"})
     );
 
+    // Opted out of Prime Traces: the run works, episodes never reach Prime Traces.
+    log.lock().unwrap().clear();
+    unsafe { std::env::set_var("PRIME_TRACES_OPT_OUT", "1") };
+    let (monitors, task, _cancel) = start(out.path()).await;
+    monitors
+        .log_episodes(eps[..1].to_vec(), 3, Kind::Train, Subset::All)
+        .await;
+    monitors.finalize(false).await;
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        paths(&log),
+        ["/api/v1/rft/external-runs", "/api/v1/rft/finalize"]
+    );
+    // an invalid value fails registration, as in Python
+    unsafe { std::env::set_var("PRIME_TRACES_OPT_OUT", "maybe") };
+    let err = prl_monitors::spawn(setup(out.path()), CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        err.to_string()
+            .contains("PRIME_TRACES_OPT_OUT=\"maybe\" is not one of true or false"),
+        "{err}"
+    );
+    unsafe { std::env::remove_var("PRIME_TRACES_OPT_OUT") };
+
+    // A $PRIME_CONTEXT profile can carry the key the credential check needs; a bad one fails.
+    unsafe {
+        std::env::remove_var("PRIME_API_KEY");
+        std::env::set_var("PRIME_CONTEXT", "../x");
+    }
+    let err = prl_monitors::spawn(setup(out.path()), CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("Invalid context name"), "{err}");
+    std::fs::create_dir_all(home.path().join(".prime/environments")).unwrap();
+    std::fs::write(
+        home.path().join(".prime/environments/dev.json"),
+        r#"{"api_key": "ctx-key"}"#,
+    )
+    .unwrap();
+    unsafe { std::env::set_var("PRIME_CONTEXT", "dev") };
+    // the profile satisfies the check, but the SDK settings do not read profiles (as in Python)
+    let err = prl_monitors::spawn(setup(out.path()), CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("needs an API key"), "{err}");
+    unsafe {
+        std::env::remove_var("PRIME_CONTEXT");
+        std::env::set_var("PRIME_API_KEY", "key");
+    }
+
     // An attached run ($RUN_ID) registers nothing and leaves a crash to the launcher.
     log.lock().unwrap().clear();
     unsafe { std::env::set_var("RUN_ID", "launched") };
