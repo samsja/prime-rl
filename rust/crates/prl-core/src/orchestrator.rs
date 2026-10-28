@@ -233,7 +233,7 @@ struct Orchestrator {
     train: crate::train_pipeline::TrainPipelineHandle,
     train_pipeline: Option<(TrainPipeline, crate::train_pipeline::TrainPipelineInbox, mpsc::Receiver<prl_types::DispatchResult<prl_wire::Episode>>)>,
     watcher: Option<WeightWatcher<WeightReceiver>>,
-    policy: watch::Receiver<Policy>,
+    applied: watch::Receiver<u64>,
     idle: watch::Receiver<bool>,
     monitors: Monitors,
     view: PipelineView,
@@ -391,6 +391,9 @@ impl Orchestrator {
 
         // Shared values.
         let (policy_tx, policy_rx) = watch::channel(Policy { version: 0, model_name: policy_client.model_name.clone() });
+        // Written once a policy update's hooks (eval trigger, dispatcher resume) all ran: the
+        // waits for a version use it, so they never overtake the eval trigger of that version.
+        let (applied_tx, applied_rx) = watch::channel(0u64);
         let concurrency = ConcurrencyController::new(
             ConcurrencyParams {
                 min_inflight: config.concurrency.min_inflight as usize,
@@ -529,7 +532,7 @@ impl Orchestrator {
                 sink,
                 source_handle.clone(),
                 progress.clone(),
-                policy_rx.clone(),
+                applied_rx.clone(),
                 dispatcher_handle.clone(),
                 packer,
                 sender,
@@ -558,7 +561,8 @@ impl Orchestrator {
                 resume_step,
                 receiver,
                 policy_tx,
-                policy_rx,
+                applied_tx,
+                applied_rx,
                 idle_rx,
                 sync_version,
                 controller,
@@ -589,7 +593,8 @@ impl Orchestrator {
         resume_step: Option<u64>,
         receiver: WeightReceiver,
         policy_tx: watch::Sender<Policy>,
-        policy_rx: watch::Receiver<Policy>,
+        applied_tx: watch::Sender<u64>,
+        applied_rx: watch::Receiver<u64>,
         idle_rx: watch::Receiver<bool>,
         sync_version: u64,
         controller: Option<Controller>,
@@ -642,7 +647,7 @@ impl Orchestrator {
         }
         hooks.push(Box::new(ResumeDispatch(dispatcher.clone())));
         let (mut watcher, watcher_gauges) =
-            WeightWatcher::new(receiver, policy_tx, vec![Box::new(dispatcher.clone())], hooks, sync_version);
+            WeightWatcher::new(receiver, policy_tx, applied_tx, vec![Box::new(dispatcher.clone())], hooks, sync_version);
 
         let (lag, lag_task) = lag::spawn(cancel.child_token());
         tokio::spawn(async move {
@@ -673,7 +678,7 @@ impl Orchestrator {
             train,
             train_pipeline: Some(train_pipeline),
             watcher: Some(watcher),
-            policy: policy_rx,
+            applied: applied_rx,
             idle: idle_rx,
             monitors,
             view,
@@ -717,8 +722,8 @@ impl Orchestrator {
                 match max {
                     None => true,
                     Some(max) => {
-                        let mut policy = self.policy.clone();
-                        let wait = wait_for_version(&mut policy, max, "before shutdown", timeout, &self.cancel);
+                        let mut applied = self.applied.clone();
+                        let wait = wait_for_version(&mut applied, max, "before shutdown", timeout, &self.cancel);
                         tokio::select! {
                             r = wait => r.is_ok(),
                             failure = next_failure(&mut tasks) => { log_failure(&failure); false }

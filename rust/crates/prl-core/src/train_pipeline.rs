@@ -21,7 +21,7 @@ use prl_train::algo::routing::is_trainable;
 use prl_train::sink::{Admission, TrainBatch, TrainSink};
 use prl_train::staleness::{rollout_staleness, Staleness};
 use prl_train::{BatchPacker, BatchSender, TrainEpisodes};
-use prl_types::{DispatchResult, Kind, Metrics, Policy, Progress, Subset};
+use prl_types::{DispatchResult, Kind, Metrics, Progress, Subset};
 use prl_wire::{Episode, RunInfo};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -133,7 +133,8 @@ pub struct TrainPipeline {
     pub source: TrainSourceHandle,
     pub progress: Progress,
     pub step_tx: watch::Sender<u64>,
-    pub policy: watch::Receiver<Policy>,
+    /// The last policy version whose update hooks all ran.
+    pub applied: watch::Receiver<u64>,
     pub dispatcher: DispatcherHandle,
     pub packer: Arc<BatchPacker>,
     pub sender: BatchSender,
@@ -154,7 +155,7 @@ impl TrainPipeline {
         sink: TrainSink,
         source: TrainSourceHandle,
         progress: Progress,
-        policy: watch::Receiver<Policy>,
+        applied: watch::Receiver<u64>,
         dispatcher: DispatcherHandle,
         packer: Arc<BatchPacker>,
         sender: BatchSender,
@@ -174,7 +175,7 @@ impl TrainPipeline {
             source,
             progress,
             step_tx,
-            policy,
+            applied,
             dispatcher,
             packer,
             sender,
@@ -383,7 +384,7 @@ impl TrainPipeline {
     }
 
     async fn wait_for_version(&mut self, version: u64, reason: &str, cancel: &CancellationToken) -> Result<()> {
-        wait_for_version(&mut self.policy, version, reason, self.config.weight_broadcast_timeout, cancel).await
+        wait_for_version(&mut self.applied, version, reason, self.config.weight_broadcast_timeout, cancel).await
     }
 
     async fn finalize_train_batch(&mut self, batch: TrainBatch, cancel: &CancellationToken) -> Result<()> {
@@ -500,21 +501,22 @@ impl TrainPipeline {
     }
 }
 
-/// Bounded wait until inference serves v{version}; warns and proceeds on timeout.
+/// Bounded wait until inference serves v{version} and its update hooks ran; warns and
+/// proceeds on timeout.
 pub async fn wait_for_version(
-    policy: &mut watch::Receiver<Policy>,
+    applied: &mut watch::Receiver<u64>,
     version: u64,
     reason: &str,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    if policy.borrow().version >= version {
+    if *applied.borrow() >= version {
         return Ok(());
     }
     info!("Waiting for inference to apply policy v{version} {reason}");
     tokio::select! {
         _ = cancel.cancelled() => bail!("cancelled while waiting for policy v{version}"),
-        result = tokio::time::timeout(timeout, policy.wait_for(|p| p.version >= version)) => match result {
+        result = tokio::time::timeout(timeout, applied.wait_for(|v| *v >= version)) => match result {
             Ok(changed) => { changed.map_err(|_| anyhow::anyhow!("policy watch closed"))?; }
             Err(_) => warn!(
                 "Inference did not apply policy v{version} within {}s — proceeding anyway",

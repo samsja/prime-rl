@@ -57,12 +57,15 @@ pub struct WeightWatcher<R: PolicyReceiver> {
     update_count: u64,
     update_times: IndexMap<String, Vec<f64>>,
     gauges: watch::Sender<Metrics>,
+    /// The last version whose update notifications (observers and hooks) all ran.
+    applied: watch::Sender<u64>,
 }
 
 impl<R: PolicyReceiver> WeightWatcher<R> {
     pub fn new(
         receiver: R,
         policy: watch::Sender<Policy>,
+        applied: watch::Sender<u64>,
         observers: Vec<Box<dyn VersionObserver>>,
         hooks: Vec<Box<dyn UpdateHook>>,
         ckpt_step: u64,
@@ -80,6 +83,7 @@ impl<R: PolicyReceiver> WeightWatcher<R> {
             update_count: 0,
             update_times: IndexMap::new(),
             gauges,
+            applied,
         };
         this.publish_gauges();
         (this, gauges_rx)
@@ -154,6 +158,7 @@ impl<R: PolicyReceiver> WeightWatcher<R> {
         for hook in &self.hooks {
             hook.on_update(step).await?;
         }
+        self.applied.send_replace(step);
         Ok(())
     }
 
@@ -239,9 +244,11 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let published = Arc::new(Mutex::new(0));
         let (policy_tx, mut policy_rx) = watch::channel(Policy::default());
+        let (applied_tx, _applied) = watch::channel(0);
         let (mut w, gauges) = WeightWatcher::new(
             FakeReceiver { published: published.clone(), log: log.clone() },
             policy_tx,
+            applied_tx,
             vec![Box::new(Obs(log.clone()))],
             vec![Box::new(Hook(log.clone()))],
             0,
