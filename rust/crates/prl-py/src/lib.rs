@@ -1,6 +1,7 @@
 //! Python extension module `prime_rl_orch_rs`: entry point of the Rust orchestrator.
 
 pub mod bridge;
+pub mod eval;
 pub mod nixl;
 pub mod wandb;
 
@@ -75,5 +76,7 @@ fn run(py: Python<'_>, config: &Bound<'_, PyAny>, bridge: Py<PyAny>) -> PyResult
 #[pymodule]
 fn prime_rl_orch_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
+    m.add_function(wrap_pyfunction!(eval::run_eval, m)?)?;
+    m.add_function(wrap_pyfunction!(eval::run_online_eval, m)?)?;
     Ok(())
 }
