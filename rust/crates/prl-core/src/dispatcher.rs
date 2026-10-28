@@ -509,6 +509,11 @@ impl Dispatcher {
 
     /// Log gate transitions on every step / policy change (`update_dispatch_gate`).
     fn update_gate(&mut self) {
+        // Python evaluates the gate first when the startup policy is applied; transitions
+        // before the dispatcher starts are not logged.
+        if !self.started {
+            return;
+        }
         let Some((lead, step, version)) = self.lead() else { return };
         let open = lead <= TARGET_LAG;
         if open == self.gate_open {
@@ -1090,7 +1095,10 @@ impl Dispatcher {
     /// Returns `true` when the actor should exit.
     async fn handle_command(&mut self, cmd: Command) -> bool {
         match cmd {
-            Command::Start => self.started = true,
+            Command::Start => {
+                self.started = true;
+                self.gate_open = self.gate_allows();
+            }
             Command::SwitchMode { mode, reason } => self.switch_mode(mode, &reason),
             Command::VersionPending { ack } => {
                 self.policy_update_pending = true;

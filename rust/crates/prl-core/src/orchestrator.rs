@@ -355,9 +355,7 @@ impl Orchestrator {
                 config.resume.as_ref().and_then(|r| r.dir.as_ref()).map(|dir| dir.join("orchestrator"));
             let state = ckpt.load(step, path.as_deref())?;
             progress = state.progress.clone();
-            for name in train_source.load(&state.train_source).await? {
-                info!("Resumed curriculum state for env {name}");
-            }
+            train_source.load(&state.train_source).await?;
             progress.step = step + 1;
         }
 
