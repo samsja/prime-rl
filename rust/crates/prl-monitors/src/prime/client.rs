@@ -1,6 +1,6 @@
 //! The platform HTTP layer shared by the Prime monitors: settings (`prime_traces.core.Config`
-//! + `prime_runs.Config`), error mapping (`prime_traces.core.client.raise_for_response`), and the
-//! authenticated platform client with its per-call retry policy (`prime_runs._http`).
+//! and `prime_runs.Config`), error mapping (`prime_traces.core.client.raise_for_response`), and
+//! the authenticated platform client with its per-call retry policy (`prime_runs._http`).
 
 use std::path::PathBuf;
 use std::time::Duration;

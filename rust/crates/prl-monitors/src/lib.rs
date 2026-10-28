@@ -34,25 +34,9 @@ pub use wandb::{WandbBridge, WandbMonitor};
 pub const RECORD_FLOAT_DECIMALS: u32 = 4;
 const INBOX: usize = 1024;
 
-/// An episode as the monitors serialize it: `Episode.to_record(float_decimals)`.
-pub trait EpisodeRecord: Send + Sync + 'static {
-    fn to_record(&self, float_decimals: Option<u32>) -> Value;
-}
-
-pub type EpisodeRef = Arc<dyn EpisodeRecord>;
-
-impl EpisodeRecord for prl_wire::Episode {
-    fn to_record(&self, float_decimals: Option<u32>) -> Value {
-        prl_wire::Episode::to_record(self, float_decimals)
-    }
-}
-
-/// An already-serialized record (tests, replays).
-impl EpisodeRecord for Value {
-    fn to_record(&self, _float_decimals: Option<u32>) -> Value {
-        self.clone()
-    }
-}
+/// Episodes are shared with the sinks: the arrival record is serialized later, off the
+/// producer's path, while the same episode flows on.
+pub type EpisodeRef = Arc<prl_wire::Episode>;
 
 /// One monitor (`prime_rl.monitors.base.Monitor`). Monitors that only carry scalars ignore the
 /// rest through the default no-ops.
@@ -143,14 +127,13 @@ impl Monitors {
         self.send(MonitorMsg::Metrics { row, step }).await
     }
 
-    pub async fn log_episodes<E: EpisodeRecord>(
+    pub async fn log_episodes(
         &self,
-        episodes: Vec<Arc<E>>,
+        episodes: Vec<EpisodeRef>,
         step: u64,
         kind: Kind,
         subset: Subset,
     ) {
-        let episodes = episodes.into_iter().map(|e| e as EpisodeRef).collect();
         self.send(MonitorMsg::Episodes {
             episodes,
             step,
@@ -178,13 +161,7 @@ impl Monitors {
         .await
     }
 
-    pub async fn log_eval_epoch<E: EpisodeRecord>(
-        &self,
-        env_name: String,
-        step: u64,
-        episodes: Vec<Arc<E>>,
-    ) {
-        let episodes = episodes.into_iter().map(|e| e as EpisodeRef).collect();
+    pub async fn log_eval_epoch(&self, env_name: String, step: u64, episodes: Vec<EpisodeRef>) {
         self.send(MonitorMsg::EvalEpoch {
             env_name,
             step,
@@ -305,6 +282,52 @@ pub struct MonitorsSetup {
     pub eval_env_names: Vec<String>,
     /// `"rl"`, `"sft"` or `"eval"`: which curated W&B overview to provision.
     pub overview_flavor: String,
+}
+
+impl MonitorsSetup {
+    /// The orchestrator's `monitors.setup(producer="orch", ...)`.
+    pub fn from_orchestrator(
+        config: &prl_config::OrchestratorConfig,
+        wandb: Option<Box<dyn WandbBridge>>,
+    ) -> Self {
+        let sources = &config.train.source;
+        let prime = config
+            .monitors
+            .prime
+            .as_ref()
+            .map(|prime| PrimeSetup::Train {
+                name: prime.name.clone(),
+                run: Some(PrimeTrainSetup {
+                    name: prime.name.clone(),
+                    model: config.model.name.clone(),
+                    environments: sources.iter().map(|s| s.env_id.clone()).collect(),
+                    training: prime::backend::TrainingSpec {
+                        max_steps: config.max_steps.unwrap_or(0),
+                        batch_size: Some(config.batch_size),
+                        rollouts_per_example: sources.iter().map(|s| s.group_size).max(),
+                        seq_len: Some(config.seq_len),
+                        wandb_project: config.monitors.wandb.as_ref().map(|w| w.project.clone()),
+                    },
+                    run_config: config
+                        .prime_run_config
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
+                }),
+            });
+        MonitorsSetup {
+            output_dir: config.output_dir.clone(),
+            producer: Some("orch".into()),
+            prime,
+            wandb,
+            file: config.monitors.file.as_ref().map(FileMonitorConfig::from),
+            train_env_names: sources.iter().map(|s| s.resolved_name.clone()).collect(),
+            eval_env_names: config.eval.as_ref().map_or_else(Vec::new, |e| {
+                e.source.iter().map(|s| s.resolved_name.clone()).collect()
+            }),
+            overview_flavor: "rl".into(),
+        }
+    }
 }
 
 /// Construct and initialize every configured monitor (only on rank 0), then start the actor.

@@ -85,19 +85,23 @@ fn without_time(data: &[u8]) -> String {
         .collect()
 }
 
+fn episodes() -> Vec<Arc<prl_wire::Episode>> {
+    json_lines("records.jsonl")
+        .into_iter()
+        .map(|(line, _)| Arc::new(prl_wire::Episode::from_record_json(&line).unwrap()))
+        .collect()
+}
+
 #[test]
-fn records_round_trip_through_the_orjson_writer() {
-    for (line, record) in json_lines("records.jsonl") {
-        assert_eq!(prl_wire::json::to_vec(&record), line);
+fn records_round_trip() {
+    for ((line, _), episode) in json_lines("records.jsonl").into_iter().zip(episodes()) {
+        assert_eq!(episode.to_json(Some(4)), line);
     }
 }
 
 #[test]
 fn file_monitor_matches_python() {
-    let records: Vec<Arc<Value>> = json_lines("records.jsonl")
-        .into_iter()
-        .map(|(_, r)| Arc::new(r))
-        .collect();
+    let records = episodes();
     let updates: Vec<Value> = json_lines("updates.jsonl")
         .into_iter()
         .map(|(_, u)| u)
@@ -168,10 +172,7 @@ fn file_monitor_matches_python() {
 
 #[test]
 fn relaunch_continues_index_numbering() {
-    let records: Vec<Arc<Value>> = json_lines("records.jsonl")
-        .into_iter()
-        .map(|(_, r)| Arc::new(r))
-        .collect();
+    let records = episodes();
     let dir = tempfile::tempdir().unwrap();
     for _ in 0..2 {
         let mut monitor =

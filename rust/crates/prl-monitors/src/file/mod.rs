@@ -22,7 +22,7 @@ use prl_wire::Value;
 use serde::Deserialize;
 
 use crate::pyjson::{dumps_row, sanitize, Row, Scalar};
-use crate::{EpisodeRecord, EpisodeRef, Monitor};
+use crate::{EpisodeRef, Monitor};
 use chunks::ChunkedJsonl;
 use live::{LiveEvent, LiveWriter};
 
@@ -50,6 +50,17 @@ fn default_true() -> bool {
 }
 fn default_float_decimals() -> Option<u32> {
     Some(4)
+}
+
+impl From<&prl_config::FileMonitorConfig> for FileMonitorConfig {
+    fn from(c: &prl_config::FileMonitorConfig) -> Self {
+        FileMonitorConfig {
+            path: c.path.clone(),
+            chunk_bytes: c.chunk_bytes,
+            compress: c.compress,
+            float_decimals: c.float_decimals,
+        }
+    }
 }
 
 impl Default for FileMonitorConfig {
@@ -223,9 +234,9 @@ impl FileMonitor {
 
     /// Append each episode of the `all` subset to the trace stream as it completes, with its
     /// index row. The `effective` cohort writes no second copy.
-    pub fn log_episodes<E: EpisodeRecord + ?Sized>(
+    pub fn log_episodes(
         &mut self,
-        episodes: &[std::sync::Arc<E>],
+        episodes: &[EpisodeRef],
         _step: u64,
         _kind: Kind,
         subset: Subset,
