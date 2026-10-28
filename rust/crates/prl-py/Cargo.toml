@@ -18,6 +18,9 @@ prl-types = { workspace = true }
 prl-config = { workspace = true }
 prl-monitors = { workspace = true }
 prl-io = { workspace = true }
+prl-core = { workspace = true }
+tokio-util = { workspace = true }
+prl-eval = { path = "../prl-eval" }
 async-trait = { workspace = true }
 pyo3 = { workspace = true }
 tokio = { workspace = true }
@@ -25,7 +28,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = "0.25"
