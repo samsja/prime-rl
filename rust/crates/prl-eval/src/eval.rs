@@ -23,6 +23,7 @@ use crate::runner::EvalRunner;
 /// `monitors.setup(...)` of an eval process.
 pub(crate) async fn setup_monitors(
     monitors: &EvalMonitorsConfig,
+    monitors_repr: &str,
     output_dir: &Path,
     producer: &str,
     overview_flavor: &str,
@@ -31,7 +32,7 @@ pub(crate) async fn setup_monitors(
     wandb: Option<Box<dyn WandbBridge>>,
     cancel: CancellationToken,
 ) -> Result<(Monitors, JoinHandle<Result<()>>)> {
-    info!("Initializing monitors ({})", monitors_repr(monitors));
+    info!("Initializing monitors ({monitors_repr})");
     let eval_env_names = sources.iter().map(|s| s.resolved_name.clone()).collect();
     let prime = monitors.prime.as_ref().map(|prime| {
         PrimeSetup::Eval(PrimeEvalSetup { name: prime.name.clone(), model: model.to_owned(), sources })
@@ -49,20 +50,15 @@ pub(crate) async fn setup_monitors(
     prl_monitors::spawn(setup, cancel).await
 }
 
-fn monitors_repr(monitors: &EvalMonitorsConfig) -> String {
-    let on = |set: bool, name: &str| set.then(|| name.to_owned());
-    let names: Vec<String> = [
-        on(monitors.wandb.is_some(), "wandb"),
-        on(monitors.file.is_some(), "file"),
-        on(monitors.prime.is_some(), "prime"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    names.join(", ")
-}
-
-pub async fn run_eval(config: EvalConfig, bridge: Arc<dyn Bridge>, wandb: Option<Box<dyn WandbBridge>>) -> Result<()> {
+/// Run `uv run eval`. `monitors_repr` is Python's `str(config.monitors)` for the init line;
+/// `shutdown` (a signal) stops the eval without finalizing the monitors, like a crash.
+pub async fn run_eval(
+    config: EvalConfig,
+    bridge: Arc<dyn Bridge>,
+    wandb: Option<Box<dyn WandbBridge>>,
+    monitors_repr: &str,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let cancel = CancellationToken::new();
     // Read and set aside before the monitors start: the resumed attempt writes a fresh stream.
     let landed = match &config.resume {
@@ -77,6 +73,7 @@ pub async fn run_eval(config: EvalConfig, bridge: Arc<dyn Bridge>, wandb: Option
         .collect();
     let (monitors, monitors_task) = setup_monitors(
         &config.monitors,
+        monitors_repr,
         &config.run_dir,
         "eval",
         "eval",
@@ -86,7 +83,7 @@ pub async fn run_eval(config: EvalConfig, bridge: Arc<dyn Bridge>, wandb: Option
         cancel.child_token(),
     )
     .await?;
-    let result = run(&config, landed, monitors.clone(), bridge).await;
+    let result = run(&config, landed, monitors.clone(), bridge, &shutdown).await;
     if result.is_ok() {
         // Finalize only on a clean exit — a crashed run must not mark itself completed.
         monitors.finalize(false).await;
@@ -97,12 +94,17 @@ pub async fn run_eval(config: EvalConfig, bridge: Arc<dyn Bridge>, wandb: Option
     result
 }
 
-async fn run(config: &EvalConfig, landed: Vec<prl_wire::Episode>, monitors: Monitors, bridge: Arc<dyn Bridge>) -> Result<()> {
+async fn run(
+    config: &EvalConfig,
+    landed: Vec<prl_wire::Episode>,
+    monitors: Monitors,
+    bridge: Arc<dyn Bridge>,
+    shutdown: &CancellationToken,
+) -> Result<()> {
     resume::stamp_config(&config.run_dir, &config.dump)?;
-    let mut runner =
-        EvalRunner::setup(&config.served, &config.model, &config.run_dir, config.log.interval, None, monitors, bridge)
-            .await?;
-    let result = async {
+    let setup = EvalRunner::setup(&config.served, &config.model, &config.run_dir, config.log.interval, None, monitors, bridge);
+    let mut runner = until_shutdown(shutdown, setup).await?;
+    let body = async {
         let outcome = runner.trigger(0, false, landed).await?;
         if config.resume.is_some() {
             info!(
@@ -115,8 +117,16 @@ async fn run(config: &EvalConfig, landed: Vec<prl_wire::Episode>, monitors: Moni
         runner.run_epoch(outcome, 0, None).await?;
         runner.drain().await;
         Ok(())
-    }
-    .await;
+    };
+    let result = until_shutdown(shutdown, body).await;
     runner.stop().await;
     result
+}
+
+/// `fut`, or an error once `shutdown` fires (the future is dropped).
+pub(crate) async fn until_shutdown<T>(shutdown: &CancellationToken, fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::select! {
+        result = fut => result,
+        () = shutdown.cancelled() => anyhow::bail!("interrupted"),
+    }
 }

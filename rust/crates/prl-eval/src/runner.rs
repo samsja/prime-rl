@@ -97,7 +97,7 @@ use indexmap::IndexMap;
 use prl_config::{ConcurrencyConfig, OnlineEvalSourceConfig, ServedEvalConfig, Split};
 use prl_core::concurrency::{ConcurrencyController, ConcurrencyHandle, ConcurrencyIo, ConcurrencyParams};
 use prl_core::dispatcher::{
-    DispatchEnv, Dispatcher, DispatcherConfig, DispatcherHandle, DispatcherIo, EvalSide, TriggerOutcome,
+    DispatchEnv, Dispatcher, DispatcherConfig, DispatcherHandle, DispatcherIo, EvalSide, Mode, TriggerOutcome,
 };
 use prl_core::envs::{replica_address_files, start_env, ReplicaRouter, StartedEnv};
 use prl_core::eval_sink::{EvalEpoch, EvalSink};
@@ -419,7 +419,7 @@ impl EvalRunner {
 
     /// Fire the eligible envs at `step` (`EvalSource.trigger`), reusing `completed` episodes.
     pub async fn trigger(&self, step: u64, force: bool, completed: Vec<Episode>) -> Result<TriggerOutcome> {
-        self.dispatcher.trigger_eval(step, force, completed, format!("eval was triggered at step {step}")).await
+        self.dispatcher.trigger_eval(step, force, completed, None).await
     }
 
     /// Run the epoch `trigger` queued for `step` in the fired envs and finalize each env's
@@ -441,21 +441,20 @@ impl EvalRunner {
             self.triggered_at.insert((env.clone(), step), now);
         }
         info!("{}", starting_line(&fired, step, owed, restored.len()));
+        let mut cancelled: Option<(u64, usize)> = None;
+        // Check before the mode switch: the dispatcher schedules concurrently, so an epoch
+        // that is already superseded must not start episodes it would cancel right away.
+        self.cancel_if_superseded(step, &mut superseding_step, &mut cancelled).await?;
+        self.dispatcher.switch_mode(Mode::PreferEval, format!("eval was triggered at step {step}"))?;
 
         let mut pending: BTreeSet<String> = fired.iter().filter(|env| self.epoch_sizes[*env] > 0).cloned().collect();
         for episode in restored {
             self.land(episode, &mut pending).await?;
         }
-        let mut cancelled: Option<(u64, usize)> = None;
         let mut poll = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_S));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while !pending.is_empty() {
-            if cancelled.is_none() {
-                if let Some(newer) = superseding_step.as_mut().and_then(|f| f()) {
-                    warn!("Checkpoint {newer} is ready - cancelling unfinished eval episodes for step {step}");
-                    cancelled = Some((newer, self.dispatcher.cancel_eval_step(step).await?));
-                }
-            }
+            self.cancel_if_superseded(step, &mut superseding_step, &mut cancelled).await?;
             tokio::select! {
                 item = self.results.recv() => {
                     let Some(item) = item else { bail!("dispatcher stopped before the eval epoch finished") };
@@ -487,6 +486,23 @@ impl EvalRunner {
         }
         if let Some((newer, n)) = cancelled {
             warn!("Cancelled {n} unfinished eval episodes for step {step}; advancing to checkpoint {newer}");
+        }
+        Ok(())
+    }
+
+    /// Cancel the epoch's unfinished episodes once a newer checkpoint is ready (once per epoch).
+    async fn cancel_if_superseded(
+        &self,
+        step: u64,
+        superseding_step: &mut Option<&mut (dyn FnMut() -> Option<u64> + Send)>,
+        cancelled: &mut Option<(u64, usize)>,
+    ) -> Result<()> {
+        if cancelled.is_some() {
+            return Ok(());
+        }
+        if let Some(newer) = superseding_step.as_mut().and_then(|f| f()) {
+            warn!("Checkpoint {newer} is ready - cancelling unfinished eval episodes for step {step}");
+            *cancelled = Some((newer, self.dispatcher.cancel_eval_step(step).await?));
         }
         Ok(())
     }

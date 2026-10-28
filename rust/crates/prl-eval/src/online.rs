@@ -75,6 +75,7 @@ use prl_types::Bridge;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::eval::until_shutdown;
 use crate::runner::{EvalRunner, Schedule, POLL_INTERVAL_S};
 
 /// Budget for the trainer's startup broadcast: it is always coming, but only after the trainer
@@ -105,6 +106,8 @@ pub async fn run_online_eval(
     bridge: Arc<dyn Bridge>,
     wandb: Option<Box<dyn WandbBridge>>,
     nixl: Option<Box<dyn NixlBridge>>,
+    monitors_repr: &str,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let model = config.model.clone().context("the sft launcher fills eval.model")?;
     let cancel = CancellationToken::new();
@@ -116,6 +119,7 @@ pub async fn run_online_eval(
         .collect();
     let (monitors, monitors_task) = crate::eval::setup_monitors(
         &config.monitors,
+        monitors_repr,
         &config.output_dir,
         "online-eval",
         "sft",
@@ -125,7 +129,7 @@ pub async fn run_online_eval(
         cancel.child_token(),
     )
     .await?;
-    let result = run(&config, &model, monitors.clone(), bridge, nixl).await;
+    let result = run(&config, &model, monitors.clone(), bridge, nixl, &shutdown).await;
     if result.is_ok() {
         // Finalize only on a clean exit — a crashed run must not mark the run completed.
         monitors.finalize(false).await;
@@ -142,16 +146,16 @@ async fn run(
     monitors: Monitors,
     bridge: Arc<dyn Bridge>,
     nixl: Option<Box<dyn NixlBridge>>,
+    shutdown: &CancellationToken,
 ) -> Result<()> {
     let schedule = Schedule {
         intervals: config.intervals.clone(),
         skip_first_step: config.skip_first_step,
         is_resumed: config.resume_step.is_some(),
     };
-    let mut runner =
-        EvalRunner::setup(&config.served, model, &config.output_dir, config.log.interval, Some(schedule), monitors, bridge)
-            .await?;
-    let result = async {
+    let setup = EvalRunner::setup(&config.served, model, &config.output_dir, config.log.interval, Some(schedule), monitors, bridge);
+    let mut runner = until_shutdown(shutdown, setup).await?;
+    let body = async {
         let broadcasts_dir = config.broadcasts_dir.clone().context("broadcasts_dir is resolved by the config")?;
         // A hand-written config may omit the transport; broadcasts are then plain filesystem checkpoints.
         let weight_broadcast = config
@@ -168,8 +172,8 @@ async fn run(
         runner.drain().await;
         prl_io::success!("Online evals finished!");
         Ok(())
-    }
-    .await;
+    };
+    let result = until_shutdown(shutdown, body).await;
     runner.stop().await;
     result
 }

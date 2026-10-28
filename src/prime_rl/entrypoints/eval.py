@@ -4,7 +4,6 @@ Defers heavy ML imports until after the config is parsed, so ``eval --help``
 short-circuits. The implementation lives in ``prime_rl.eval.eval``.
 """
 
-import asyncio
 import json
 import os
 import re
@@ -161,7 +160,10 @@ def main():
         return
 
     dashboard_url = ensure_dashboard(config.output_dir, logger) if config.dashboard else None
-    from prime_rl.eval.eval import run_eval
+    import prime_rl_orch_rs
+
+    from prime_rl.orchestrator.rust import PyBridge
+    from prime_rl.orchestrator.utils import intercept_vf_logging
 
     processes: list[Popen] = []
     for source in env_servers:
@@ -199,8 +201,13 @@ def main():
     links = run_links(config.run_dir, log_dir, monitors, eval_done.is_set)
     banner = threading.Thread(target=log_run_links, args=(dashboard_url, links), daemon=True)
     banner.start()
+    intercept_vf_logging(logger="verifiers.v1", level="WARN")
+    # The Rust eval appends to the same log file and keeps the console at ERROR while it runs.
     try:
-        asyncio.run(run_eval(config))
+        prime_rl_orch_rs.run_eval(config, PyBridge(config), log_file, "ERROR")
+    except RuntimeError as error:
+        logger.error(f"Fatal error in run_eval: {error}")
+        sys.exit(1)
     finally:
         eval_done.set()
         banner.join()

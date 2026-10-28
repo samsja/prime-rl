@@ -388,7 +388,7 @@ def sft_local(config: SFTConfig):
             logger.info("Starting online evals")
             processes.start(
                 "online-eval",
-                [sys.executable, "-m", "prime_rl.eval.online", "@", (config_dir / ONLINE_EVAL_CONFIG).as_posix()],
+                [sys.executable, "-m", "prime_rl.entrypoints.online_eval", "@", (config_dir / ONLINE_EVAL_CONFIG).as_posix()],
                 env={
                     **os.environ,
                     **DEFAULT_COMMON_ENV_VARS,
